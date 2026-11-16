@@ -5,7 +5,9 @@
 //! are later milestones.
 
 mod paint_adapter;
+mod text_layout;
 pub use paint_adapter::PaintAdapter;
+pub use text_layout::{TextLayout, layout_text};
 
 use bweb_css::ComputedStyleMap;
 use bweb_html::{HtmlDocument, NodeId, NodeKind};
