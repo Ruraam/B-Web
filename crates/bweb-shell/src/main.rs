@@ -66,10 +66,10 @@ fn update_filters() -> Result<(), Box<dyn Error>> {
 }
 
 fn filter_list_cache_directory() -> Result<PathBuf, io::Error> {
-    if let Some(path) = env::var_os("XDG_CACHE_HOME").map(PathBuf::from)
-        && path.is_absolute()
-    {
-        return Ok(path.join("b-web").join("filter-lists"));
+    if let Some(path) = env::var_os("XDG_CACHE_HOME").map(PathBuf::from) {
+        if path.is_absolute() {
+            return Ok(path.join("b-web").join("filter-lists"));
+        }
     }
 
     let home = env::var_os("HOME").ok_or_else(|| {
