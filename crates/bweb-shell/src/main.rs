@@ -212,9 +212,13 @@ impl<D: raw_window_handle::HasDisplayHandle + 'static> ApplicationHandler for Wi
             return;
         }
         let window = match event_loop.create_window(
-            Window::default_attributes().with_title("B-Web").with_inner_size(
-                winit::dpi::PhysicalSize::new(self.framebuffer.width(), self.framebuffer.height()),
-            ),
+            Window::default_attributes()
+                .with_title("B-Web")
+                .with_inner_size(winit::dpi::PhysicalSize::new(
+                    self.framebuffer.width(),
+                    self.framebuffer.height(),
+                ))
+                .with_min_inner_size(winit::dpi::PhysicalSize::new(640, 360)),
         ) {
             Ok(window) => Arc::new(window),
             Err(error) => {
@@ -250,7 +254,10 @@ impl<D: raw_window_handle::HasDisplayHandle + 'static> ApplicationHandler for Wi
         }
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::Resized(_) => window.request_redraw(),
+            WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
+                window.request_redraw();
+            }
+            WindowEvent::Occluded(false) => window.request_redraw(),
             WindowEvent::RedrawRequested => {
                 if let Err(error) = self.present_frame() {
                     self.failure = Some(format!("could not present B-Web frame: {error}"));
@@ -321,17 +328,35 @@ fn copy_scaled_pixels(
         ));
     }
 
-    for y in 0..target_height {
+    // Fit the source frame inside the surface without distorting its aspect ratio.
+    target[..target_len].fill(0x00FF_FFFF);
+    let (content_width, content_height) =
+        if u64::from(target_width) * u64::from(source_height)
+            <= u64::from(target_height) * u64::from(source_width)
+        {
+            let height = (u64::from(source_height) * u64::from(target_width)
+                / u64::from(source_width)) as u32;
+            (target_width, height.max(1))
+        } else {
+            let width = (u64::from(source_width) * u64::from(target_height)
+                / u64::from(source_height)) as u32;
+            (width.max(1), target_height)
+        };
+    let offset_x = (target_width - content_width) / 2;
+    let offset_y = (target_height - content_height) / 2;
+
+    for y in 0..content_height {
         let source_y =
-            (u64::from(y) * u64::from(source_height) / u64::from(target_height)) as usize;
-        for x in 0..target_width {
+            (u64::from(y) * u64::from(source_height) / u64::from(content_height)) as usize;
+        for x in 0..content_width {
             let source_x =
-                (u64::from(x) * u64::from(source_width) / u64::from(target_width)) as usize;
+                (u64::from(x) * u64::from(source_width) / u64::from(content_width)) as usize;
             let source_index = (source_y * source_width as usize + source_x) * 4;
             let red = u32::from(source[source_index]);
             let green = u32::from(source[source_index + 1]);
             let blue = u32::from(source[source_index + 2]);
-            let target_index = y as usize * target_width as usize + x as usize;
+            let target_index = ((y + offset_y) as usize * target_width as usize)
+                + (x + offset_x) as usize;
             target[target_index] = (red << 16) | (green << 8) | blue;
         }
     }
@@ -458,6 +483,24 @@ mod tests {
             [
                 0xFF0000, 0xFF0000, 0x00FF00, 0x00FF00, 0xFF0000, 0xFF0000, 0x00FF00, 0x00FF00,
                 0x0000FF, 0x0000FF, 0xFFFFFF, 0xFFFFFF, 0x0000FF, 0x0000FF, 0xFFFFFF, 0xFFFFFF,
+            ]
+        );
+    }
+
+    #[test]
+    fn preserves_frame_aspect_ratio_and_centers_letterboxing() {
+        let source = [255, 0, 0, 255, 0, 255, 0, 255];
+        let mut target = [0; 16];
+
+        copy_scaled_pixels(&source, 2, 1, &mut target, 4, 4).unwrap();
+
+        assert_eq!(
+            target,
+            [
+                0xFFFFFF, 0xFFFFFF, 0xFFFFFF, 0xFFFFFF,
+                0xFF0000, 0xFF0000, 0x00FF00, 0x00FF00,
+                0xFF0000, 0xFF0000, 0x00FF00, 0x00FF00,
+                0xFFFFFF, 0xFFFFFF, 0xFFFFFF, 0xFFFFFF,
             ]
         );
     }
