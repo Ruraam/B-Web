@@ -1,3 +1,6 @@
+#[cfg(test)]
+mod shell;
+
 use bweb_css::{StyleEngine, Stylesheet};
 use bweb_filterlists::FilterListDownloader;
 use bweb_html::DocumentLoader;
