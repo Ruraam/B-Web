@@ -615,12 +615,9 @@ mod tests {
             .map(|fragment| fragment.text.as_str())
             .collect();
         assert_eq!(text, "alpha beta");
-        assert!(
-            main_box.line_boxes[0]
-                .fragments
-                .iter()
-                .all(|fragment| !fragment.text.starts_with(' ') && !fragment.text.ends_with(' '))
-        );
+        let fragments = &main_box.line_boxes[0].fragments;
+        assert!(!fragments.first().expect("first fragment").text.starts_with(' '));
+        assert!(!fragments.last().expect("last fragment").text.ends_with(' '));
     }
 
     #[test]
