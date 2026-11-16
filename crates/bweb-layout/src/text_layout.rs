@@ -279,7 +279,7 @@ mod tests {
         use bweb_css::{StyleEngine, Stylesheet};
         use bweb_html::{HtmlDocument, NodeKind};
 
-        let document = HtmlDocument::parse("<main>hello</main>");
+        let document = HtmlDocument::parse("<main>MMMMM</main>");
         let sheet = Stylesheet::parse("main { display:block; font-size:20px; color:#123456 }")
             .expect("valid CSS");
         let styles = StyleEngine::new().compute(&document, &[sheet]);
