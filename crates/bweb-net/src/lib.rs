@@ -289,12 +289,13 @@ mod tests {
             let request = String::from_utf8_lossy(&request[..count]).to_ascii_lowercase();
             assert!(request.contains("sec-gpc: 1"));
             assert!(request.contains("dnt: 1"));
-            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
                 .expect("write response");
         });
 
-        let transport = HttpTransport::new(NetworkPolicy::new(Shield::empty()))
-            .expect("rustls HTTP client");
+        let transport =
+            HttpTransport::new(NetworkPolicy::new(Shield::empty())).expect("rustls HTTP client");
         let response = transport
             .execute(
                 "GET",
