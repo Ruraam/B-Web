@@ -216,145 +216,181 @@ fn build_line_boxes(
     style: Option<&bweb_css::ComputedStyle>,
 ) -> Vec<LineBox> {
     let white_space = style.and_then(|s| s.get("white-space")).unwrap_or("normal");
-    let font_size =
-        style.and_then(|s| s.get("font-size")).and_then(parse_length).unwrap_or(16.0).max(1.0);
+    let font_size = style
+        .and_then(|s| s.get("font-size"))
+        .and_then(parse_length)
+        .unwrap_or(16.0)
+        .max(1.0);
     let line_height = style
         .and_then(|s| s.get("line-height"))
         .and_then(parse_length)
         .unwrap_or(font_size * 1.2)
         .max(1.0);
     let glyph_width = font_size * 0.5;
-    let preserve = matches!(white_space, "pre" | "pre-wrap");
+    let preserve_spaces = matches!(white_space, "pre" | "pre-wrap");
     let preserve_newlines = matches!(white_space, "pre" | "pre-wrap" | "pre-line");
     let wrap = !matches!(white_space, "nowrap" | "pre");
+    let mut text_nodes = Vec::new();
+    for child in children.iter().filter(|child| child.display == Display::Inline) {
+        collect_text_nodes(document, child.node, &mut text_nodes);
+    }
+
     let mut lines = Vec::new();
-    let mut fragments = Vec::new();
+    let mut fragments: Vec<TextFragment> = Vec::new();
     let mut x = origin_x;
     let mut y = origin_y;
-    let mut line_width: f32 = 0.0;
     let mut pending_space = false;
 
-    for child in children.iter().filter(|child| child.display == Display::Inline) {
-        let mut text = String::new();
-        collect_text(document, child.node, &mut text);
-        if text.is_empty() {
-            continue;
-        }
-        let mut run = String::new();
-        let mut run_width = 0.0;
-        let chars: Vec<char> = text.chars().collect();
-        let mut index = 0;
-        while index < chars.len() {
-            let ch = chars[index];
+    for (node, text) in text_nodes {
+        for ch in text.chars() {
             if ch == '\n' && preserve_newlines {
-                if !run.is_empty() {
-                    fragments.push(TextFragment {
-                        node: child.node,
-                        text: std::mem::take(&mut run),
-                        rect: Rect { x, y, width: run_width, height: line_height },
-                    });
-                    x += run_width;
-                    line_width = x - origin_x;
-                    run_width = 0.0;
-                }
-                if !fragments.is_empty() {
-                    lines.push(LineBox {
-                        rect: Rect { x: origin_x, y, width: line_width, height: line_height },
-                        fragments: std::mem::take(&mut fragments),
-                    });
-                }
-                y += line_height;
-                x = origin_x;
-                line_width = 0.0;
                 pending_space = false;
-                index += 1;
+                finish_line(
+                    &mut lines,
+                    &mut fragments,
+                    origin_x,
+                    y,
+                    line_height,
+                );
+                x = origin_x;
+                y += line_height;
                 continue;
             }
-            if ch.is_whitespace() && !preserve {
-                if !run.is_empty() {
-                    fragments.push(TextFragment {
-                        node: child.node,
-                        text: std::mem::take(&mut run),
-                        rect: Rect { x, y, width: run_width, height: line_height },
-                    });
-                    x += run_width;
-                    line_width = x - origin_x;
-                    run_width = 0.0;
-                }
-                let mut end = index + 1;
-                while end < chars.len() && chars[end].is_whitespace() && chars[end] != '\n' {
-                    end += 1;
-                }
-                if !pending_space && x > origin_x {
-                    fragments.push(TextFragment {
-                        node: child.node,
-                        text: " ".to_owned(),
-                        rect: Rect { x, y, width: glyph_width, height: line_height },
-                    });
-                    x += glyph_width;
-                    line_width = x - origin_x;
-                }
+
+            if ch.is_whitespace() && !preserve_spaces {
                 pending_space = true;
-                index = end;
                 continue;
+            }
+
+            if pending_space && x > origin_x {
+                if wrap && x + glyph_width > origin_x + available_width {
+                    finish_line(
+                        &mut lines,
+                        &mut fragments,
+                        origin_x,
+                        y,
+                        line_height,
+                    );
+                    x = origin_x;
+                    y += line_height;
+                } else {
+                    append_fragment_char(
+                        &mut fragments,
+                        node,
+                        ' ',
+                        x,
+                        y,
+                        glyph_width,
+                        line_height,
+                    );
+                    x += glyph_width;
+                }
             }
             pending_space = false;
-            run.push(ch);
-            run_width += glyph_width;
-            index += 1;
-            let boundary = index == chars.len() || chars[index].is_whitespace();
-            if boundary && wrap && x > origin_x && x + run_width > origin_x + available_width {
-                run.pop();
-                run_width -= glyph_width;
-                if !run.is_empty() {
-                    fragments.push(TextFragment {
-                        node: child.node,
-                        text: std::mem::take(&mut run),
-                        rect: Rect { x, y, width: run_width, height: line_height },
-                    });
-                    x += run_width;
-                    line_width = x - origin_x;
-                }
-                if !fragments.is_empty() {
-                    lines.push(LineBox {
-                        rect: Rect { x: origin_x, y, width: line_width, height: line_height },
-                        fragments: std::mem::take(&mut fragments),
-                    });
-                }
-                y += line_height;
+
+            if wrap && x > origin_x && x + glyph_width > origin_x + available_width {
+                finish_line(
+                    &mut lines,
+                    &mut fragments,
+                    origin_x,
+                    y,
+                    line_height,
+                );
                 x = origin_x;
-                line_width = 0.0;
-                run.push(ch);
-                run_width = glyph_width;
+                y += line_height;
             }
-        }
-        if !run.is_empty() {
-            fragments.push(TextFragment {
-                node: child.node,
-                text: run,
-                rect: Rect { x, y, width: run_width, height: line_height },
-            });
-            x += run_width;
-            line_width = x - origin_x;
+
+            append_fragment_char(
+                &mut fragments,
+                node,
+                ch,
+                x,
+                y,
+                glyph_width,
+                line_height,
+            );
+            x += glyph_width;
         }
     }
+
     if !fragments.is_empty() {
-        lines.push(LineBox {
-            rect: Rect { x: origin_x, y, width: line_width, height: line_height },
-            fragments,
-        });
+        finish_line(
+            &mut lines,
+            &mut fragments,
+            origin_x,
+            y,
+            line_height,
+        );
     }
     lines
 }
 
-fn collect_text(document: &HtmlDocument, id: NodeId, output: &mut String) {
-    let Some(node) = document.node(id) else { return };
+fn collect_text_nodes(
+    document: &HtmlDocument,
+    id: NodeId,
+    output: &mut Vec<(NodeId, String)>,
+) {
+    let Some(node) = document.node(id) else {
+        return;
+    };
     if let NodeKind::Text(value) = node.kind() {
-        output.push_str(value);
+        if !value.is_empty() {
+            output.push((id, value.clone()));
+        }
+        return;
     }
     for child in node.children() {
-        collect_text(document, *child, output);
+        collect_text_nodes(document, *child, output);
     }
+}
+
+fn append_fragment_char(
+    fragments: &mut Vec<TextFragment>,
+    node: NodeId,
+    ch: char,
+    x: f32,
+    y: f32,
+    glyph_width: f32,
+    line_height: f32,
+) {
+    if let Some(last) = fragments.last_mut() {
+        if last.node == node && (last.rect.x + last.rect.width - x).abs() < f32::EPSILON {
+            last.text.push(ch);
+            last.rect.width += glyph_width;
+            return;
+        }
+    }
+    fragments.push(TextFragment {
+        node,
+        text: ch.to_string(),
+        rect: Rect {
+            x,
+            y,
+            width: glyph_width,
+            height: line_height,
+        },
+    });
+}
+
+fn finish_line(
+    lines: &mut Vec<LineBox>,
+    fragments: &mut Vec<TextFragment>,
+    origin_x: f32,
+    y: f32,
+    line_height: f32,
+) {
+    let width = fragments
+        .last()
+        .map_or(0.0, |fragment| fragment.rect.x + fragment.rect.width - origin_x);
+    lines.push(LineBox {
+        rect: Rect {
+            x: origin_x,
+            y,
+            width,
+            height: line_height,
+        },
+        fragments: std::mem::take(fragments),
+    });
 }
 
 fn dump_box(output: &mut String, document: &HtmlDocument, layout: &LayoutBox, depth: usize) {
@@ -583,6 +619,101 @@ mod tests {
         assert_eq!(main_box.line_boxes.len(), 2);
         assert_eq!(main_box.line_boxes[0].fragments[0].text, "first");
         assert_eq!(main_box.line_boxes[1].fragments[0].text, "second");
+    }
+
+    #[test]
+    fn nested_inline_fragments_keep_leaf_text_node_ids() {
+        let (document, tree) = layout(
+            "<main>before <span>inside <em>deep</em></span> after</main>",
+            "main { display:block } span, em { display:inline }",
+        );
+        let main = document
+            .iter()
+            .find_map(|(id, node)| {
+                matches!(node.kind(), NodeKind::Element { tag_name, .. } if tag_name == "main")
+                    .then_some(id)
+            })
+            .expect("main");
+        let main_box = find(&tree.root, main).expect("main layout box");
+        let fragments: Vec<_> = main_box
+            .line_boxes
+            .iter()
+            .flat_map(|line| &line.fragments)
+            .collect();
+        let text_nodes: Vec<_> = document
+            .iter()
+            .filter_map(|(id, node)| matches!(node.kind(), NodeKind::Text(_)).then_some(id))
+            .collect();
+        assert!(fragments.iter().any(|fragment| fragment.text == "before"));
+        assert!(fragments.iter().any(|fragment| fragment.text == "inside"));
+        assert!(fragments.iter().any(|fragment| fragment.text == "deep"));
+        assert!(fragments.iter().all(|fragment| text_nodes.contains(&fragment.node)));
+        assert!(fragments.iter().any(|fragment| {
+            fragment.node == text_nodes[2] && fragment.text == "deep"
+        }));
+    }
+
+    #[test]
+    fn collapsed_whitespace_is_trimmed_at_line_boundaries() {
+        let (document, tree) = layout(
+            "<main>   alpha   beta   </main>",
+            "main { display:block }",
+        );
+        let main = document
+            .iter()
+            .find_map(|(id, node)| {
+                matches!(node.kind(), NodeKind::Element { tag_name, .. } if tag_name == "main")
+                    .then_some(id)
+            })
+            .expect("main");
+        let main_box = find(&tree.root, main).expect("main layout box");
+        let text: String = main_box.line_boxes[0]
+            .fragments
+            .iter()
+            .map(|fragment| fragment.text.as_str())
+            .collect();
+        assert_eq!(text, "alpha beta");
+        assert!(main_box.line_boxes[0]
+            .fragments
+            .iter()
+            .all(|fragment| !fragment.text.starts_with(' ') && !fragment.text.ends_with(' ')));
+    }
+
+    #[test]
+    fn wraps_without_leading_or_trailing_collapsed_spaces() {
+        let (document, tree) = layout(
+            "<main>one two three</main>",
+            "main { display:block; width:32px }",
+        );
+        let main = document
+            .iter()
+            .find_map(|(id, node)| {
+                matches!(node.kind(), NodeKind::Element { tag_name, .. } if tag_name == "main")
+                    .then_some(id)
+            })
+            .expect("main");
+        let main_box = find(&tree.root, main).expect("main layout box");
+        assert!(main_box.line_boxes.len() >= 2);
+        for line in &main_box.line_boxes {
+            let text: String = line.fragments.iter().map(|fragment| fragment.text.as_str()).collect();
+            assert!(!text.starts_with(' '));
+            assert!(!text.ends_with(' '));
+        }
+    }
+
+    #[test]
+    fn layout_dump_is_stable_and_contains_geometry_and_fragment_identity() {
+        let (document, tree) = layout(
+            "<main>hello <span>world</span></main>",
+            "main { display:block } span { display:inline }",
+        );
+        let dump = tree.dump(&document);
+        assert!(dump.starts_with("Layout Tree (CSS px)"));
+        assert!(dump.contains("main Block x=0.0 y=0.0 w=800.0"));
+        assert!(dump.contains("LineBox x=0.0 y=0.0"));
+        assert!(dump.contains("Fragment node="));
+        assert!(dump.contains("\"hello\""));
+        assert!(dump.contains("\"world\""));
     }
 
     fn contains(root: &super::LayoutBox, id: bweb_html::NodeId) -> bool {
