@@ -23,6 +23,11 @@ fn run() -> Result<(), Box<dyn Error>> {
             let url = arguments.next().ok_or_else(|| {
                 io::Error::new(io::ErrorKind::InvalidInput, "usage: b-web open <http(s)-url>")
             })?;
+            let dump_layout = match arguments.next() {
+                None => false,
+                Some(flag) if flag == "--dump-layout" => true,
+                Some(_) => return Err(io::Error::new(io::ErrorKind::InvalidInput, "expected optional --dump-layout flag").into()),
+            };
             if arguments.next().is_some() {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -30,7 +35,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 )
                 .into());
             }
-            open_document(url.to_string_lossy().as_ref())?;
+            open_document(url.to_string_lossy().as_ref(), dump_layout)?;
         }
         Some(command) => {
             return Err(io::Error::new(
@@ -53,7 +58,7 @@ fn show_status() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn open_document(url: &str) -> Result<(), Box<dyn Error>> {
+fn open_document(url: &str, dump_layout: bool) -> Result<(), Box<dyn Error>> {
     let (transport, shield_active) = build_transport()?;
     println!("Loading: {url}");
     if !shield_active {
@@ -92,6 +97,10 @@ fn open_document(url: &str) -> Result<(), Box<dyn Error>> {
     println!("Parsed stylesheets: {stylesheet_count}");
     println!("Computed styles: {} NodeId entries", computed.len());
     println!("Layout boxes: {}", layout.box_count);
+    if dump_layout {
+        println!();
+        print!("{}", layout.dump(&loaded.document));
+    }
     println!("Viewport: 1280 CSS px");
     println!("Failed/blocked subresources: {}", loaded.failed_resources.len());
     for resource in &loaded.resources {
@@ -131,7 +140,7 @@ fn print_usage() {
     println!();
     println!("Usage:");
     println!("  b-web                 Show status and load cached Shield rules");
-    println!("  b-web open <URL>      Fetch an HTML document and guarded subresources");
+    println!("  b-web open <URL> [--dump-layout]  Fetch a document; optionally dump geometry");
     println!("  b-web update-filters  Download and cache EasyList and EasyPrivacy");
     println!("  b-web --help          Show this help");
 }
