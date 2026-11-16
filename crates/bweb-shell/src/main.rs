@@ -278,24 +278,97 @@ impl<D: raw_window_handle::HasDisplayHandle> WindowApp<D> {
             .ok_or_else(|| io::Error::other("window surface is not initialized"))?;
         surface.resize(width, height)?;
         let mut buffer = surface.buffer_mut()?;
-        let source_width = self.framebuffer.width();
-        let source_height = self.framebuffer.height();
-        let source = self.framebuffer.pixels();
-        for y in 0..height.get() {
-            let source_y = y * source_height / height;
-            for x in 0..width.get() {
-                let source_x = x * source_width / width;
-                let source_index = ((source_y * source_width + source_x) * 4) as usize;
-                let red = u32::from(source[source_index]);
-                let green = u32::from(source[source_index + 1]);
-                let blue = u32::from(source[source_index + 2]);
-                let target_index = (y * width.get() + x) as usize;
-                buffer[target_index] = (red << 16) | (green << 8) | blue;
-            }
-        }
+        copy_scaled_pixels(
+            self.framebuffer.pixels(),
+            self.framebuffer.width(),
+            self.framebuffer.height(),
+            &mut buffer,
+            width.get(),
+            height.get(),
+        )?;
         window.pre_present_notify();
         buffer.present()?;
         Ok(())
+    }
+}
+
+
+/// Copies an RGBA software frame into a packed RGBX surface using nearest-neighbor scaling.
+fn copy_scaled_pixels(
+    source: &[u8],
+    source_width: u32,
+    source_height: u32,
+    target: &mut [u32],
+    target_width: u32,
+    target_height: u32,
+) -> Result<(), io::Error> {
+    let source_len = (source_width as usize)
+        .checked_mul(source_height as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| io::Error::other("source framebuffer dimensions overflow"))?;
+    let target_len = (target_width as usize)
+        .checked_mul(target_height as usize)
+        .ok_or_else(|| io::Error::other("target surface dimensions overflow"))?;
+    if source_width == 0
+        || source_height == 0
+        || target_width == 0
+        || target_height == 0
+        || source.len() < source_len
+        || target.len() < target_len
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "framebuffer or surface dimensions do not match their pixel buffers",
+        ));
+    }
+
+    for y in 0..target_height {
+        let source_y = (u64::from(y) * u64::from(source_height) / u64::from(target_height)) as usize;
+        for x in 0..target_width {
+            let source_x =
+                (u64::from(x) * u64::from(source_width) / u64::from(target_width)) as usize;
+            let source_index = (source_y * source_width as usize + source_x) * 4;
+            let red = u32::from(source[source_index]);
+            let green = u32::from(source[source_index + 1]);
+            let blue = u32::from(source[source_index + 2]);
+            let target_index = y as usize * target_width as usize + x as usize;
+            target[target_index] = (red << 16) | (green << 8) | blue;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::copy_scaled_pixels;
+
+    #[test]
+    fn scales_rgba_frame_to_surface_with_nearest_neighbor_sampling() {
+        let source = [
+            255, 0, 0, 255, 0, 255, 0, 255,
+            0, 0, 255, 255, 255, 255, 255, 255,
+        ];
+        let mut target = [0; 16];
+
+        copy_scaled_pixels(&source, 2, 2, &mut target, 4, 4).unwrap();
+
+        assert_eq!(
+            target,
+            [
+                0xFF0000, 0xFF0000, 0x00FF00, 0x00FF00,
+                0xFF0000, 0xFF0000, 0x00FF00, 0x00FF00,
+                0x0000FF, 0x0000FF, 0xFFFFFF, 0xFFFFFF,
+                0x0000FF, 0x0000FF, 0xFFFFFF, 0xFFFFFF,
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_pixel_buffers_smaller_than_their_dimensions() {
+        let mut target = [0; 4];
+        let error = copy_scaled_pixels(&[0; 3], 1, 1, &mut target, 2, 2).unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
     }
 }
 
