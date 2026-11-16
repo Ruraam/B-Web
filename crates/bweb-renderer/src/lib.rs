@@ -243,8 +243,7 @@ fn build_line_boxes(
         let mut index = 0;
         while index < chars.len() {
             let ch = chars[index];
-            if ch == '
-' && preserve_newlines {
+            if ch == '\n' && preserve_newlines {
                 if !run.is_empty() {
                     fragments.push(TextFragment { node: child.node, text: std::mem::take(&mut run),
                         rect: Rect { x, y, width: run_width, height: line_height } });
@@ -268,8 +267,7 @@ fn build_line_boxes(
                     x += run_width; line_width = x - origin_x; run_width = 0.0;
                 }
                 let mut end = index + 1;
-                while end < chars.len() && chars[end].is_whitespace() && chars[end] != '
-' { end += 1; }
+                while end < chars.len() && chars[end].is_whitespace() && chars[end] != '\n' { end += 1; }
                 if !pending_space && x > origin_x {
                     fragments.push(TextFragment { node: child.node, text: " ".to_owned(),
                         rect: Rect { x, y, width: glyph_width, height: line_height } });
