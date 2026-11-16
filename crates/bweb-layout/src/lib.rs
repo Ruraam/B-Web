@@ -1,3 +1,6 @@
+mod paint_adapter;
+pub use paint_adapter::PaintAdapter;
+
 //! DOM-backed layout tree and first-pass CSS box-model implementation.
 //!
 //! Layout uses logical CSS pixels. Inline formatting is intentionally a
