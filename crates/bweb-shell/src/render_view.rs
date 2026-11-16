@@ -5,7 +5,6 @@ use bweb_html::HtmlDocument;
 use bweb_layout::{LayoutTree, PaintAdapter, Rect, ViewBackend, Viewport};
 use bweb_renderer::{DisplayList, Framebuffer, PaintItem, Painter, Rasterizer};
 use bweb_text::Font;
-use std::io;
 
 /// Retains layout, prepared text, and paint commands across viewport changes.
 pub struct BrowserViewBackend {

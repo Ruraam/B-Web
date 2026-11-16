@@ -42,11 +42,6 @@ impl<B: ViewBackend> ResizeController<B> {
     pub const fn view(&self) -> &View<B> {
         &self.view
     }
-
-    #[must_use]
-    pub fn has_pending(&self) -> bool {
-        self.pending.is_some()
-    }
 }
 
 #[cfg(test)]
@@ -91,7 +86,6 @@ mod tests {
         assert_eq!(c.view().viewport(), Some(vp(800, 600)));
         assert_eq!(c.view().backend().reflows, 1);
         assert_eq!(c.view().backend().repaints, 1);
-        assert!(!c.has_pending());
     }
 
     #[test]
