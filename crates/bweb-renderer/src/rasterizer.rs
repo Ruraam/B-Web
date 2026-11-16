@@ -53,8 +53,8 @@ fn paint_rect(framebuffer: &mut Framebuffer, rect: Rect, clip: Rect, color: Colo
     let Some(area) = intersect(rect, clip) else {
         return;
     };
-    for_each_pixel(framebuffer, area, |x, y| {
-        framebuffer.set_pixel(x, y, color.to_rgba8());
+    for_each_pixel(framebuffer, area, |target, x, y| {
+        target.set_pixel(x, y, color.to_rgba8());
     });
 }
 
@@ -81,7 +81,7 @@ fn paint_border(
         return;
     };
 
-    for_each_pixel(framebuffer, area, |x, y| {
+    for_each_pixel(framebuffer, area, |target, x, y| {
         let px = x as f32 + 0.5;
         let py = y as f32 + 0.5;
         let on_left = widths.left > 0.0 && px < rect.x + widths.left;
@@ -89,7 +89,7 @@ fn paint_border(
         let on_top = widths.top > 0.0 && py < rect.y + widths.top;
         let on_bottom = widths.bottom > 0.0 && py >= rect.y + rect.height - widths.bottom;
         if on_left || on_right || on_top || on_bottom {
-            framebuffer.set_pixel(x, y, color.to_rgba8());
+            target.set_pixel(x, y, color.to_rgba8());
         }
     });
 }
@@ -97,7 +97,7 @@ fn paint_border(
 fn for_each_pixel(
     framebuffer: &mut Framebuffer,
     area: Rect,
-    mut paint: impl FnMut(u32, u32),
+    mut paint: impl FnMut(&mut Framebuffer, u32, u32),
 ) {
     if !valid_rect(area) || framebuffer.width() == 0 || framebuffer.height() == 0 {
         return;
@@ -117,7 +117,7 @@ fn for_each_pixel(
                 && center_y >= area.y
                 && center_y < area.y + area.height
             {
-                paint(x, y);
+                paint(framebuffer, x, y);
             }
         }
     }
@@ -197,7 +197,7 @@ mod tests {
             framebuffer.pixels(),
             &[
                 0, 0, 0, 0, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 0, 0,
-                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 255, 0, 0, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
             ]
         );
     }
