@@ -26,7 +26,13 @@ fn run() -> Result<(), Box<dyn Error>> {
             let dump_layout = match arguments.next() {
                 None => false,
                 Some(flag) if flag == "--dump-layout" => true,
-                Some(_) => {\n                    return Err(io::Error::new(\n                        io::ErrorKind::InvalidInput,\n                        "expected optional --dump-layout flag",\n                    )\n                    .into());\n                }
+                Some(_) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "expected optional --dump-layout flag",
+                    )
+                    .into());
+                }
             };
             if arguments.next().is_some() {
                 return Err(io::Error::new(

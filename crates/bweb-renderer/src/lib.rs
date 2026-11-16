@@ -49,11 +49,18 @@ pub struct LayoutBox {
 
 /// A line box emitted by the initial inline formatting pass.
 #[derive(Debug, Clone, PartialEq)]
-pub struct LineBox {\n    pub rect: Rect,\n    pub fragments: Vec<TextFragment>,\n}
+pub struct LineBox {
+    pub rect: Rect,
+    pub fragments: Vec<TextFragment>,
+}
 
 /// A text run retaining the DOM node that supplied it.
 #[derive(Debug, Clone, PartialEq)]
-pub struct TextFragment {\n    pub node: NodeId,\n    pub text: String,\n    pub rect: Rect,\n}
+pub struct TextFragment {
+    pub node: NodeId,
+    pub text: String,
+    pub rect: Rect,
+}
 
 /// Layout tree rooted at the DOM document node.
 #[derive(Debug, Clone, PartialEq)]
@@ -174,7 +181,8 @@ fn layout_node(
         }
     }
 
-    let line_boxes =\n        build_line_boxes(document, &children, content_x, content_y, content_width, style);
+    let line_boxes =
+        build_line_boxes(document, &children, content_x, content_y, content_width, style);
     let inline_height: f32 = line_boxes.iter().map(|line| line.rect.height).sum();
     content_height = content_height.max(inline_height);
 
@@ -206,8 +214,13 @@ fn build_line_boxes(
     available_width: f32, style: Option<&bweb_css::ComputedStyle>,
 ) -> Vec<LineBox> {
     let white_space = style.and_then(|s| s.get("white-space")).unwrap_or("normal");
-    let font_size =\n        style.and_then(|s| s.get("font-size")).and_then(parse_length).unwrap_or(16.0).max(1.0);
-    let line_height = style\n        .and_then(|s| s.get("line-height"))\n        .and_then(parse_length)\n        .unwrap_or(font_size * 1.2)\n        .max(1.0);
+    let font_size =
+        style.and_then(|s| s.get("font-size")).and_then(parse_length).unwrap_or(16.0).max(1.0);
+    let line_height = style
+        .and_then(|s| s.get("line-height"))
+        .and_then(parse_length)
+        .unwrap_or(font_size * 1.2)
+        .max(1.0);
     let glyph_width = font_size * 0.5;
     let preserve = matches!(white_space, "pre" | "pre-wrap");
     let preserve_newlines = matches!(white_space, "pre" | "pre-wrap" | "pre-line");
@@ -221,14 +234,17 @@ fn build_line_boxes(
     for child in children.iter().filter(|child| child.display == Display::Inline) {
         let mut text = String::new();
         collect_text(document, child.node, &mut text);
-        if text.is_empty() {\n            continue;\n        }
+        if text.is_empty() {
+            continue;
+        }
         let mut run = String::new();
         let mut run_width = 0.0;
         let chars: Vec<char> = text.chars().collect();
         let mut index = 0;
         while index < chars.len() {
             let ch = chars[index];
-            if ch == '\n' && preserve_newlines {
+            if ch == '
+' && preserve_newlines {
                 if !run.is_empty() {
                     fragments.push(TextFragment { node: child.node, text: std::mem::take(&mut run),
                         rect: Rect { x, y, width: run_width, height: line_height } });
@@ -238,7 +254,11 @@ fn build_line_boxes(
                     lines.push(LineBox { rect: Rect { x: origin_x, y, width: line_width, height: line_height },
                         fragments: std::mem::take(&mut fragments) });
                 }
-                y += line_height;\n                x = origin_x;\n                line_width = 0.0;\n                pending_space = false;\n                index += 1;
+                y += line_height;
+                x = origin_x;
+                line_width = 0.0;
+                pending_space = false;
+                index += 1;
                 continue;
             }
             if ch.is_whitespace() && !preserve {
@@ -248,18 +268,25 @@ fn build_line_boxes(
                     x += run_width; line_width = x - origin_x; run_width = 0.0;
                 }
                 let mut end = index + 1;
-                while end < chars.len() && chars[end].is_whitespace() && chars[end] != '\n' { end += 1; }
+                while end < chars.len() && chars[end].is_whitespace() && chars[end] != '
+' { end += 1; }
                 if !pending_space && x > origin_x {
                     fragments.push(TextFragment { node: child.node, text: " ".to_owned(),
                         rect: Rect { x, y, width: glyph_width, height: line_height } });
                     x += glyph_width; line_width = x - origin_x;
                 }
-                pending_space = true;\n                index = end;\n                continue;
+                pending_space = true;
+                index = end;
+                continue;
             }
-            pending_space = false;\n            run.push(ch);\n            run_width += glyph_width;\n            index += 1;
+            pending_space = false;
+            run.push(ch);
+            run_width += glyph_width;
+            index += 1;
             let boundary = index == chars.len() || chars[index].is_whitespace();
             if boundary && wrap && x > origin_x && x + run_width > origin_x + available_width {
-                run.pop();\n                run_width -= glyph_width;
+                run.pop();
+                run_width -= glyph_width;
                 if !run.is_empty() {
                     fragments.push(TextFragment { node: child.node, text: std::mem::take(&mut run),
                         rect: Rect { x, y, width: run_width, height: line_height } });
@@ -269,7 +296,11 @@ fn build_line_boxes(
                     lines.push(LineBox { rect: Rect { x: origin_x, y, width: line_width, height: line_height },
                         fragments: std::mem::take(&mut fragments) });
                 }
-                y += line_height;\n                x = origin_x;\n                line_width = 0.0;\n                run.push(ch);\n                run_width = glyph_width;
+                y += line_height;
+                x = origin_x;
+                line_width = 0.0;
+                run.push(ch);
+                run_width = glyph_width;
             }
         }
         if !run.is_empty() {
@@ -279,7 +310,10 @@ fn build_line_boxes(
         }
     }
     if !fragments.is_empty() {
-        lines.push(LineBox {\n            rect: Rect { x: origin_x, y, width: line_width, height: line_height },\n            fragments,\n        });
+        lines.push(LineBox {
+            rect: Rect { x: origin_x, y, width: line_width, height: line_height },
+            fragments,
+        });
     }
     lines
 }
@@ -311,7 +345,9 @@ fn dump_box(output: &mut String, document: &HtmlDocument, layout: &LayoutBox, de
                 fragment.rect.width, fragment.rect.height);
         }
     }
-    for child in &layout.children {\n        dump_box(output, document, child, depth + 1);\n    }
+    for child in &layout.children {
+        dump_box(output, document, child, depth + 1);
+    }
 }
 
 fn parse_edges(value: Option<&str>) -> Edges {
@@ -476,13 +512,17 @@ mod tests {
         let fragments = &main_box.line_boxes[0].fragments;
         assert!(fragments.iter().any(|fragment| fragment.text == "hello"));
         assert!(fragments.iter().any(|fragment| fragment.text == "world"));
-        let text_id = document\n            .iter()\n            .find_map(|(id, node)| matches!(node.kind(), NodeKind::Text(_)).then_some(id))\n            .expect("text node");
+        let text_id = document
+            .iter()
+            .find_map(|(id, node)| matches!(node.kind(), NodeKind::Text(_)).then_some(id))
+            .expect("text node");
         assert!(fragments.iter().all(|fragment| fragment.node == text_id));
     }
 
     #[test]
     fn pre_white_space_preserves_newlines_as_line_breaks() {
-        let (document, tree) =\n            layout("<main>first\nsecond</main>", "main { display:block; white-space:pre }");
+        let (document, tree) =
+            layout("<main>first\nsecond</main>", "main { display:block; white-space:pre }");
         let main = document.iter().find_map(|(id, node)| {
             matches!(node.kind(), NodeKind::Element { tag_name, .. } if tag_name == "main").then_some(id)
         }).expect("main");
