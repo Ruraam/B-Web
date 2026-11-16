@@ -1,12 +1,6 @@
 use bweb_filterlists::FilterListDownloader;
 use bweb_shield::FilterListCache;
-use std::{
-    env,
-    error::Error,
-    io,
-    path::PathBuf,
-    process,
-};
+use std::{env, error::Error, io, path::PathBuf, process};
 
 fn main() {
     if let Err(error) = run() {
@@ -73,7 +67,10 @@ fn filter_list_cache_directory() -> Result<PathBuf, io::Error> {
     }
 
     let home = env::var_os("HOME").ok_or_else(|| {
-        io::Error::new(io::ErrorKind::NotFound, "HOME is not set; cannot locate the filter-list cache")
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "HOME is not set; cannot locate the filter-list cache",
+        )
     })?;
 
     Ok(PathBuf::from(home).join(".cache").join("b-web").join("filter-lists"))
