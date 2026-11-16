@@ -1,12 +1,14 @@
-#[cfg(test)]
+mod render_view;
 mod shell;
 
 use bweb_css::{StyleEngine, Stylesheet};
 use bweb_filterlists::FilterListDownloader;
 use bweb_html::DocumentLoader;
-use bweb_layout::{LayoutTree, PaintAdapter, Rect as LayoutRect};
+use bweb_layout::{LayoutTree, PaintAdapter, Rect as LayoutRect, View, Viewport};
 use bweb_net::{HttpTransport, NetworkPolicy};
 use bweb_renderer::{Framebuffer, Painter, Rasterizer};
+use render_view::BrowserViewBackend;
+use shell::{ResizeController, ResizeDispatch};
 use bweb_shield::{FilterListCache, FilterListError, Shield};
 use bweb_text::Font;
 use softbuffer::{Context, Surface};
@@ -15,7 +17,6 @@ use std::{
     error::Error,
     fs, io,
     io::{BufWriter, Write},
-    num::NonZeroU32,
     path::{Path, PathBuf},
     process,
     sync::Arc,
@@ -139,16 +140,14 @@ fn open_document(
     println!("Parsed stylesheets: {stylesheet_count}");
     println!("Computed styles: {} NodeId entries", computed.len());
     println!("Layout boxes: {}", layout.box_count);
-    if render_path.is_some() || show_window {
+    if let Some(path) = render_path {
         let (framebuffer, glyph_count) = render_frame(&layout, &computed, 1280, 720)?;
-        if let Some(path) = render_path {
-            write_ppm(path, &framebuffer)?;
-            println!("Rendered frame: 1280x720 px, {glyph_count} glyphs -> {}", path.display());
-        }
-        if show_window {
-            println!("Opening native B-Web window...");
-            show_framebuffer(framebuffer)?;
-        }
+        write_ppm(path, &framebuffer)?;
+        println!("Rendered frame: 1280x720 px, {glyph_count} glyphs -> {}", path.display());
+    }
+    if show_window {
+        println!("Opening native B-Web window...");
+        show_browser_window(loaded.document.clone(), computed.clone())?;
     }
     if dump_layout {
         println!();
@@ -189,11 +188,22 @@ fn render_frame(
     Ok((framebuffer, glyph_count))
 }
 
-/// Displays the software framebuffer in a native window using winit + softbuffer.
-fn show_framebuffer(framebuffer: Framebuffer) -> Result<(), Box<dyn Error>> {
+/// Displays the retained browser view in a native winit + softbuffer window.
+fn show_browser_window(
+    document: bweb_html::HtmlDocument,
+    styles: bweb_css::ComputedStyleMap,
+) -> Result<(), Box<dyn Error>> {
     let event_loop = EventLoop::new()?;
     let context = Context::new(event_loop.owned_display_handle())?;
-    let mut app = WindowApp { context, framebuffer, window: None, surface: None, failure: None };
+    let backend = BrowserViewBackend::new(document, styles, load_system_font()?);
+    let mut app = WindowApp {
+        context,
+        controller: ResizeController::new(View::new(backend)),
+        window: None,
+        surface: None,
+        surface_size: None,
+        failure: None,
+    };
     event_loop.run_app(&mut app)?;
     if let Some(error) = app.failure {
         return Err(io::Error::other(error).into());
@@ -203,9 +213,10 @@ fn show_framebuffer(framebuffer: Framebuffer) -> Result<(), Box<dyn Error>> {
 
 struct WindowApp<D> {
     context: Context<D>,
-    framebuffer: Framebuffer,
+    controller: ResizeController<BrowserViewBackend>,
     window: Option<Arc<Window>>,
     surface: Option<Surface<D, Arc<Window>>>,
+    surface_size: Option<(u32, u32)>,
     failure: Option<String>,
 }
 
@@ -217,10 +228,7 @@ impl<D: raw_window_handle::HasDisplayHandle + 'static> ApplicationHandler for Wi
         let window = match event_loop.create_window(
             Window::default_attributes()
                 .with_title("B-Web")
-                .with_inner_size(winit::dpi::PhysicalSize::new(
-                    self.framebuffer.width(),
-                    self.framebuffer.height(),
-                ))
+                .with_inner_size(winit::dpi::PhysicalSize::new(1280, 720))
                 .with_min_inner_size(winit::dpi::PhysicalSize::new(640, 360)),
         ) {
             Ok(window) => Arc::new(window),
@@ -232,6 +240,10 @@ impl<D: raw_window_handle::HasDisplayHandle + 'static> ApplicationHandler for Wi
         };
         match Surface::new(&self.context, window.clone()) {
             Ok(surface) => {
+                let size = window.inner_size();
+                if let Some(viewport) = Viewport::new(size.width, size.height, window.scale_factor()) {
+                    self.controller.queue(viewport);
+                }
                 window.request_redraw();
                 self.surface = Some(surface);
                 self.window = Some(window);
@@ -257,12 +269,24 @@ impl<D: raw_window_handle::HasDisplayHandle + 'static> ApplicationHandler for Wi
         }
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
+            WindowEvent::Resized(size) => {
+                if let Some(viewport) =
+                    Viewport::new(size.width, size.height, window.scale_factor())
+                {
+                    self.controller.queue(viewport);
+                }
+                window.request_redraw();
+            }
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                let size = window.inner_size();
+                if let Some(viewport) = Viewport::new(size.width, size.height, scale_factor) {
+                    self.controller.queue(viewport);
+                }
                 window.request_redraw();
             }
             WindowEvent::Occluded(false) => window.request_redraw(),
             WindowEvent::RedrawRequested => {
-                if let Err(error) = self.present_frame() {
+                if let Err(error) = self.dispatch_pending_and_present() {
                     self.failure = Some(format!("could not present B-Web frame: {error}"));
                     event_loop.exit();
                 }
@@ -273,28 +297,49 @@ impl<D: raw_window_handle::HasDisplayHandle + 'static> ApplicationHandler for Wi
 }
 
 impl<D: raw_window_handle::HasDisplayHandle> WindowApp<D> {
+    fn dispatch_pending_and_present(&mut self) -> Result<(), Box<dyn Error>> {
+        match self.controller.dispatch().map_err(io::Error::other)? {
+            ResizeDispatch::Skip | ResizeDispatch::Repaint | ResizeDispatch::Reflow => {}
+        }
+        self.present_frame()
+    }
+
     fn present_frame(&mut self) -> Result<(), Box<dyn Error>> {
         let window =
             self.window.as_ref().ok_or_else(|| io::Error::other("window is not initialized"))?;
         let size = window.inner_size();
-        let (Some(width), Some(height)) =
-            (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
-        else {
+        if size.width == 0 || size.height == 0 {
             return Ok(());
-        };
+        }
+
         let surface = self
             .surface
             .as_mut()
             .ok_or_else(|| io::Error::other("window surface is not initialized"))?;
-        surface.resize(width, height)?;
+        let dimensions = (size.width, size.height);
+        if self.surface_size != Some(dimensions) {
+            let width = std::num::NonZeroU32::new(size.width)
+                .ok_or_else(|| io::Error::other("surface width is zero"))?;
+            let height = std::num::NonZeroU32::new(size.height)
+                .ok_or_else(|| io::Error::other("surface height is zero"))?;
+            surface.resize(width, height)?;
+            self.surface_size = Some(dimensions);
+        }
+
+        let framebuffer = self
+            .controller
+            .view()
+            .backend()
+            .framebuffer()
+            .ok_or_else(|| io::Error::other("browser frame has not been rendered"))?;
         let mut buffer = surface.buffer_mut()?;
         copy_scaled_pixels(
-            self.framebuffer.pixels(),
-            self.framebuffer.width(),
-            self.framebuffer.height(),
+            framebuffer.pixels(),
+            framebuffer.width(),
+            framebuffer.height(),
             &mut buffer,
-            width.get(),
-            height.get(),
+            size.width,
+            size.height,
         )?;
         window.pre_present_notify();
         buffer.present()?;
