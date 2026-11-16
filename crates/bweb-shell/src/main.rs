@@ -1,8 +1,8 @@
 use bweb_css::{StyleEngine, Stylesheet};
 use bweb_filterlists::FilterListDownloader;
 use bweb_html::DocumentLoader;
+use bweb_layout::LayoutTree;
 use bweb_net::{HttpTransport, NetworkPolicy};
-use bweb_renderer::LayoutTree;
 use bweb_shield::{FilterListCache, FilterListError, Shield};
 use std::{env, error::Error, io, path::PathBuf, process};
 
