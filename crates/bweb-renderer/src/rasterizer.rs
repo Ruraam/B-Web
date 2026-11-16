@@ -89,17 +89,17 @@ fn blit_glyphs(
             }
             let local_x = index % coverage.width as usize;
             let local_y = index / coverage.width as usize;
-            let (Ok(local_x), Ok(local_y)) =
-                (i64::try_from(local_x), i64::try_from(local_y))
+            let (Ok(local_x), Ok(local_y)) = (i64::try_from(local_x), i64::try_from(local_y))
             else {
                 continue;
             };
-            let (Some(x), Some(y)) =
-                (origin_x.checked_add(local_x), origin_y.checked_add(local_y))
+            let (Some(x), Some(y)) = (origin_x.checked_add(local_x), origin_y.checked_add(local_y))
             else {
                 continue;
             };
-            if x < 0 || y < 0 || x >= i64::from(framebuffer.width())
+            if x < 0
+                || y < 0
+                || x >= i64::from(framebuffer.width())
                 || y >= i64::from(framebuffer.height())
             {
                 continue;
@@ -119,11 +119,7 @@ fn blit_glyphs(
             if alpha == 0 {
                 continue;
             }
-            framebuffer.set_pixel(
-                x as u32,
-                y as u32,
-                [color.red, color.green, color.blue, alpha],
-            );
+            framebuffer.set_pixel(x as u32, y as u32, [color.red, color.green, color.blue, alpha]);
         }
     }
 }
@@ -254,7 +250,11 @@ mod tests {
         list.push(PaintItem::Text {
             glyphs: vec![crate::PositionedGlyph {
                 coverage: bweb_text::Coverage {
-                    width: 2, height: 1, left: 100, top: 100, data: vec![255, 128],
+                    width: 2,
+                    height: 1,
+                    left: 100,
+                    top: 100,
+                    data: vec![255, 128],
                 },
                 x: 0.6,
                 y: 0.4,
@@ -277,7 +277,11 @@ mod tests {
         list.push(PaintItem::Text {
             glyphs: vec![crate::PositionedGlyph {
                 coverage: bweb_text::Coverage {
-                    width: 4, height: 1, left: 0, top: 0, data: vec![255; 4],
+                    width: 4,
+                    height: 1,
+                    left: 0,
+                    top: 0,
+                    data: vec![255; 4],
                 },
                 x: -1.0,
                 y: 0.0,
@@ -289,10 +293,7 @@ mod tests {
 
         Rasterizer.rasterize(&list, &mut framebuffer);
 
-        assert_eq!(
-            framebuffer.pixels(),
-            &[0, 0, 0, 0, 255, 0, 0, 255, 255, 0, 0, 255],
-        );
+        assert_eq!(framebuffer.pixels(), &[0, 0, 0, 0, 255, 0, 0, 255, 255, 0, 0, 255],);
     }
 
     #[test]
@@ -302,14 +303,22 @@ mod tests {
             glyphs: vec![
                 crate::PositionedGlyph {
                     coverage: bweb_text::Coverage {
-                        width: 2, height: 2, left: 0, top: 0, data: vec![255],
+                        width: 2,
+                        height: 2,
+                        left: 0,
+                        top: 0,
+                        data: vec![255],
                     },
                     x: 0.0,
                     y: 0.0,
                 },
                 crate::PositionedGlyph {
                     coverage: bweb_text::Coverage {
-                        width: 1, height: 1, left: 0, top: 0, data: vec![255],
+                        width: 1,
+                        height: 1,
+                        left: 0,
+                        top: 0,
+                        data: vec![255],
                     },
                     x: f32::NAN,
                     y: 0.0,
