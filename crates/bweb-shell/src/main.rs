@@ -11,8 +11,17 @@ use std::{
     error::Error,
     fs, io,
     io::{BufWriter, Write},
+    num::NonZeroU32,
     path::{Path, PathBuf},
     process,
+    sync::Arc,
+};
+use softbuffer::{Context, Surface};
+use winit::{
+    application::ApplicationHandler,
+    event::WindowEvent,
+    event_loop::{ActiveEventLoop, EventLoop},
+    window::{Window, WindowId},
 };
 
 fn main() {
@@ -34,6 +43,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             })?;
             let mut dump_layout = false;
             let mut render_path = None;
+            let mut show_window = false;
             while let Some(flag) = arguments.next() {
                 if flag == "--dump-layout" && !dump_layout {
                     dump_layout = true;
@@ -44,6 +54,8 @@ fn run() -> Result<(), Box<dyn Error>> {
                             "missing output path after --render-ppm",
                         )
                     })?));
+                } else if flag == "--window" && !show_window {
+                    show_window = true;
                 } else {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
@@ -52,7 +64,12 @@ fn run() -> Result<(), Box<dyn Error>> {
                     .into());
                 }
             }
-            open_document(url.to_string_lossy().as_ref(), dump_layout, render_path.as_deref())?;
+            open_document(
+                url.to_string_lossy().as_ref(),
+                dump_layout,
+                render_path.as_deref(),
+                show_window,
+            )?;
         }
         Some(command) => {
             return Err(io::Error::new(
@@ -79,6 +96,7 @@ fn open_document(
     url: &str,
     dump_layout: bool,
     render_path: Option<&Path>,
+    show_window: bool,
 ) -> Result<(), Box<dyn Error>> {
     let (transport, shield_active) = build_transport()?;
     println!("Loading: {url}");
@@ -118,9 +136,16 @@ fn open_document(
     println!("Parsed stylesheets: {stylesheet_count}");
     println!("Computed styles: {} NodeId entries", computed.len());
     println!("Layout boxes: {}", layout.box_count);
-    if let Some(path) = render_path {
-        let (width, height, glyph_count) = render_document(&layout, &computed, path, 1280, 720)?;
-        println!("Rendered frame: {width}x{height} px, {glyph_count} glyphs -> {}", path.display());
+    if render_path.is_some() || show_window {
+        let (framebuffer, glyph_count) = render_frame(&layout, &computed, 1280, 720)?;
+        if let Some(path) = render_path {
+            write_ppm(path, &framebuffer)?;
+            println!("Rendered frame: 1280x720 px, {glyph_count} glyphs -> {}", path.display());
+        }
+        if show_window {
+            println!("Opening native B-Web window...");
+            show_framebuffer(framebuffer)?;
+        }
     }
     if dump_layout {
         println!();
@@ -140,30 +165,154 @@ fn open_document(
     Ok(())
 }
 
-/// Runs the HTML/CSS layout through text preparation, painting, and rasterization.
-///
-/// The PPM output is a diagnostic software-rendered frame. It deliberately
-/// remains independent of any window-system or GPU backend.
-fn render_document(
+/// Runs HTML/CSS layout through text preparation, painting, and rasterization.
+fn render_frame(
     layout: &LayoutTree,
     styles: &bweb_css::ComputedStyleMap,
-    output: &Path,
     width: u32,
     height: u32,
-) -> Result<(u32, u32, usize), Box<dyn Error>> {
+) -> Result<(Framebuffer, usize), Box<dyn Error>> {
     let mut font = load_system_font()?;
     let scale_factor = 1.0;
     let text_runs = bweb_layout::prepare_text_runs(layout, styles, &mut font, scale_factor);
     let glyph_count = text_runs.values().map(|run| run.glyphs.len()).sum();
-    let viewport = LayoutRect { x: 0.0, y: 0.0, width: width as f32, height: height as f32 };
+    let viewport = LayoutRect {
+        x: 0.0,
+        y: 0.0,
+        width: width as f32,
+        height: height as f32,
+    };
     let adapter = PaintAdapter::new(layout, styles, viewport).with_text_runs(&text_runs);
     let display_list = Painter::new(&adapter, scale_factor)?.paint();
     let mut framebuffer = Framebuffer::new(width, height)
         .map_err(|error| io::Error::other(format!("could not allocate render frame: {error:?}")))?;
     framebuffer.clear([255, 255, 255, 255]);
     Rasterizer.rasterize(&display_list, &mut framebuffer);
-    write_ppm(output, &framebuffer)?;
-    Ok((width, height, glyph_count))
+    Ok((framebuffer, glyph_count))
+}
+
+/// Displays the software framebuffer in a native window using winit + softbuffer.
+fn show_framebuffer(framebuffer: Framebuffer) -> Result<(), Box<dyn Error>> {
+    let event_loop = EventLoop::new()?;
+    let context = Context::new(event_loop.owned_display_handle())?;
+    let mut app = WindowApp {
+        context,
+        framebuffer,
+        window: None,
+        surface: None,
+        failure: None,
+    };
+    event_loop.run_app(&mut app)?;
+    if let Some(error) = app.failure {
+        return Err(io::Error::other(error).into());
+    }
+    Ok(())
+}
+
+struct WindowApp<D> {
+    context: Context<D>,
+    framebuffer: Framebuffer,
+    window: Option<Arc<Window>>,
+    surface: Option<Surface<D, Arc<Window>>>,
+    failure: Option<String>,
+}
+
+impl<D: raw_window_handle::HasDisplayHandle + 'static> ApplicationHandler for WindowApp<D> {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.window.is_some() {
+            return;
+        }
+        let window = match event_loop.create_window(
+            Window::default_attributes()
+                .with_title("B-Web")
+                .with_inner_size(winit::dpi::PhysicalSize::new(
+                    self.framebuffer.width(),
+                    self.framebuffer.height(),
+                )),
+        ) {
+            Ok(window) => Arc::new(window),
+            Err(error) => {
+                self.failure = Some(format!("could not create B-Web window: {error}"));
+                event_loop.exit();
+                return;
+            }
+        };
+        match Surface::new(&self.context, window.clone()) {
+            Ok(surface) => {
+                window.request_redraw();
+                self.surface = Some(surface);
+                self.window = Some(window);
+            }
+            Err(error) => {
+                self.failure = Some(format!("could not create window surface: {error}"));
+                event_loop.exit();
+            }
+        }
+    }
+
+    fn window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window_id: WindowId,
+        event: WindowEvent,
+    ) {
+        let Some(window) = self.window.as_ref() else {
+            return;
+        };
+        if window.id() != window_id {
+            return;
+        }
+        match event {
+            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::Resized(_) => window.request_redraw(),
+            WindowEvent::RedrawRequested => {
+                if let Err(error) = self.present_frame() {
+                    self.failure = Some(format!("could not present B-Web frame: {error}"));
+                    event_loop.exit();
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+impl<D> WindowApp<D> {
+    fn present_frame(&mut self) -> Result<(), Box<dyn Error>> {
+        let window = self
+            .window
+            .as_ref()
+            .ok_or_else(|| io::Error::other("window is not initialized"))?;
+        let size = window.inner_size();
+        let (Some(width), Some(height)) =
+            (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
+        else {
+            return Ok(());
+        };
+        let surface = self
+            .surface
+            .as_mut()
+            .ok_or_else(|| io::Error::other("window surface is not initialized"))?;
+        surface.resize(width, height)?;
+        let mut buffer = surface.buffer_mut()?;
+        let source_width = self.framebuffer.width();
+        let source_height = self.framebuffer.height();
+        let source = self.framebuffer.pixels();
+        for y in 0..height.get() {
+            let source_y = y * source_height / height.get();
+            for x in 0..width.get() {
+                let source_x = x * source_width / width.get();
+                let source_index = ((source_y * source_width + source_x) * 4) as usize;
+                let red = u32::from(source[source_index]);
+                let green = u32::from(source[source_index + 1]);
+                let blue = u32::from(source[source_index + 2]);
+                let target_index = (y * width.get() + x) as usize;
+                buffer[target_index] = (red << 16) | (green << 8) | blue;
+            }
+        }
+        window.pre_present_notify();
+        buffer.present()?;
+        Ok(())
+    }
 }
 
 /// Loads a user-selected font or the first available common Linux sans font.
@@ -234,11 +383,11 @@ fn print_usage() {
     println!("Usage:");
     println!("  b-web                 Show status and load cached Shield rules");
     println!(
-        "  b-web open <URL> [--dump-layout] [--render-ppm FILE]  Fetch, layout, and optionally render a frame"
+        "  b-web open <URL> [--dump-layout] [--render-ppm FILE] [--window]  Fetch, layout, and display a frame"
     );
     println!("  b-web update-filters  Download and cache EasyList and EasyPrivacy");
     println!(
-        "  b-web --help          Show this help\n\nRendering: set BWEB_FONT to select a TTF/OTF font; otherwise common Linux sans fonts are tried."
+        "  b-web --help          Show this help\n\nRendering: set BWEB_FONT to select a TTF/OTF font; otherwise common Linux sans fonts are tried.\nUse --window to display the software-rendered frame in a native window."
     );
 }
 
