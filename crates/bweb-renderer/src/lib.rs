@@ -41,6 +41,7 @@ pub struct LayoutBox {
     pub rect: Rect,
     pub margin: Edges,
     pub padding: Edges,
+    pub border: Edges,
     pub children: Vec<LayoutBox>,
 }
 
@@ -64,6 +65,7 @@ impl LayoutTree {
                 rect: Rect { x: 0.0, y: 0.0, width, height: 0.0 },
                 margin: Edges::default(),
                 padding: Edges::default(),
+                border: Edges::default(),
                 children: Vec::new(),
             });
         Self { root, box_count: count }
@@ -92,10 +94,19 @@ fn layout_node(
     };
     let margin = parse_edges(style.and_then(|style| style.get("margin")));
     let padding = parse_edges(style.and_then(|style| style.get("padding")));
-    let content_x = x + margin.left + padding.left;
-    let content_y = y + margin.top + padding.top;
-    let outer_width = (available_width - margin.left - margin.right).max(0.0);
-    let content_width = (outer_width - padding.left - padding.right).max(0.0);
+    let border = parse_border_widths(style);
+    let content_x = x + margin.left + border.left + padding.left;
+    let content_y = y + margin.top + border.top + padding.top;
+    let available_outer_width = (available_width - margin.left - margin.right).max(0.0);
+    let horizontal_insets = padding.left + padding.right + border.left + border.right;
+    let box_sizing = style.and_then(|style| style.get("box-sizing")).unwrap_or("content-box");
+    let specified_width = style.and_then(|style| style.get("width")).and_then(parse_length);
+    let outer_width = match specified_width {
+        Some(width) if box_sizing == "border-box" => width.min(available_outer_width),
+        Some(width) => (width + horizontal_insets).min(available_outer_width),
+        None => available_outer_width,
+    };
+    let content_width = (outer_width - horizontal_insets).max(0.0);
 
     *count += 1;
     let mut children = Vec::new();
@@ -143,9 +154,14 @@ fn layout_node(
     }
 
     let explicit_height = style.and_then(|style| style.get("height")).and_then(parse_length);
+    let vertical_insets = padding.top + padding.bottom + border.top + border.bottom;
+    let used_content_height = explicit_height.unwrap_or(content_height.max(if is_text { 19.2 } else { 0.0 }));
+    let height = match (explicit_height, box_sizing) {
+        (Some(value), "border-box") => value,
+        _ => used_content_height + vertical_insets,
+    };
     let is_document = matches!(node.kind(), NodeKind::Document);
     let width = if is_document { available_width } else { outer_width };
-    let height = explicit_height.unwrap_or(content_height.max(if is_text { 19.2 } else { 0.0 }));
     Some(LayoutBox {
         node: id,
         display,
@@ -153,10 +169,11 @@ fn layout_node(
             x: x + margin.left,
             y: y + margin.top,
             width,
-            height: height + padding.top + padding.bottom,
+            height,
         },
         margin,
         padding,
+        border,
         children,
     })
 }
@@ -177,6 +194,24 @@ fn parse_edges(value: Option<&str>) -> Edges {
         }
         _ => Edges::default(),
     }
+}
+
+fn parse_border_widths(style: Option<&bweb_css::ComputedStyle>) -> Edges {
+    let Some(style) = style else { return Edges::default() };
+    let mut edges = parse_edges(style.get("border-width"));
+    if let Some(value) = style.get("border-top-width").and_then(parse_length) {
+        edges.top = value;
+    }
+    if let Some(value) = style.get("border-right-width").and_then(parse_length) {
+        edges.right = value;
+    }
+    if let Some(value) = style.get("border-bottom-width").and_then(parse_length) {
+        edges.bottom = value;
+    }
+    if let Some(value) = style.get("border-left-width").and_then(parse_length) {
+        edges.left = value;
+    }
+    edges
 }
 
 fn parse_length(value: &str) -> Option<f32> {
@@ -254,6 +289,37 @@ mod tests {
         assert_eq!(box_node.rect.width, 760.0);
         assert_eq!(box_node.rect.height, 50.0);
         assert_eq!(box_node.padding.left, 5.0);
+        assert_eq!(box_node.border.left, 0.0);
+    }
+
+    #[test]
+    fn includes_border_and_respects_content_box_width() {
+        let (document, tree) = layout(
+            "<main></main>",
+            "main { display:block; width:200px; padding:10px; border-width:2px }",
+        );
+        let main = document.iter().find_map(|(id, node)| {
+            matches!(node.kind(), NodeKind::Element { tag_name, .. } if tag_name == "main")
+                .then_some(id)
+        }).expect("main");
+        let box_node = find(&tree.root, main).expect("main box");
+        assert_eq!(box_node.rect.width, 224.0);
+        assert_eq!(box_node.padding.left, 10.0);
+        assert_eq!(box_node.border.left, 2.0);
+    }
+
+    #[test]
+    fn border_box_width_includes_padding_and_border() {
+        let (document, tree) = layout(
+            "<main></main>",
+            "main { display:block; box-sizing:border-box; width:200px; padding:10px; border-width:2px }",
+        );
+        let main = document.iter().find_map(|(id, node)| {
+            matches!(node.kind(), NodeKind::Element { tag_name, .. } if tag_name == "main")
+                .then_some(id)
+        }).expect("main");
+        let box_node = find(&tree.root, main).expect("main box");
+        assert_eq!(box_node.rect.width, 200.0);
     }
 
     fn contains(root: &super::LayoutBox, id: bweb_html::NodeId) -> bool {
