@@ -87,7 +87,7 @@ fn to_paint_rect(rect: Rect) -> PaintRect {
 }
 
 /// Parses the small, explicit CSS color subset currently supported by painting.
-fn parse_color(value: &str) -> Option<Color> {
+pub(crate) fn parse_color(value: &str) -> Option<Color> {
     let value = value.trim().to_ascii_lowercase();
     match value.as_str() {
         "transparent" => return None,
