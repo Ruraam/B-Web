@@ -7,6 +7,7 @@ members = [
     "crates/bweb-js",
     "crates/bweb-net",
     "crates/bweb-shield",
+    "crates/bweb-filterlists",
     "crates/bweb-renderer",
     "crates/bweb-shell",
 ]
@@ -18,4 +19,5 @@ rust-version = "1.85"
 
 [workspace.dependencies]
 adblock = "0.13.5"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 url = "2.5"
