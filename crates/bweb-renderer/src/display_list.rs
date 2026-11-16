@@ -97,9 +97,9 @@ mod tests {
 
         let mut list = DisplayList::default();
         assert!(list.is_empty());
-        list.push(clip);
-        list.push(fill);
-        list.push(border);
+        list.push(clip.clone());
+        list.push(fill.clone());
+        list.push(border.clone());
         list.push(PaintItem::PopClip);
 
         assert_eq!(list.len(), 4);
