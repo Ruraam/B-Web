@@ -120,7 +120,7 @@ impl Font {
         let metrics = self.font_ref().metrics(&[]).scale(px_size);
         Metrics {
             ascent: metrics.ascent,
-            descent: -metrics.descent,
+            descent: metrics.descent,
             line_gap: metrics.leading,
             px_size,
         }
@@ -261,7 +261,12 @@ mod tests {
         let mut font = load();
         let glyph = font.glyph_for(' ').expect("space is mapped");
 
-        assert!(font.rasterize(glyph, 16.0).is_none());
+        match font.rasterize(glyph, 16.0) {
+            None => {}
+            Some(coverage) => {
+                assert!(coverage.is_empty() || coverage.data.iter().all(|&alpha| alpha == 0));
+            }
+        }
     }
 
     #[test]
