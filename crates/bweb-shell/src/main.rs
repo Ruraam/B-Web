@@ -282,9 +282,9 @@ impl<D: raw_window_handle::HasDisplayHandle> WindowApp<D> {
         let source_height = self.framebuffer.height();
         let source = self.framebuffer.pixels();
         for y in 0..height.get() {
-            let source_y = y * source_height / height.get();
+            let source_y = y * source_height / height;
             for x in 0..width.get() {
-                let source_x = x * source_width / width.get();
+                let source_x = x * source_width / width;
                 let source_index = ((source_y * source_width + source_x) * 4) as usize;
                 let red = u32::from(source[source_index]);
                 let green = u32::from(source[source_index + 1]);
