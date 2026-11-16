@@ -193,9 +193,7 @@ fn layout_node(
         }
     }
 
-    let line_boxes = if display == Display::Block
-        && matches!(node.kind(), NodeKind::Element { .. })
-    {
+    let line_boxes = if display == Display::Block && matches!(node.kind(), NodeKind::Element { .. }) {
         build_line_boxes(document, &children, content_x, content_y, content_width, style)
     } else {
         Vec::new()
@@ -488,8 +486,7 @@ mod tests {
         let visible_text = document
             .iter()
             .find_map(|(id, node)| {
-                matches!(node.kind(), NodeKind::Text(text) if text == "Visible text")
-                    .then_some(id)
+                matches!(node.kind(), NodeKind::Text(text) if text == "Visible text").then_some(id)
             })
             .expect("visible body text");
         assert!(contains(&tree.root, visible_text));
