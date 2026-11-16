@@ -5,17 +5,26 @@
 //! every outgoing resource request.
 
 use adblock::{
+    Engine,
     lists::{FilterSet, ParseOptions, RuleTypes},
     request::Request,
-    Engine,
 };
 use std::{error::Error, fmt};
 
 /// Resource category passed to the filter engine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResourceType {
-    Document, Subdocument, Stylesheet, Script, Image, Font, Media,
-    XmlHttpRequest, Fetch, WebSocket, Other,
+    Document,
+    Subdocument,
+    Stylesheet,
+    Script,
+    Image,
+    Font,
+    Media,
+    XmlHttpRequest,
+    Fetch,
+    WebSocket,
+    Other,
 }
 
 impl ResourceType {
@@ -77,18 +86,14 @@ impl Shield {
     #[must_use]
     pub fn from_filter_lists<'a>(lists: impl IntoIterator<Item = &'a str>) -> Self {
         let mut filter_set = FilterSet::new(false);
-        let options = ParseOptions {
-            rule_types: RuleTypes::NetworkOnly,
-            ..ParseOptions::default()
-        };
+        let options =
+            ParseOptions { rule_types: RuleTypes::NetworkOnly, ..ParseOptions::default() };
 
         for list in lists {
             filter_set.add_filter_list(list.to_owned(), options);
         }
 
-        Self {
-            engine: Engine::new_with_filter_set(filter_set),
-        }
+        Self { engine: Engine::new_with_filter_set(filter_set) }
     }
 
     /// Compiles individual ABP/uBlock network rules.
@@ -112,19 +117,10 @@ impl Shield {
         resource_type: ResourceType,
         method: &str,
     ) -> Result<Decision, ShieldError> {
-        let request = Request::new(
-            resource_url,
-            page_url,
-            resource_type.as_filter_type(),
-            method,
-        )?;
+        let request = Request::new(resource_url, page_url, resource_type.as_filter_type(), method)?;
         let result = self.engine.check_network_request(&request);
 
-        Ok(if result.should_block() {
-            Decision::Block
-        } else {
-            Decision::Allow
-        })
+        Ok(if result.should_block() { Decision::Block } else { Decision::Allow })
     }
 }
 
@@ -141,36 +137,42 @@ mod tests {
     #[test]
     fn blocks_matching_script_request() {
         let shield = Shield::from_rules(["||ads.example^"]);
-        let result = shield.check(
-            "https://ads.example/banner.js",
-            "https://news.example/",
-            ResourceType::Script,
-            "GET",
-        ).expect("valid request");
+        let result = shield
+            .check(
+                "https://ads.example/banner.js",
+                "https://news.example/",
+                ResourceType::Script,
+                "GET",
+            )
+            .expect("valid request");
         assert_eq!(result, Decision::Block);
     }
 
     #[test]
     fn allows_exception_rule() {
         let shield = Shield::from_rules(["||ads.example^", "@@||ads.example^$script"]);
-        let result = shield.check(
-            "https://ads.example/banner.js",
-            "https://news.example/",
-            ResourceType::Script,
-            "GET",
-        ).expect("valid request");
+        let result = shield
+            .check(
+                "https://ads.example/banner.js",
+                "https://news.example/",
+                ResourceType::Script,
+                "GET",
+            )
+            .expect("valid request");
         assert_eq!(result, Decision::Allow);
     }
 
     #[test]
     fn allows_unmatched_request() {
         let shield = Shield::from_rules(["||ads.example^"]);
-        let result = shield.check(
-            "https://cdn.example/article.js",
-            "https://news.example/",
-            ResourceType::Script,
-            "GET",
-        ).expect("valid request");
+        let result = shield
+            .check(
+                "https://cdn.example/article.js",
+                "https://news.example/",
+                ResourceType::Script,
+                "GET",
+            )
+            .expect("valid request");
         assert_eq!(result, Decision::Allow);
     }
 }

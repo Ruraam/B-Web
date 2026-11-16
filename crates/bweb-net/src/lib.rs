@@ -54,7 +54,7 @@ impl NetworkPolicy {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_web_url, NetworkPolicy, WebUrlError};
+    use super::{NetworkPolicy, WebUrlError, parse_web_url};
     use bweb_shield::{Decision, ResourceType, Shield};
 
     #[test]
@@ -74,12 +74,14 @@ mod tests {
     #[test]
     fn policy_blocks_before_transport() {
         let policy = NetworkPolicy::new(Shield::from_rules(["||ads.example^"]));
-        let decision = policy.authorize(
-            "https://ads.example/ad.js",
-            "https://news.example/",
-            ResourceType::Script,
-            "GET",
-        ).expect("valid request");
+        let decision = policy
+            .authorize(
+                "https://ads.example/ad.js",
+                "https://news.example/",
+                ResourceType::Script,
+                "GET",
+            )
+            .expect("valid request");
         assert_eq!(decision, Decision::Block);
     }
 }
