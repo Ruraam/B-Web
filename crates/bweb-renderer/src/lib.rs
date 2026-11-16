@@ -155,7 +155,8 @@ fn layout_node(
 
     let explicit_height = style.and_then(|style| style.get("height")).and_then(parse_length);
     let vertical_insets = padding.top + padding.bottom + border.top + border.bottom;
-    let used_content_height = explicit_height.unwrap_or(content_height.max(if is_text { 19.2 } else { 0.0 }));
+    let used_content_height =
+        explicit_height.unwrap_or(content_height.max(if is_text { 19.2 } else { 0.0 }));
     let height = match (explicit_height, box_sizing) {
         (Some(value), "border-box") => value,
         _ => used_content_height + vertical_insets,
@@ -165,12 +166,7 @@ fn layout_node(
     Some(LayoutBox {
         node: id,
         display,
-        rect: Rect {
-            x: x + margin.left,
-            y: y + margin.top,
-            width,
-            height,
-        },
+        rect: Rect { x: x + margin.left, y: y + margin.top, width, height },
         margin,
         padding,
         border,
@@ -298,10 +294,13 @@ mod tests {
             "<main></main>",
             "main { display:block; width:200px; padding:10px; border-width:2px }",
         );
-        let main = document.iter().find_map(|(id, node)| {
-            matches!(node.kind(), NodeKind::Element { tag_name, .. } if tag_name == "main")
-                .then_some(id)
-        }).expect("main");
+        let main = document
+            .iter()
+            .find_map(|(id, node)| {
+                matches!(node.kind(), NodeKind::Element { tag_name, .. if tag_name == "main")
+                    .then_some(id)
+            })
+            .expect("main");
         let box_node = find(&tree.root, main).expect("main box");
         assert_eq!(box_node.rect.width, 224.0);
         assert_eq!(box_node.padding.left, 10.0);
