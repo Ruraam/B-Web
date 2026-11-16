@@ -219,7 +219,7 @@ mod tests {
     use crate::{LayoutTree, PaintAdapter, Rect};
     use bweb_css::{StyleEngine, Stylesheet};
     use bweb_html::HtmlDocument;
-    use bweb_renderer::{Framebuffer, PaintItem, PaintLayout, Painter, Rasterizer};
+    use bweb_renderer::{Framebuffer, PaintItem, Painter, Rasterizer};
     use bweb_text::Font;
 
     fn font() -> Font {
