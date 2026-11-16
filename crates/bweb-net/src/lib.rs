@@ -272,4 +272,72 @@ mod tests {
 
         assert!(matches!(error, HttpTransportError::Blocked { .. }));
     }
+
+    #[test]
+    fn transport_sends_gpc_and_dnt_on_the_wire() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local test server");
+        let address = listener.local_addr().expect("local address");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept request");
+            let mut request = [0_u8; 4096];
+            let count = stream.read(&mut request).expect("read request headers");
+            let request = String::from_utf8_lossy(&request[..count]).to_ascii_lowercase();
+            assert!(request.contains("sec-gpc: 1"));
+            assert!(request.contains("dnt: 1"));
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .expect("write response");
+        });
+
+        let transport = HttpTransport::new(NetworkPolicy::new(Shield::empty()))
+            .expect("rustls HTTP client");
+        let response = transport
+            .execute(
+                "GET",
+                &format!("http://{address}/"),
+                "http://page.example/",
+                ResourceType::Document,
+                HeaderMap::new(),
+                None,
+            )
+            .expect("local request should pass");
+        assert_eq!(response.status(), StatusCode::OK);
+        server.join().expect("server thread");
+    }
+
+    #[test]
+    fn redirect_target_is_rechecked_before_following() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local test server");
+        let address = listener.local_addr().expect("local address");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept first hop");
+            let mut request = [0_u8; 2048];
+            let _ = stream.read(&mut request).expect("read first hop");
+            stream.write_all(
+                b"HTTP/1.1 302 Found\r\nLocation: https://ads.example/pixel\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            ).expect("write redirect");
+        });
+
+        let policy = NetworkPolicy::new(Shield::from_rules(["||ads.example^"]));
+        let transport = HttpTransport::new(policy).expect("rustls HTTP client");
+        let error = transport
+            .execute(
+                "GET",
+                &format!("http://{address}/redirect"),
+                "http://page.example/",
+                ResourceType::Image,
+                HeaderMap::new(),
+                None,
+            )
+            .expect_err("redirect destination must be blocked");
+        assert!(matches!(error, HttpTransportError::Blocked { .. }));
+        server.join().expect("server thread");
+    }
 }

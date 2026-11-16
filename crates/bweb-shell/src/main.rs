@@ -1,5 +1,6 @@
 use bweb_filterlists::FilterListDownloader;
-use bweb_shield::{FilterListCache, FilterListError};
+use bweb_net::{HttpTransport, NetworkPolicy};
+use bweb_shield::{FilterListCache, FilterListError, Shield};
 use std::{env, error::Error, io, path::PathBuf, process};
 
 fn main() {
@@ -37,21 +38,22 @@ fn show_status() -> Result<(), Box<dyn Error>> {
     let cache_directory = filter_list_cache_directory()?;
     let cache = FilterListCache::new(&cache_directory);
 
-    // Keep the compiled engine alive for the lifetime of this shell invocation.
-    // Page networking will consume it once the transport layer is implemented.
-    let _shield = match cache.load_shield() {
+    // The transport owns the compiled policy and keeps its reqwest client private.
+    let shield = match cache.load_shield() {
         Ok(shield) => {
             println!("Shield: ready (cached EasyList/EasyPrivacy rules loaded)");
-            Some(shield)
+            shield
         }
         Err(FilterListError::NoCachedLists) => {
-            println!("Shield: inactive (no cached filter lists)");
+            println!("Shield: inactive (empty ruleset; no cached filter lists)");
             println!("Run 'b-web update-filters' to download the built-in filter lists.");
-            None
+            Shield::empty()
         }
         Err(error) => return Err(error.into()),
     };
 
+    let _transport = HttpTransport::new(NetworkPolicy::new(shield))?;
+    println!("HTTP/HTTPS transport: ready (rustls, Shield-gated, Sec-GPC/DNT enabled)");
     println!("Cache: {}", cache.directory().display());
     Ok(())
 }

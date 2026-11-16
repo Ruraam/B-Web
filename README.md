@@ -12,7 +12,7 @@ The project deliberately does **not** embed Chromium, WebKit, Gecko or Wry. The 
 | bweb-html | HTML document and DOM foundation |
 | bweb-css | CSS model and style foundation |
 | bweb-js | Reserved foundation for the future Rust JavaScript runtime |
-| bweb-net | HTTP(S) URL validation and Shield-backed network admission policy |
+| bweb-net | Rustls HTTP/HTTPS transport with mandatory Shield admission and privacy headers |
 | bweb-shield | Brave's Rust adblock engine integration and bounded local filter-list cache |
 | bweb-filterlists | HTTPS-only, bounded downloader for the built-in EasyList and EasyPrivacy sources |
 | bweb-renderer | Rendering abstraction |
@@ -46,15 +46,17 @@ The downloader sends a fixed B-Web user-agent and no machine ID, installation UU
 
 ## Network admission policy
 
-`bweb-net::NetworkPolicy` owns a compiled Shield instance and exposes `authorize_web_request` as the high-level admission check for future transports. The method validates that both the resource URL and page URL are absolute HTTP(S) URLs, then asks Shield whether the resource is allowed or blocked. A blocked decision must stop the request before socket creation or response-body reads. URL and Shield failures are returned as explicit errors.
+`bweb-net::HttpTransport` is the HTTP/HTTPS client boundary. It is built with reqwest’s Rustls TLS backend (no OpenSSL feature) and takes ownership of a `NetworkPolicy`. Its underlying client and policy are private: downstream code cannot extract the client or submit requests outside the guarded `execute` method. The shell constructs this transport at startup using locally compiled Shield rules (or an empty ruleset when no lists are cached).
 
-The lower-level `authorize` method remains available for callers that already validate their URLs. Future HTTP/TLS transports must use the high-level gate before performing network I/O. The crate currently provides policy and validation only; it does not yet implement a page transport, and the shell has not yet connected a page lifecycle to this policy.
+Every request is checked by `NetworkPolicy::authorize_web_request` before the transport calls `send`. Automatic redirects are disabled in reqwest; the transport follows supported redirect statuses itself and revalidates each destination through Shield before opening the next connection. Cross-origin redirects strip Authorization, Proxy-Authorization, and Cookie headers. Redirects are capped at ten, connection and total request timeouts are finite, and response bodies are returned as streams rather than buffered wholesale.
+
+Every outgoing request forcibly includes `Sec-GPC: 1` and `DNT: 1`, overriding caller-supplied values. The transport rejects non-HTTP(S) URLs and returns a distinct blocked error without opening a connection. The lower-level `NetworkPolicy::authorize` remains available for callers that already validate URLs, but the physical HTTP client is not exposed to those callers.
 
 **Privacy boundary:** startup compiles cached rules locally and performs no network request. Filter-list downloads remain explicit through `b-web update-filters`.
 
 ## Current status
 
-This is an incremental engine foundation. HTML parsing, CSS layout, JavaScript execution, general-purpose HTTP/TLS page transport, and GPU rendering remain separate milestones. The filter-list downloader, cache, startup Shield initialization, URL validation, and Shield-backed network admission policy are implemented as independent components.
+This is an incremental engine foundation. HTML parsing, CSS layout, JavaScript execution, browser page lifecycle integration and GPU rendering remain separate milestones. The Rustls HTTP/HTTPS transport is implemented and constructed by the shell, but no rendered page or DOM resource loader calls it yet.
 
 ## Design principles
 
