@@ -304,25 +304,18 @@ mod tests {
     #[test]
     fn prepared_dom_text_reaches_the_framebuffer_through_the_full_paint_pipeline() {
         let document = HtmlDocument::parse("<main>MMMMM</main>");
-        let stylesheet = Stylesheet::parse(
-            "main { display:block; font-size:20px; color:#123456 }",
-        )
-        .expect("valid stylesheet");
+        let stylesheet = Stylesheet::parse("main { display:block; font-size:20px; color:#123456 }")
+            .expect("valid stylesheet");
         let styles = StyleEngine::new().compute(&document, &[stylesheet]);
         let tree = LayoutTree::build(&document, &styles, 320.0);
         let mut font = font();
         let text_runs = prepare_text_runs(&tree, &styles, &mut font, 1.0);
         assert!(!text_runs.is_empty(), "DOM text should produce prepared glyphs");
 
-        let adapter = PaintAdapter::new(
-            &tree,
-            &styles,
-            Rect { x: 0.0, y: 0.0, width: 320.0, height: 100.0 },
-        )
-        .with_text_runs(&text_runs);
-        let display_list = Painter::new(&adapter, 1.0)
-            .expect("valid device scale")
-            .paint();
+        let adapter =
+            PaintAdapter::new(&tree, &styles, Rect { x: 0.0, y: 0.0, width: 320.0, height: 100.0 })
+                .with_text_runs(&text_runs);
+        let display_list = Painter::new(&adapter, 1.0).expect("valid device scale").paint();
         assert!(
             display_list.items.iter().any(|item| matches!(item, PaintItem::Text { .. })),
             "prepared text should become a display-list text command",
@@ -338,5 +331,4 @@ mod tests {
             "rasterized glyph pixels should retain the computed CSS text color",
         );
     }
-
 }
