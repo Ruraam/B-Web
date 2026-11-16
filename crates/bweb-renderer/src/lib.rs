@@ -8,7 +8,7 @@ mod paint_layout;
 mod painter;
 mod rasterizer;
 
-pub use display_list::{Color, DisplayList, PaintItem};
+pub use display_list::{Color, DisplayList, PaintItem, PositionedGlyph};
 pub use framebuffer::{Framebuffer, FramebufferError};
 pub use paint_layout::{PaintLayout, PaintNode, PaintStyle};
 pub use painter::{Painter, PainterError};
