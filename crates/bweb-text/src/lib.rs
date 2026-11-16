@@ -73,9 +73,7 @@ impl Coverage {
             return 0;
         }
 
-        let index = (y as usize)
-            .saturating_mul(self.width as usize)
-            .saturating_add(x as usize);
+        let index = (y as usize).saturating_mul(self.width as usize).saturating_add(x as usize);
         self.data.get(index).copied().unwrap_or(0)
     }
 }
@@ -101,20 +99,11 @@ impl Font {
     pub fn from_index(data: Vec<u8>, index: usize) -> Result<Self, FontError> {
         let font = FontRef::from_index(&data, index).ok_or(FontError::Invalid)?;
 
-        Ok(Self {
-            data,
-            offset: font.offset,
-            key: font.key,
-            scale_context: ScaleContext::new(),
-        })
+        Ok(Self { data, offset: font.offset, key: font.key, scale_context: ScaleContext::new() })
     }
 
     fn font_ref(&self) -> FontRef<'_> {
-        FontRef {
-            data: &self.data,
-            offset: self.offset,
-            key: self.key,
-        }
+        FontRef { data: &self.data, offset: self.offset, key: self.key }
     }
 
     /// Returns global metrics scaled to the requested pixel size.
@@ -152,10 +141,7 @@ impl Font {
             return 0.0;
         }
 
-        self.font_ref()
-            .glyph_metrics(&[])
-            .scale(px_size)
-            .advance_width(glyph)
+        self.font_ref().glyph_metrics(&[]).scale(px_size).advance_width(glyph)
     }
 
     /// Rasterizes a glyph outline into an 8-bit alpha coverage mask.
@@ -168,17 +154,8 @@ impl Font {
             return None;
         }
 
-        let font = FontRef {
-            data: &self.data,
-            offset: self.offset,
-            key: self.key,
-        };
-        let mut scaler = self
-            .scale_context
-            .builder(font)
-            .size(px_size)
-            .hint(false)
-            .build();
+        let font = FontRef { data: &self.data, offset: self.offset, key: self.key };
+        let mut scaler = self.scale_context.builder(font).size(px_size).hint(false).build();
 
         let image = Render::new(&[Source::Outline])
             .format(swash::zeno::Format::Alpha)
@@ -262,10 +239,7 @@ mod tests {
         let coverage = font.rasterize(glyph, 32.0).expect("M has an outline");
 
         assert!(!coverage.is_empty());
-        assert_eq!(
-            coverage.data.len(),
-            coverage.width as usize * coverage.height as usize
-        );
+        assert_eq!(coverage.data.len(), coverage.width as usize * coverage.height as usize);
         assert!(coverage.data.iter().any(|&alpha| alpha > 0));
         assert!(coverage.data.iter().any(|&alpha| alpha == 255));
     }
@@ -290,13 +264,7 @@ mod tests {
 
     #[test]
     fn coverage_access_is_bounds_checked() {
-        let coverage = Coverage {
-            width: 2,
-            height: 1,
-            left: 0,
-            top: 1,
-            data: vec![0, 255],
-        };
+        let coverage = Coverage { width: 2, height: 1, left: 0, top: 1, data: vec![0, 255] };
 
         assert_eq!(coverage.alpha_at(0, 0), 0);
         assert_eq!(coverage.alpha_at(1, 0), 255);
