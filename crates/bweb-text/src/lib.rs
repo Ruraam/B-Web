@@ -243,7 +243,7 @@ mod tests {
         assert!(!coverage.is_empty());
         assert_eq!(coverage.data.len(), coverage.width as usize * coverage.height as usize);
         assert!(coverage.data.iter().any(|&alpha| alpha > 0));
-        assert!(coverage.data.iter().any(|&alpha| alpha == 255));
+        assert!(coverage.data.contains(&255));
     }
 
     #[test]
