@@ -1,5 +1,5 @@
 use bweb_filterlists::FilterListDownloader;
-use bweb_shield::FilterListCache;
+use bweb_shield::{FilterListCache, FilterListError};
 use std::{env, error::Error, io, path::PathBuf, process};
 
 fn main() {
@@ -13,13 +13,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let command = env::args_os().nth(1);
 
     match command.as_deref() {
-        None => {
-            println!("B-Web {}", bweb_core::VERSION);
-            println!("Stage: {:?}", bweb_core::EngineStage::Bootstrap);
-            println!("Privacy engine: {}", bweb_shield::FILTER_ENGINE);
-            println!("JavaScript runtime: {:?}", bweb_js::RuntimeStatus::NotImplemented);
-            println!("Run 'b-web update-filters' to download the built-in filter lists.");
-        }
+        None => show_status()?,
         Some(command) if command == "--help" || command == "-h" => print_usage(),
         Some(command) if command == "update-filters" => update_filters()?,
         Some(command) => {
@@ -34,11 +28,39 @@ fn run() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+fn show_status() -> Result<(), Box<dyn Error>> {
+    println!("B-Web {}", bweb_core::VERSION);
+    println!("Stage: {:?}", bweb_core::EngineStage::Bootstrap);
+    println!("Privacy engine: {}", bweb_shield::FILTER_ENGINE);
+    println!("JavaScript runtime: {:?}", bweb_js::RuntimeStatus::NotImplemented);
+
+    let cache_directory = filter_list_cache_directory()?;
+    let cache = FilterListCache::new(&cache_directory);
+
+    // Keep the compiled engine alive for the lifetime of this shell invocation.
+    // Page networking will consume it once the transport layer is implemented.
+    let _shield = match cache.load_shield() {
+        Ok(shield) => {
+            println!("Shield: ready (cached EasyList/EasyPrivacy rules loaded)");
+            Some(shield)
+        }
+        Err(FilterListError::NoCachedLists) => {
+            println!("Shield: inactive (no cached filter lists)");
+            println!("Run 'b-web update-filters' to download the built-in filter lists.");
+            None
+        }
+        Err(error) => return Err(error.into()),
+    };
+
+    println!("Cache: {}", cache.directory().display());
+    Ok(())
+}
+
 fn print_usage() {
     println!("B-Web {}", bweb_core::VERSION);
     println!();
     println!("Usage:");
-    println!("  b-web                 Show engine status");
+    println!("  b-web                 Show status and load cached Shield rules");
     println!("  b-web update-filters  Download and cache EasyList and EasyPrivacy");
     println!("  b-web --help          Show this help");
 }

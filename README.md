@@ -28,25 +28,27 @@ cargo test --workspace
 cargo run --release -p bweb-shell
 ```
 
-## Filter-list downloads
+## Filter-list downloads and activation
 
 The shell exposes an explicit command to download the built-in EasyList and EasyPrivacy sources:
 
 ```sh
-cargo run --release -p bweb-shell -- update-filters
+b-web update-filters
 ```
 
-The command stores lists in `$XDG_CACHE_HOME/b-web/filter-lists` when XDG_CACHE_HOME is an absolute path, or falls back to `$HOME/.cache/b-web/filter-lists`. It does not require root privileges. Running B-Web without a command performs no network access and does not update the lists automatically.
+The command stores lists in `$XDG_CACHE_HOME/b-web/filter-lists` when `XDG_CACHE_HOME` is an absolute path, or falls back to `$HOME/.cache/b-web/filter-lists`. It does not require root privileges. Running `b-web` without a command performs no network access and does not update the lists automatically.
 
-The bweb-filterlists crate retrieves only the built-in EasyList and EasyPrivacy HTTPS endpoints. It uses Rustls, a five-second connection timeout, a twenty-second total request timeout, HTTPS-only redirects (maximum five), and an 8 MiB streaming response limit per list. Responses must be non-empty UTF-8 text and contain the expected EasyList or EasyPrivacy title before they are written to the cache.
+On a normal `b-web` startup, the shell now loads the cached lists and compiles them into an in-memory Shield engine. It reports whether Shield is ready or inactive because no lists have been cached. Invalid or unreadable cached lists are reported as errors rather than silently ignored. The compiled engine remains alive for the shell invocation.
+
+The `bweb-filterlists` crate retrieves only the built-in EasyList and EasyPrivacy HTTPS endpoints. It uses Rustls, a five-second connection timeout, a twenty-second total request timeout, HTTPS-only redirects (maximum five), and an 8 MiB streaming response limit per list. Responses must be non-empty UTF-8 text and contain the expected EasyList or EasyPrivacy title before they are written to the cache.
 
 The downloader sends a fixed B-Web user-agent and no machine ID, installation UUID, or other persistent device identifier. Downloading these two built-in lists is a bootstrap operation and therefore does not pass through the ad-block rules being downloaded. The cache replaces each file atomically; the pair is downloaded before either cache file is changed, but a filesystem failure during the second replacement can leave the first list refreshed.
 
-The shell currently downloads and caches the lists; it does not yet activate or reload a running Shield instance. The cache API can compile the cached lists into a Shield engine for a future integration step.
+**Integration boundary:** Shield can now be initialized from the local cache at shell startup, but the browser does not yet have a page-network transport or request lifecycle to route through it. The current startup integration therefore prepares the engine; it does not yet claim to block live page requests. No background refresh or automatic network access is performed.
 
 ## Current status
 
-This is an incremental engine foundation. HTML parsing, CSS layout, JavaScript execution, general-purpose HTTP/TLS page transport, and GPU rendering remain separate milestones. The filter-list downloader, cache, and explicit shell update command are implemented as independent components.
+This is an incremental engine foundation. HTML parsing, CSS layout, JavaScript execution, general-purpose HTTP/TLS page transport, and GPU rendering remain separate milestones. The filter-list downloader, cache, startup Shield initialization, and explicit shell update command are implemented as independent components.
 
 ## Design principles
 
