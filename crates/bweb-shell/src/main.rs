@@ -330,18 +330,17 @@ fn copy_scaled_pixels(
 
     // Fit the source frame inside the surface without distorting its aspect ratio.
     target[..target_len].fill(0x00FF_FFFF);
-    let (content_width, content_height) =
-        if u64::from(target_width) * u64::from(source_height)
-            <= u64::from(target_height) * u64::from(source_width)
-        {
-            let height = (u64::from(source_height) * u64::from(target_width)
-                / u64::from(source_width)) as u32;
-            (target_width, height.max(1))
-        } else {
-            let width = (u64::from(source_width) * u64::from(target_height)
-                / u64::from(source_height)) as u32;
-            (width.max(1), target_height)
-        };
+    let (content_width, content_height) = if u64::from(target_width) * u64::from(source_height)
+        <= u64::from(target_height) * u64::from(source_width)
+    {
+        let height =
+            (u64::from(source_height) * u64::from(target_width) / u64::from(source_width)) as u32;
+        (target_width, height.max(1))
+    } else {
+        let width =
+            (u64::from(source_width) * u64::from(target_height) / u64::from(source_height)) as u32;
+        (width.max(1), target_height)
+    };
     let offset_x = (target_width - content_width) / 2;
     let offset_y = (target_height - content_height) / 2;
 
@@ -355,8 +354,8 @@ fn copy_scaled_pixels(
             let red = u32::from(source[source_index]);
             let green = u32::from(source[source_index + 1]);
             let blue = u32::from(source[source_index + 2]);
-            let target_index = ((y + offset_y) as usize * target_width as usize)
-                + (x + offset_x) as usize;
+            let target_index =
+                ((y + offset_y) as usize * target_width as usize) + (x + offset_x) as usize;
             target[target_index] = (red << 16) | (green << 8) | blue;
         }
     }
@@ -497,10 +496,8 @@ mod tests {
         assert_eq!(
             target,
             [
-                0xFFFFFF, 0xFFFFFF, 0xFFFFFF, 0xFFFFFF,
-                0xFF0000, 0xFF0000, 0x00FF00, 0x00FF00,
-                0xFF0000, 0xFF0000, 0x00FF00, 0x00FF00,
-                0xFFFFFF, 0xFFFFFF, 0xFFFFFF, 0xFFFFFF,
+                0xFFFFFF, 0xFFFFFF, 0xFFFFFF, 0xFFFFFF, 0xFF0000, 0xFF0000, 0x00FF00, 0x00FF00,
+                0xFF0000, 0xFF0000, 0x00FF00, 0x00FF00, 0xFFFFFF, 0xFFFFFF, 0xFFFFFF, 0xFFFFFF,
             ]
         );
     }
