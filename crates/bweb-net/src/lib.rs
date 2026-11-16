@@ -181,6 +181,12 @@ impl Error for HttpTransportError {
     }
 }
 
+impl From<NetworkPolicyError> for HttpTransportError {
+    fn from(error: NetworkPolicyError) -> Self {
+        Self::Policy(error)
+    }
+}
+
 impl From<reqwest::Error> for HttpTransportError {
     fn from(error: reqwest::Error) -> Self {
         Self::Client(error)
