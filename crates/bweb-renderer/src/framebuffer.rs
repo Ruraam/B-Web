@@ -37,20 +37,30 @@ impl Framebuffer {
     }
 
     #[must_use]
-    pub const fn width(&self) -> u32 { self.width }
+    pub const fn width(&self) -> u32 {
+        self.width
+    }
 
     #[must_use]
-    pub const fn height(&self) -> u32 { self.height }
+    pub const fn height(&self) -> u32 {
+        self.height
+    }
 
     #[must_use]
-    pub const fn stride(&self) -> usize { self.stride }
+    pub const fn stride(&self) -> usize {
+        self.stride
+    }
 
     /// Straight-alpha RGBA8 bytes, ready for an external buffer wrapper.
     #[must_use]
-    pub fn pixels(&self) -> &[u8] { &self.pixels }
+    pub fn pixels(&self) -> &[u8] {
+        &self.pixels
+    }
 
     /// Mutable access to the tightly packed RGBA8 bytes.
-    pub fn pixels_mut(&mut self) -> &mut [u8] { &mut self.pixels }
+    pub fn pixels_mut(&mut self) -> &mut [u8] {
+        &mut self.pixels
+    }
 
     /// Replaces every pixel without blending.
     pub fn clear(&mut self, color: [u8; 4]) {
@@ -61,19 +71,25 @@ impl Framebuffer {
 
     /// Composites one source pixel over the destination.
     pub fn set_pixel(&mut self, x: u32, y: u32, source: [u8; 4]) {
-        if x >= self.width || y >= self.height { return; }
+        if x >= self.width || y >= self.height {
+            return;
+        }
         let offset = y as usize * self.stride + x as usize * 4;
         blend_source_over(&mut self.pixels[offset..offset + 4], source);
     }
 
     /// Composites a rectangle, clipping negative and out-of-bounds edges.
     pub fn fill_rect(&mut self, x: i32, y: i32, width: u32, height: u32, color: [u8; 4]) {
-        if width == 0 || height == 0 || self.width == 0 || self.height == 0 { return; }
+        if width == 0 || height == 0 || self.width == 0 || self.height == 0 {
+            return;
+        }
         let left = i64::from(x).max(0);
         let top = i64::from(y).max(0);
         let right = (i64::from(x) + i64::from(width)).min(i64::from(self.width));
         let bottom = (i64::from(y) + i64::from(height)).min(i64::from(self.height));
-        if left >= right || top >= bottom { return; }
+        if left >= right || top >= bottom {
+            return;
+        }
         for row in top as usize..bottom as usize {
             let row_start = row * self.stride;
             for column in left as usize..right as usize {
@@ -86,7 +102,9 @@ impl Framebuffer {
 
 fn blend_source_over(destination: &mut [u8], source: [u8; 4]) {
     let sa = u32::from(source[3]);
-    if sa == 0 { return; }
+    if sa == 0 {
+        return;
+    }
     if sa == 255 {
         destination.copy_from_slice(&source);
         return;
@@ -121,7 +139,10 @@ mod tests {
 
     #[test]
     fn rejects_dimension_overflow() {
-        assert_eq!(Framebuffer::new(u32::MAX, u32::MAX), Err(FramebufferError::DimensionsTooLarge));
+        assert_eq!(
+            Framebuffer::new(u32::MAX, u32::MAX),
+            Err(FramebufferError::DimensionsTooLarge)
+        );
     }
 
     #[test]
@@ -159,10 +180,13 @@ mod tests {
     fn clips_rectangle_at_all_edges() {
         let mut fb = Framebuffer::new(3, 2).expect("framebuffer");
         fb.fill_rect(-1, -1, 3, 3, [255, 0, 0, 255]);
-        assert_eq!(fb.pixels(), &[
-            255,0,0,255, 255,0,0,255, 0,0,0,0,
-            255,0,0,255, 255,0,0,255, 0,0,0,0,
-        ]);
+        assert_eq!(
+            fb.pixels(),
+            &[
+                255, 0, 0, 255, 255, 0, 0, 255, 0, 0, 0, 0, 255, 0, 0, 255, 255, 0, 0, 255, 0, 0,
+                0, 0,
+            ]
+        );
     }
 
     #[test]
