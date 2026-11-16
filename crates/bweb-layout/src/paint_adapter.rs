@@ -174,12 +174,9 @@ mod tests {
             color: Color::rgba(20, 30, 40, 255),
         });
         let runs = HashMap::from([(text_node, Arc::clone(&run))]);
-        let adapter = PaintAdapter::new(
-            &tree,
-            &styles,
-            Rect { x: 0.0, y: 0.0, width: 320.0, height: 200.0 },
-        )
-        .with_text_runs(&runs);
+        let adapter =
+            PaintAdapter::new(&tree, &styles, Rect { x: 0.0, y: 0.0, width: 320.0, height: 200.0 })
+                .with_text_runs(&runs);
 
         let mut painted_text = Vec::new();
         adapter.visit(&mut |node| {
