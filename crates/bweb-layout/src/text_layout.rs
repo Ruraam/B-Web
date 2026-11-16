@@ -142,6 +142,84 @@ pub fn layout_text(
     result
 }
 
+
+
+/// Builds renderer-ready text runs from the inline fragments in a layout tree.
+///
+/// The caller supplies the selected font face. Font-family matching and fallback
+/// are intentionally left to the font-selection layer. Fragment geometry and CSS
+/// font sizes are logical pixels; glyph masks and positions are produced at the
+/// requested device scale so the Painter must not scale them a second time.
+pub fn prepare_text_runs(
+    tree: &crate::LayoutTree,
+    styles: &bweb_css::ComputedStyleMap,
+    font: &mut Font,
+    scale_factor: f32,
+) -> std::collections::HashMap<bweb_html::NodeId, std::sync::Arc<bweb_renderer::TextRun>> {
+    use std::{collections::HashMap, sync::Arc};
+    use bweb_renderer::{Color, TextRun};
+    use bweb_html::NodeId;
+
+    fn collect<'a>(layout: &'a crate::LayoutBox, output: &mut Vec<&'a crate::TextFragment>) {
+        for line in &layout.line_boxes {
+            output.extend(line.fragments.iter());
+        }
+        for child in &layout.children {
+            collect(child, output);
+        }
+    }
+
+    if !scale_factor.is_finite() || scale_factor <= 0.0 {
+        return HashMap::new();
+    }
+
+    let mut fragments = Vec::new();
+    collect(&tree.root, &mut fragments);
+    let mut runs: HashMap<NodeId, TextRun> = HashMap::new();
+
+    for fragment in fragments {
+        let Some(style) = styles.get(fragment.node) else { continue };
+        if style.get("visibility") == Some("hidden") || style.get("color") == Some("transparent") {
+            continue;
+        }
+        let font_size = style
+            .get("font-size")
+            .and_then(parse_css_px)
+            .unwrap_or(16.0);
+        if font_size <= 0.0 {
+            continue;
+        }
+        let line_height = fragment.rect.height.max(1.0) * scale_factor;
+        let color = super::paint_adapter::parse_color(style.get("color").unwrap_or("black"))
+            .unwrap_or(Color::rgba(0, 0, 0, 255));
+        let layout = layout_text(
+            font,
+            &fragment.text,
+            fragment.rect.x * scale_factor,
+            fragment.rect.y * scale_factor,
+            0.0,
+            font_size * scale_factor,
+            line_height,
+        );
+        if layout.glyphs.is_empty() {
+            continue;
+        }
+        let run = runs.entry(fragment.node).or_insert_with(|| TextRun {
+            glyphs: Vec::new(),
+            color,
+        });
+        run.glyphs.extend(layout.glyphs);
+    }
+
+    runs.into_iter().map(|(node, run)| (node, Arc::new(run))).collect()
+}
+
+fn parse_css_px(value: &str) -> Option<f32> {
+    let value = value.trim();
+    let number = value.strip_suffix("px").unwrap_or(value).trim().parse::<f32>().ok()?;
+    (number.is_finite() && number > 0.0).then_some(number)
+}
+
 #[cfg(test)]
 mod tests {
     use super::layout_text;
@@ -201,4 +279,30 @@ mod tests {
         assert!(layout_text(&mut font, "text", 0.0, 0.0, 100.0, 0.0, 16.0).glyphs.is_empty());
         assert!(layout_text(&mut font, "text", f32::NAN, 0.0, 100.0, 16.0, 20.0).glyphs.is_empty());
     }
+
+    #[test]
+    fn prepares_scaled_runs_from_layout_fragments_and_computed_styles() {
+        use super::prepare_text_runs;
+        use bweb_css::{StyleEngine, Stylesheet};
+        use bweb_html::{HtmlDocument, NodeKind};
+
+        let document = HtmlDocument::parse("<main>hello</main>");
+        let sheet = Stylesheet::parse("main { display:block; font-size:20px; color:#123456 }")
+            .expect("valid CSS");
+        let styles = StyleEngine::new().compute(&document, &[sheet]);
+        let tree = crate::LayoutTree::build(&document, &styles, 320.0);
+        let text_node = document
+            .iter()
+            .find_map(|(id, node)| matches!(node.kind(), NodeKind::Text(_)).then_some(id))
+            .expect("text node");
+        let mut font = font();
+
+        let runs = prepare_text_runs(&tree, &styles, &mut font, 2.0);
+        let run = runs.get(&text_node).expect("prepared text run");
+
+        assert_eq!(run.color, bweb_renderer::Color::rgba(0x11, 0x22, 0x33, 255));
+        assert_eq!(run.glyphs.len(), 5);
+        assert!(run.glyphs.iter().all(|glyph| glyph.x >= 0.0 && glyph.y >= 0.0));
+    }
+
 }
