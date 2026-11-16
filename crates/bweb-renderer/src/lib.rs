@@ -1,3 +1,7 @@
+mod framebuffer;
+
+pub use framebuffer::{Framebuffer, FramebufferError};
+
 //! Backend-independent layout tree and CSS box-model foundations.
 //!
 //! Layout uses logical CSS pixels. Inline formatting is intentionally a
