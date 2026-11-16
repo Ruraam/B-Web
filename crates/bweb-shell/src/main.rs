@@ -1,10 +1,19 @@
 use bweb_css::{StyleEngine, Stylesheet};
 use bweb_filterlists::FilterListDownloader;
 use bweb_html::DocumentLoader;
-use bweb_layout::LayoutTree;
+use bweb_layout::{LayoutTree, PaintAdapter, Rect as LayoutRect};
+use bweb_renderer::{Framebuffer, Painter, Rasterizer};
+use bweb_text::Font;
 use bweb_net::{HttpTransport, NetworkPolicy};
 use bweb_shield::{FilterListCache, FilterListError, Shield};
-use std::{env, error::Error, io, path::PathBuf, process};
+use std::{
+    env,
+    error::Error,
+    fs, io,
+    io::{BufWriter, Write},
+    path::{Path, PathBuf},
+    process,
+};
 
 fn main() {
     if let Err(error) = run() {
@@ -23,25 +32,27 @@ fn run() -> Result<(), Box<dyn Error>> {
             let url = arguments.next().ok_or_else(|| {
                 io::Error::new(io::ErrorKind::InvalidInput, "usage: b-web open <http(s)-url>")
             })?;
-            let dump_layout = match arguments.next() {
-                None => false,
-                Some(flag) if flag == "--dump-layout" => true,
-                Some(_) => {
+            let mut dump_layout = false;
+            let mut render_path = None;
+            while let Some(flag) = arguments.next() {
+                if flag == "--dump-layout" && !dump_layout {
+                    dump_layout = true;
+                } else if flag == "--render-ppm" && render_path.is_none() {
+                    render_path = Some(PathBuf::from(arguments.next().ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "missing output path after --render-ppm",
+                        )
+                    })?));
+                } else {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
-                        "expected optional --dump-layout flag",
+                        format!("unexpected or duplicate option '{}'", flag.to_string_lossy()),
                     )
                     .into());
                 }
-            };
-            if arguments.next().is_some() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "too many arguments for 'open'",
-                )
-                .into());
             }
-            open_document(url.to_string_lossy().as_ref(), dump_layout)?;
+            open_document(url.to_string_lossy().as_ref(), dump_layout, render_path.as_deref())?;
         }
         Some(command) => {
             return Err(io::Error::new(
@@ -64,7 +75,7 @@ fn show_status() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn open_document(url: &str, dump_layout: bool) -> Result<(), Box<dyn Error>> {
+fn open_document(url: &str, dump_layout: bool, render_path: Option<&Path>) -> Result<(), Box<dyn Error>> {
     let (transport, shield_active) = build_transport()?;
     println!("Loading: {url}");
     if !shield_active {
@@ -103,6 +114,14 @@ fn open_document(url: &str, dump_layout: bool) -> Result<(), Box<dyn Error>> {
     println!("Parsed stylesheets: {stylesheet_count}");
     println!("Computed styles: {} NodeId entries", computed.len());
     println!("Layout boxes: {}", layout.box_count);
+    if let Some(path) = render_path {
+        let (width, height, glyph_count) =
+            render_document(&layout, &computed, path, 1280, 720)?;
+        println!(
+            "Rendered frame: {width}x{height} px, {glyph_count} glyphs -> {}",
+            path.display()
+        );
+    }
     if dump_layout {
         println!();
         print!("{}", layout.dump(&loaded.document));
@@ -119,6 +138,79 @@ fn open_document(url: &str, dump_layout: bool) -> Result<(), Box<dyn Error>> {
         "Note: CSS and first-pass layout are active; JavaScript execution and GPU painting are not implemented."
     );
     Ok(())
+}
+
+
+/// Runs the HTML/CSS layout through text preparation, painting, and rasterization.
+///
+/// The PPM output is a diagnostic software-rendered frame. It deliberately
+/// remains independent of any window-system or GPU backend.
+fn render_document(
+    layout: &LayoutTree,
+    styles: &bweb_css::ComputedStyleMap,
+    output: &Path,
+    width: u32,
+    height: u32,
+) -> Result<(u32, u32, usize), Box<dyn Error>> {
+    let mut font = load_system_font()?;
+    let scale_factor = 1.0;
+    let text_runs = bweb_layout::prepare_text_runs(layout, styles, &mut font, scale_factor);
+    let glyph_count = text_runs.values().map(|run| run.glyphs.len()).sum();
+    let viewport = LayoutRect {
+        x: 0.0,
+        y: 0.0,
+        width: width as f32,
+        height: height as f32,
+    };
+    let adapter = PaintAdapter::new(layout, styles, viewport).with_text_runs(&text_runs);
+    let display_list = Painter::new(&adapter, scale_factor)?.paint();
+    let mut framebuffer = Framebuffer::new(width, height)
+        .map_err(|error| io::Error::other(format!("could not allocate render frame: {error:?}")))?;
+    framebuffer.clear([255, 255, 255, 255]);
+    Rasterizer.rasterize(&display_list, &mut framebuffer);
+    write_ppm(output, &framebuffer)?;
+    Ok((width, height, glyph_count))
+}
+
+/// Loads a user-selected font or the first available common Linux sans font.
+fn load_system_font() -> Result<Font, Box<dyn Error>> {
+    if let Some(path) = env::var_os("BWEB_FONT") {
+        let path = PathBuf::from(path);
+        let bytes = fs::read(&path)?;
+        return Ok(Font::from_bytes(bytes)?);
+    }
+
+    const CANDIDATES: &[&str] = &[
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/opentype/noto/NotoSans-Regular.ttf",
+    ];
+    for candidate in CANDIDATES {
+        let path = Path::new(candidate);
+        if let Ok(bytes) = fs::read(path) {
+            if let Ok(font) = Font::from_bytes(bytes) {
+                return Ok(font);
+            }
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        "no supported system font found; install DejaVu Sans or set BWEB_FONT to a TTF/OTF file",
+    )
+    .into())
+}
+
+/// Writes the framebuffer as binary PPM (P6), dropping alpha over its white base.
+fn write_ppm(path: &Path, framebuffer: &Framebuffer) -> Result<(), io::Error> {
+    let file = fs::File::create(path)?;
+    let mut writer = BufWriter::new(file);
+    writeln!(writer, "P6\\n{} {}", framebuffer.width(), framebuffer.height())?;
+    writeln!(writer, "255")?;
+    for pixel in framebuffer.pixels().chunks_exact(4) {
+        writer.write_all(&pixel[..3])?;
+    }
+    writer.flush()
 }
 
 fn build_transport() -> Result<(HttpTransport, bool), Box<dyn Error>> {
@@ -146,9 +238,9 @@ fn print_usage() {
     println!();
     println!("Usage:");
     println!("  b-web                 Show status and load cached Shield rules");
-    println!("  b-web open <URL> [--dump-layout]  Fetch a document; optionally dump geometry");
+    println!("  b-web open <URL> [--dump-layout] [--render-ppm FILE]  Fetch, layout, and optionally render a frame");
     println!("  b-web update-filters  Download and cache EasyList and EasyPrivacy");
-    println!("  b-web --help          Show this help");
+    println!("  b-web --help          Show this help\n\nRendering: set BWEB_FONT to select a TTF/OTF font; otherwise common Linux sans fonts are tried.");
 }
 
 fn update_filters() -> Result<(), Box<dyn Error>> {
