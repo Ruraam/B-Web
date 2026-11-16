@@ -43,9 +43,6 @@ impl<B: ViewBackend> ResizeController<B> {
         &self.view
     }
 
-    pub fn view_mut(&mut self) -> &mut View<B> {
-        &mut self.view
-    }
 
     #[must_use]
     pub fn has_pending(&self) -> bool {
