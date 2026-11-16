@@ -1,6 +1,8 @@
+use bweb_css::{StyleEngine, Stylesheet};
 use bweb_filterlists::FilterListDownloader;
 use bweb_html::DocumentLoader;
 use bweb_net::{HttpTransport, NetworkPolicy};
+use bweb_renderer::LayoutTree;
 use bweb_shield::{FilterListCache, FilterListError, Shield};
 use std::{env, error::Error, io, path::PathBuf, process};
 
@@ -62,6 +64,25 @@ fn open_document(url: &str) -> Result<(), Box<dyn Error>> {
     println!("Title: {}", loaded.document.title().as_deref().unwrap_or("(untitled)"));
     println!("DOM nodes: {}", loaded.document.node_count());
     println!("Loaded subresources: {}", loaded.resources.len());
+    let mut stylesheets = Vec::new();
+    let user_agent = Stylesheet::parse("html, body, main, header, footer, nav, section, article, aside, div, p, h1, h2, h3, ul, ol, li, form, table, blockquote { display: block; }").expect("built-in user-agent stylesheet");
+    stylesheets.push(user_agent);
+    let mut stylesheet_count = 0usize;
+    for resource in loaded.resources.iter().filter(|resource| resource.kind == bweb_html::ResourceKind::Stylesheet) {
+        match std::str::from_utf8(&resource.bytes) {
+            Ok(source) => match Stylesheet::parse(source) {
+                Ok(sheet) => { stylesheets.push(sheet); stylesheet_count += 1; }
+                Err(error) => eprintln!("  invalid stylesheet {}: {error}", resource.url),
+            },
+            Err(_) => eprintln!("  invalid UTF-8 stylesheet: {}", resource.url),
+        }
+    }
+    let computed = StyleEngine::new().compute(&loaded.document, &stylesheets);
+    let layout = LayoutTree::build(&loaded.document, &computed, 1280.0);
+    println!("Parsed stylesheets: {stylesheet_count}");
+    println!("Computed styles: {} NodeId entries", computed.len());
+    println!("Layout boxes: {}", layout.box_count);
+    println!("Viewport: 1280 CSS px");
     println!("Failed/blocked subresources: {}", loaded.failed_resources.len());
     for resource in &loaded.resources {
         println!("  {:?}: {} ({} bytes)", resource.kind, resource.url, resource.bytes.len());
@@ -70,7 +91,7 @@ fn open_document(url: &str) -> Result<(), Box<dyn Error>> {
         println!("  blocked/unavailable: {} ({})", failure.reference.url, failure.error);
     }
     println!(
-        "Note: this milestone parses a limited HTML subset; CSS/JS execution and rendering are not implemented."
+        "Note: CSS and first-pass layout are active; JavaScript execution and GPU painting are not implemented."
     );
     Ok(())
 }

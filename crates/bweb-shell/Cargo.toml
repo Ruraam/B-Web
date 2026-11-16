@@ -10,8 +10,10 @@ path = "src/main.rs"
 
 [dependencies]
 bweb-core = { path = "../bweb-core" }
+bweb-css = { path = "../bweb-css" }
 bweb-filterlists = { path = "../bweb-filterlists" }
 bweb-html = { path = "../bweb-html" }
 bweb-js = { path = "../bweb-js" }
 bweb-net = { path = "../bweb-net" }
+bweb-renderer = { path = "../bweb-renderer" }
 bweb-shield = { path = "../bweb-shield" }

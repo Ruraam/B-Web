@@ -3,3 +3,7 @@ name = "bweb-renderer"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+
+[dependencies]
+bweb-css = { path = "../bweb-css" }
+bweb-html = { path = "../bweb-html" }
