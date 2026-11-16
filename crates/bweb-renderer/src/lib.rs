@@ -105,9 +105,7 @@ fn layout_node(
     for child_id in node.children() {
         let Some(child_node) = document.node(*child_id) else { continue };
         let child_is_text = matches!(child_node.kind(), NodeKind::Text(_));
-        let child_display = styles
-            .get(*child_id)
-            .and_then(|computed| computed.get("display"));
+        let child_display = styles.get(*child_id).and_then(|computed| computed.get("display"));
         if child_display == Some("none") {
             continue;
         }
@@ -122,9 +120,9 @@ fn layout_node(
                 cursor_y += 19.2;
                 inline_x = content_x;
             }
-            if let Some(child) = layout_node(
-                document, styles, *child_id, inline_x, cursor_y, child_width, count,
-            ) {
+            if let Some(child) =
+                layout_node(document, styles, *child_id, inline_x, cursor_y, child_width, count)
+            {
                 inline_x += child.rect.width;
                 content_height = content_height.max(cursor_y - content_y + child.rect.height);
                 children.push(child);
@@ -134,9 +132,9 @@ fn layout_node(
                 cursor_y += 19.2;
                 inline_x = content_x;
             }
-            if let Some(child) = layout_node(
-                document, styles, *child_id, content_x, cursor_y, content_width, count,
-            ) {
+            if let Some(child) =
+                layout_node(document, styles, *child_id, content_x, cursor_y, content_width, count)
+            {
                 cursor_y = child.rect.y + child.rect.height + child.margin.bottom;
                 content_height = cursor_y - content_y;
                 children.push(child);
@@ -144,9 +142,7 @@ fn layout_node(
         }
     }
 
-    let explicit_height = style
-        .and_then(|style| style.get("height"))
-        .and_then(parse_length);
+    let explicit_height = style.and_then(|style| style.get("height")).and_then(parse_length);
     let is_document = matches!(node.kind(), NodeKind::Document);
     let width = if is_document { available_width } else { outer_width };
     let height = explicit_height.unwrap_or(content_height.max(if is_text { 19.2 } else { 0.0 }));
@@ -170,15 +166,15 @@ fn parse_edges(value: Option<&str>) -> Edges {
     let values: Vec<f32> = value.split_ascii_whitespace().filter_map(parse_length).collect();
     match values.as_slice() {
         [all] => Edges { top: *all, right: *all, bottom: *all, left: *all },
-        [vertical, horizontal] => Edges {
-            top: *vertical, right: *horizontal, bottom: *vertical, left: *horizontal,
-        },
-        [top, horizontal, bottom] => Edges {
-            top: *top, right: *horizontal, bottom: *bottom, left: *horizontal,
-        },
-        [top, right, bottom, left, ..] => Edges {
-            top: *top, right: *right, bottom: *bottom, left: *left,
-        },
+        [vertical, horizontal] => {
+            Edges { top: *vertical, right: *horizontal, bottom: *vertical, left: *horizontal }
+        }
+        [top, horizontal, bottom] => {
+            Edges { top: *top, right: *horizontal, bottom: *bottom, left: *horizontal }
+        }
+        [top, right, bottom, left, ..] => {
+            Edges { top: *top, right: *right, bottom: *bottom, left: *left }
+        }
         _ => Edges::default(),
     }
 }
@@ -209,28 +205,49 @@ mod tests {
 
     #[test]
     fn display_none_subtrees_are_excluded() {
-        let (document, tree) = layout("<main><aside><b>hidden</b></aside><p>shown</p></main>", "aside { display:none }");
-        let aside = document.iter().find_map(|(id, node)| {
-            matches!(node.kind(), NodeKind::Element { tag_name, .. } if tag_name == "aside").then_some(id)
-        }).expect("aside");
+        let (document, tree) = layout(
+            "<main><aside><b>hidden</b></aside><p>shown</p></main>",
+            "aside { display:none }",
+        );
+        let aside = document
+            .iter()
+            .find_map(|(id, node)| {
+                matches!(node.kind(), NodeKind::Element { tag_name, .. } if tag_name == "aside")
+                    .then_some(id)
+            })
+            .expect("aside");
         assert!(!contains(&tree.root, aside));
     }
 
     #[test]
     fn block_and_inline_boxes_are_distinguished() {
-        let (document, tree) = layout("<main><span>hello</span></main>", "main { display:block } span { display:inline }");
-        let span = document.iter().find_map(|(id, node)| {
-            matches!(node.kind(), NodeKind::Element { tag_name, .. } if tag_name == "span").then_some(id)
-        }).expect("span");
+        let (document, tree) = layout(
+            "<main><span>hello</span></main>",
+            "main { display:block } span { display:inline }",
+        );
+        let span = document
+            .iter()
+            .find_map(|(id, node)| {
+                matches!(node.kind(), NodeKind::Element { tag_name, .. } if tag_name == "span")
+                    .then_some(id)
+            })
+            .expect("span");
         assert_eq!(find(&tree.root, span).expect("span box").display, Display::Inline);
     }
 
     #[test]
     fn computes_container_geometry_with_margin_and_padding() {
-        let (document, tree) = layout("<main></main>", "main { display:block; margin:10px 20px; padding:5px; height:40px }");
-        let main = document.iter().find_map(|(id, node)| {
-            matches!(node.kind(), NodeKind::Element { tag_name, .. } if tag_name == "main").then_some(id)
-        }).expect("main");
+        let (document, tree) = layout(
+            "<main></main>",
+            "main { display:block; margin:10px 20px; padding:5px; height:40px }",
+        );
+        let main = document
+            .iter()
+            .find_map(|(id, node)| {
+                matches!(node.kind(), NodeKind::Element { tag_name, .. } if tag_name == "main")
+                    .then_some(id)
+            })
+            .expect("main");
         let box_node = find(&tree.root, main).expect("main box");
         assert_eq!(box_node.rect.x, 20.0);
         assert_eq!(box_node.rect.y, 10.0);
@@ -244,7 +261,9 @@ mod tests {
     }
 
     fn find(root: &super::LayoutBox, id: bweb_html::NodeId) -> Option<&super::LayoutBox> {
-        if root.node == id { return Some(root); }
+        if root.node == id {
+            return Some(root);
+        }
         root.children.iter().find_map(|child| find(child, id))
     }
 }

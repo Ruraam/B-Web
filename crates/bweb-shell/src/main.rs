@@ -65,13 +65,23 @@ fn open_document(url: &str) -> Result<(), Box<dyn Error>> {
     println!("DOM nodes: {}", loaded.document.node_count());
     println!("Loaded subresources: {}", loaded.resources.len());
     let mut stylesheets = Vec::new();
-    let user_agent = Stylesheet::parse("html, body, main, header, footer, nav, section, article, aside, div, p, h1, h2, h3, ul, ol, li, form, table, blockquote { display: block; }").expect("built-in user-agent stylesheet");
+    let user_agent = Stylesheet::parse(
+        "html, body, main, header, footer, nav, section, article, aside, div, p, h1, h2, h3, ul, ol, li, form, table, blockquote { display: block; }",
+    )
+    .expect("built-in user-agent stylesheet");
     stylesheets.push(user_agent);
     let mut stylesheet_count = 0usize;
-    for resource in loaded.resources.iter().filter(|resource| resource.kind == bweb_html::ResourceKind::Stylesheet) {
+    for resource in loaded
+        .resources
+        .iter()
+        .filter(|resource| resource.kind == bweb_html::ResourceKind::Stylesheet)
+    {
         match std::str::from_utf8(&resource.bytes) {
             Ok(source) => match Stylesheet::parse(source) {
-                Ok(sheet) => { stylesheets.push(sheet); stylesheet_count += 1; }
+                Ok(sheet) => {
+                    stylesheets.push(sheet);
+                    stylesheet_count += 1;
+                }
                 Err(error) => eprintln!("  invalid stylesheet {}: {error}", resource.url),
             },
             Err(_) => eprintln!("  invalid UTF-8 stylesheet: {}", resource.url),
