@@ -142,7 +142,6 @@ pub fn layout_text(
     result
 }
 
-
 /// Builds renderer-ready text runs from the inline fragments in a layout tree.
 ///
 /// The caller supplies the selected font face. Font-family matching and fallback
