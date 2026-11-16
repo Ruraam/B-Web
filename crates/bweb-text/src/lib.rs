@@ -120,7 +120,7 @@ impl Font {
         let metrics = self.font_ref().metrics(&[]).scale(px_size);
         Metrics {
             ascent: metrics.ascent,
-            descent: metrics.descent,
+            descent: -metrics.descent,
             line_gap: metrics.leading,
             px_size,
         }
