@@ -1,7 +1,3 @@
-mod framebuffer;
-
-pub use framebuffer::{Framebuffer, FramebufferError};
-
 //! Backend-independent layout tree and CSS box-model foundations.
 //!
 //! Layout uses logical CSS pixels. Inline formatting is intentionally a
@@ -671,3 +667,7 @@ mod tests {
         root.children.iter().find_map(|child| find(child, id))
     }
 }
+
+mod framebuffer;
+
+pub use framebuffer::{Framebuffer, FramebufferError};
