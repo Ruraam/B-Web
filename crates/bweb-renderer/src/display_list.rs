@@ -42,6 +42,15 @@ pub struct PositionedGlyph {
     pub y: f32,
 }
 
+/// A reusable, already-positioned run of rasterized glyphs.
+///
+/// Coordinates in each glyph are final physical-pixel positions.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TextRun {
+    pub glyphs: Vec<PositionedGlyph>,
+    pub color: Color,
+}
+
 /// One ordered drawing or clipping command.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PaintItem {
