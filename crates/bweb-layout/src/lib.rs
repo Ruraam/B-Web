@@ -120,6 +120,12 @@ fn layout_node(
     if style.and_then(|style| style.get("display")) == Some("none") {
         return None;
     }
+    if matches!(
+        node.kind(),
+        NodeKind::Element { tag_name, .. } if is_non_rendered_element(tag_name)
+    ) {
+        return None;
+    }
     let is_text = matches!(node.kind(), NodeKind::Text(_));
     let display = if is_text || style.and_then(|style| style.get("display")) == Some("inline") {
         Display::Inline
@@ -187,8 +193,13 @@ fn layout_node(
         }
     }
 
-    let line_boxes =
-        build_line_boxes(document, &children, content_x, content_y, content_width, style);
+    let line_boxes = if display == Display::Block
+        && matches!(node.kind(), NodeKind::Element { .. })
+    {
+        build_line_boxes(document, &children, content_x, content_y, content_width, style)
+    } else {
+        Vec::new()
+    };
     let inline_height: f32 = line_boxes.iter().map(|line| line.rect.height).sum();
     content_height = content_height.max(inline_height);
 
@@ -235,8 +246,8 @@ fn build_line_boxes(
     let preserve_newlines = matches!(white_space, "pre" | "pre-wrap" | "pre-line");
     let wrap = !matches!(white_space, "nowrap" | "pre");
     let mut text_nodes = Vec::new();
-    for child in children.iter().filter(|child| child.display == Display::Inline) {
-        collect_text_nodes(document, child.node, &mut text_nodes);
+    for child in children {
+        collect_inline_text_nodes(document, child, &mut text_nodes);
     }
 
     let mut lines = Vec::new();
@@ -289,19 +300,32 @@ fn build_line_boxes(
     lines
 }
 
-fn collect_text_nodes(document: &HtmlDocument, id: NodeId, output: &mut Vec<(NodeId, String)>) {
-    let Some(node) = document.node(id) else {
+fn collect_inline_text_nodes(
+    document: &HtmlDocument,
+    layout: &LayoutBox,
+    output: &mut Vec<(NodeId, String)>,
+) {
+    let Some(node) = document.node(layout.node) else {
         return;
     };
-    if let NodeKind::Text(value) = node.kind() {
-        if !value.is_empty() {
-            output.push((id, value.clone()));
+    match node.kind() {
+        NodeKind::Text(value) if !value.is_empty() => {
+            output.push((layout.node, value.clone()));
         }
-        return;
+        NodeKind::Element { .. } if layout.display == Display::Inline => {
+            for child in &layout.children {
+                collect_inline_text_nodes(document, child, output);
+            }
+        }
+        _ => {}
     }
-    for child in node.children() {
-        collect_text_nodes(document, *child, output);
-    }
+}
+
+fn is_non_rendered_element(tag_name: &str) -> bool {
+    matches!(
+        tag_name,
+        "base" | "head" | "link" | "meta" | "script" | "style" | "template" | "title"
+    )
 }
 
 fn append_fragment_char(
@@ -443,6 +467,75 @@ mod tests {
         let styles = StyleEngine::new().compute(&document, &[sheet]);
         let tree = LayoutTree::build(&document, &styles, 800.0);
         (document, tree)
+    }
+
+    #[test]
+    fn html_metadata_and_executable_content_are_not_rendered() {
+        let (document, tree) = layout(
+            "<html><head><title>Example Domain</title><meta name='description' content='hidden'><style>body { color:red }</style><script>const hidden = true;</script></head><body><p>Visible text</p><script>hiddenAgain()</script></body></html>",
+            "",
+        );
+
+        for tag in ["head", "title", "meta", "style", "script"] {
+            for id in document.iter().filter_map(|(id, node)| {
+                matches!(node.kind(), NodeKind::Element { tag_name, .. } if tag_name == tag)
+                    .then_some(id)
+            }) {
+                assert!(!contains(&tree.root, id), "{tag} must not enter the layout tree");
+            }
+        }
+
+        let visible_text = document
+            .iter()
+            .find_map(|(id, node)| {
+                matches!(node.kind(), NodeKind::Text(text) if text == "Visible text")
+                    .then_some(id)
+            })
+            .expect("visible body text");
+        assert!(contains(&tree.root, visible_text));
+    }
+
+    #[test]
+    fn nested_inline_text_is_collected_once_by_its_block_container() {
+        let (document, tree) = layout(
+            "<main>before <span>inside <em>deep</em></span> after</main>",
+            "main { display:block } span, em { display:inline }",
+        );
+        let main = document
+            .iter()
+            .find_map(|(id, node)| {
+                matches!(node.kind(), NodeKind::Element { tag_name, .. } if tag_name == "main")
+                    .then_some(id)
+            })
+            .expect("main");
+        let span = document
+            .iter()
+            .find_map(|(id, node)| {
+                matches!(node.kind(), NodeKind::Element { tag_name, .. } if tag_name == "span")
+                    .then_some(id)
+            })
+            .expect("span");
+        let em = document
+            .iter()
+            .find_map(|(id, node)| {
+                matches!(node.kind(), NodeKind::Element { tag_name, .. } if tag_name == "em")
+                    .then_some(id)
+            })
+            .expect("em");
+
+        let main_box = find(&tree.root, main).expect("main layout box");
+        let span_box = find(&tree.root, span).expect("span layout box");
+        let em_box = find(&tree.root, em).expect("em layout box");
+        assert_eq!(main_box.line_boxes.len(), 1);
+        assert!(span_box.line_boxes.is_empty());
+        assert!(em_box.line_boxes.is_empty());
+
+        let text: String = main_box.line_boxes[0]
+            .fragments
+            .iter()
+            .map(|fragment| fragment.text.as_str())
+            .collect();
+        assert_eq!(text, "before inside deep after");
     }
 
     #[test]
