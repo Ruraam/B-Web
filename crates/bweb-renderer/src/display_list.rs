@@ -6,6 +6,7 @@
 //! by later rendering milestones.
 
 use crate::{Edges, Rect};
+use bweb_text::Coverage;
 
 /// An sRGB color with straight (non-premultiplied) alpha.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
@@ -30,6 +31,17 @@ impl Color {
     }
 }
 
+/// A rasterized glyph positioned by its bitmap's top-left corner.
+///
+/// Coordinates are in physical pixels. Font bearings and baseline placement
+/// must already have been applied by the producer (normally `bweb-layout`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PositionedGlyph {
+    pub coverage: Coverage,
+    pub x: f32,
+    pub y: f32,
+}
+
 /// One ordered drawing or clipping command.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PaintItem {
@@ -40,6 +52,12 @@ pub enum PaintItem {
     /// The current first rasterizer milestone may ignore `radius`; retaining
     /// it here keeps the display-list representation ready for rounded corners.
     BorderRect { rect: Rect, widths: Edges, radius: f32, color: Color },
+    /// Blits pre-rasterized glyph masks at final physical-pixel positions.
+    ///
+    /// Glyph coordinates are snapped to the nearest pixel by the rasterizer.
+    /// TODO(renderer-4): add quarter-pixel subpixel positioning and a matching
+    /// glyph coverage cache without changing `PositionedGlyph`.
+    Text { glyphs: Vec<PositionedGlyph>, color: Color },
     /// Intersects subsequent drawing with this physical-pixel rectangle.
     PushClip { rect: Rect },
     /// Restores the previous clipping rectangle.
@@ -74,7 +92,8 @@ impl DisplayList {
 
 #[cfg(test)]
 mod tests {
-    use super::{Color, DisplayList, PaintItem};
+    use super::{Color, DisplayList, PaintItem, PositionedGlyph};
+    use bweb_text::Coverage;
     use crate::{Edges, Rect};
 
     #[test]
@@ -104,6 +123,19 @@ mod tests {
 
         assert_eq!(list.len(), 4);
         assert_eq!(list.items, vec![clip, fill, border, PaintItem::PopClip]);
+    }
+
+    #[test]
+    fn text_command_keeps_positioned_coverage_and_order() {
+        let glyph = PositionedGlyph {
+            coverage: Coverage { width: 1, height: 1, left: 99, top: 99, data: vec![255] },
+            x: 2.25,
+            y: 3.75,
+        };
+        let mut list = DisplayList::default();
+        list.push(PaintItem::Text { glyphs: vec![glyph.clone()], color: Color::rgba(10, 20, 30, 255) });
+
+        assert!(matches!(&list.items[0], PaintItem::Text { glyphs, .. } if glyphs == &[glyph]));
     }
 
     #[test]
