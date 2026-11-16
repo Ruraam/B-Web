@@ -10,7 +10,7 @@
 use bweb_shield::{FilterListCache, FilterListError, FilterListId, MAX_FILTER_LIST_BYTES};
 use reqwest::{
     blocking::{Client, Response},
-    redirect::{Attempt, Policy},
+    redirect::Policy,
     StatusCode,
 };
 use std::{
@@ -110,7 +110,13 @@ impl FilterListDownloader {
             .https_only(true)
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(REQUEST_TIMEOUT)
-            .redirect(Policy::custom(redirect_https_only))
+            .redirect(Policy::custom(|attempt| {
+                if attempt.previous().len() >= MAX_REDIRECTS || attempt.url().scheme() != "https" {
+                    attempt.stop()
+                } else {
+                    attempt.follow()
+                }
+            }))
             .user_agent(concat!("B-Web/", env!("CARGO_PKG_VERSION")))
             .build()?;
 
@@ -153,13 +159,6 @@ impl FilterListDownloader {
     }
 }
 
-fn redirect_https_only(attempt: Attempt<'_>) -> Attempt<'_> {
-    if attempt.previous().len() >= MAX_REDIRECTS || attempt.url().scheme() != "https" {
-        attempt.stop()
-    } else {
-        attempt.follow()
-    }
-}
 
 fn ensure_success(response: Response) -> Result<Response, FilterListDownloadError> {
     if !response.status().is_success() {
