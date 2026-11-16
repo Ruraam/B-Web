@@ -128,14 +128,7 @@ pub fn layout_text(
             result.width = result.width.max(pen_x - origin_x);
             pen_x = origin_x;
         } else if character.is_whitespace() {
-            flush_word(
-                &word,
-                font,
-                &mut result,
-                &mut pen_x,
-                &mut line_index,
-                &mut pending_space,
-            );
+            flush_word(&word, font, &mut result, &mut pen_x, &mut line_index, &mut pending_space);
             word.clear();
             pending_space = true;
         } else {
