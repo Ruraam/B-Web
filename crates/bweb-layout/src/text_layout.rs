@@ -61,11 +61,8 @@ pub fn layout_text(
     } else {
         natural_line_height
     };
-    let wrap_width = if max_width.is_finite() && max_width > 0.0 {
-        max_width
-    } else {
-        f32::INFINITY
-    };
+    let wrap_width =
+        if max_width.is_finite() && max_width > 0.0 { max_width } else { f32::INFINITY };
     let baseline_offset = (line_height - natural_line_height) * 0.5 + metrics.ascent;
 
     let mut result = TextLayout { line_count: 1, ..TextLayout::default() };
@@ -95,9 +92,7 @@ pub fn layout_text(
             .map(|glyph| font.advance(glyph, px_size))
             .sum();
 
-        if *pen_x > origin_x
-            && *pen_x - origin_x + space_advance + word_advance > wrap_width
-        {
+        if *pen_x > origin_x && *pen_x - origin_x + space_advance + word_advance > wrap_width {
             *line_index += 1;
             result.line_count = result.line_count.max(*line_index + 1);
             *pen_x = origin_x;
@@ -125,14 +120,7 @@ pub fn layout_text(
 
     for character in text.chars() {
         if character == '\n' {
-            flush_word(
-                &word,
-                font,
-                &mut result,
-                &mut pen_x,
-                &mut line_index,
-                &mut pending_space,
-            );
+            flush_word(&word, font, &mut result, &mut pen_x, &mut line_index, &mut pending_space);
             word.clear();
             pending_space = false;
             line_index += 1;
@@ -154,14 +142,7 @@ pub fn layout_text(
             word.push(character);
         }
     }
-    flush_word(
-        &word,
-        font,
-        &mut result,
-        &mut pen_x,
-        &mut line_index,
-        &mut pending_space,
-    );
+    flush_word(&word, font, &mut result, &mut pen_x, &mut line_index, &mut pending_space);
 
     result.width = result.width.max(pen_x - origin_x);
     result.height = result.line_count as f32 * line_height;
@@ -225,8 +206,6 @@ mod tests {
     fn rejects_invalid_font_sizes_and_coordinates() {
         let mut font = font();
         assert!(layout_text(&mut font, "text", 0.0, 0.0, 100.0, 0.0, 16.0).glyphs.is_empty());
-        assert!(layout_text(&mut font, "text", f32::NAN, 0.0, 100.0, 16.0, 20.0)
-            .glyphs
-            .is_empty());
+        assert!(layout_text(&mut font, "text", f32::NAN, 0.0, 100.0, 16.0, 20.0).glyphs.is_empty());
     }
 }
