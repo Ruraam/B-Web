@@ -4,6 +4,12 @@
 //! downloading response bytes. Filter lists are compiled once and queried for
 //! every outgoing resource request.
 
+mod filter_lists;
+
+pub use filter_lists::{
+    FilterListCache, FilterListError, FilterListId, MAX_FILTER_LIST_BYTES,
+};
+
 use adblock::{
     Engine,
     lists::{FilterSet, ParseOptions, RuleTypes},
