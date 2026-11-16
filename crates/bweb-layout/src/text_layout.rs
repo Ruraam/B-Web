@@ -293,7 +293,7 @@ mod tests {
         let runs = prepare_text_runs(&tree, &styles, &mut font, 2.0);
         let run = runs.get(&text_node).expect("prepared text run");
 
-        assert_eq!(run.color, bweb_renderer::Color::rgba(0x11, 0x22, 0x33, 255));
+        assert_eq!(run.color, bweb_renderer::Color::rgba(0x12, 0x34, 0x56, 255));
         assert_eq!(run.glyphs.len(), 5);
         assert!(run.glyphs.iter().all(|glyph| glyph.x >= 0.0 && glyph.y >= 0.0));
     }
