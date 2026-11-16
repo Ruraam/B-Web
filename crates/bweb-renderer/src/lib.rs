@@ -313,10 +313,13 @@ mod tests {
             "<main></main>",
             "main { display:block; box-sizing:border-box; width:200px; padding:10px; border-width:2px }",
         );
-        let main = document.iter().find_map(|(id, node)| {
-            matches!(node.kind(), NodeKind::Element { tag_name, .. } if tag_name == "main")
-                .then_some(id)
-        }).expect("main");
+        let main = document
+            .iter()
+            .find_map(|(id, node)| {
+                matches!(node.kind(), NodeKind::Element { tag_name, .. } if tag_name == "main")
+                    .then_some(id)
+            })
+            .expect("main");
         let box_node = find(&tree.root, main).expect("main box");
         assert_eq!(box_node.rect.width, 200.0);
     }
