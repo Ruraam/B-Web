@@ -5,3 +5,4 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+bweb-text = { path = "../bweb-text" }
