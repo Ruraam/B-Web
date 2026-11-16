@@ -262,7 +262,7 @@ impl<D: raw_window_handle::HasDisplayHandle + 'static> ApplicationHandler for Wi
     }
 }
 
-impl<D> WindowApp<D> {
+impl<D: raw_window_handle::HasDisplayHandle> WindowApp<D> {
     fn present_frame(&mut self) -> Result<(), Box<dyn Error>> {
         let window =
             self.window.as_ref().ok_or_else(|| io::Error::other("window is not initialized"))?;
