@@ -464,6 +464,34 @@ mod tests {
         assert_eq!(box_node.rect.width, 200.0);
     }
 
+
+    #[test]
+    fn creates_line_boxes_and_preserves_text_node_identity() {
+        let (document, tree) = layout("<main>hello   world</main>", "main { display:block }");
+        let main = document.iter().find_map(|(id, node)| {
+            matches!(node.kind(), NodeKind::Element { tag_name, .. } if tag_name == "main").then_some(id)
+        }).expect("main");
+        let main_box = find(&tree.root, main).expect("main layout box");
+        assert_eq!(main_box.line_boxes.len(), 1);
+        let fragments = &main_box.line_boxes[0].fragments;
+        assert!(fragments.iter().any(|fragment| fragment.text == "hello"));
+        assert!(fragments.iter().any(|fragment| fragment.text == "world"));
+        let text_id = document.iter().find_map(|(id, node)| matches!(node.kind(), NodeKind::Text(_)).then_some(id)).expect("text node");
+        assert!(fragments.iter().all(|fragment| fragment.node == text_id));
+    }
+
+    #[test]
+    fn pre_white_space_preserves_newlines_as_line_breaks() {
+        let (document, tree) = layout("<main>first\\nsecond</main>", "main { display:block; white-space:pre }");
+        let main = document.iter().find_map(|(id, node)| {
+            matches!(node.kind(), NodeKind::Element { tag_name, .. } if tag_name == "main").then_some(id)
+        }).expect("main");
+        let main_box = find(&tree.root, main).expect("main layout box");
+        assert_eq!(main_box.line_boxes.len(), 2);
+        assert_eq!(main_box.line_boxes[0].fragments[0].text, "first");
+        assert_eq!(main_box.line_boxes[1].fragments[0].text, "second");
+    }
+
     fn contains(root: &super::LayoutBox, id: bweb_html::NodeId) -> bool {
         root.node == id || root.children.iter().any(|child| contains(child, id))
     }
