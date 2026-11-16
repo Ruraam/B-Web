@@ -70,12 +70,7 @@ impl<B: ViewBackend> View<B> {
     /// Creates a view whose first resize performs its initial layout and paint.
     #[must_use]
     pub const fn new(backend: B) -> Self {
-        Self {
-            backend,
-            viewport: None,
-            layout_width: None,
-            layout_scale_factor: None,
-        }
+        Self { backend, viewport: None, layout_width: None, layout_scale_factor: None }
     }
 
     /// Applies a new viewport configuration without repeating redundant work.
@@ -102,11 +97,7 @@ impl<B: ViewBackend> View<B> {
         self.backend.repaint(next)?;
         self.viewport = Some(next);
 
-        Ok(if needs_reflow {
-            ResizeOutcome::Reflowed
-        } else {
-            ResizeOutcome::Repainted
-        })
+        Ok(if needs_reflow { ResizeOutcome::Reflowed } else { ResizeOutcome::Repainted })
     }
 
     #[must_use]

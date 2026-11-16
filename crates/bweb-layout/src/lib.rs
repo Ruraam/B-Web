@@ -5,11 +5,11 @@
 //! are later milestones.
 
 mod paint_adapter;
-mod view;
 mod text_layout;
+mod view;
 pub use paint_adapter::PaintAdapter;
-pub use view::{ResizeOutcome, View, ViewBackend, Viewport};
 pub use text_layout::{TextLayout, layout_text, prepare_text_runs};
+pub use view::{ResizeOutcome, View, ViewBackend, Viewport};
 
 use bweb_css::ComputedStyleMap;
 use bweb_html::{HtmlDocument, NodeId, NodeKind};
