@@ -200,10 +200,7 @@ impl HtmlDocument {
                 if let Some(relative_end) = source[open + 4..].find("-->") {
                     let end = open + 4 + relative_end;
                     let parent = *stack.last().unwrap_or(&self.root);
-                    self.append_node(
-                        parent,
-                        NodeKind::Comment(source[open + 4..end].to_owned()),
-                    );
+                    self.append_node(parent, NodeKind::Comment(source[open + 4..end].to_owned()));
                     cursor = end + 3;
                     continue;
                 }
