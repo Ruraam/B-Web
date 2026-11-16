@@ -10,7 +10,7 @@ The project deliberately does **not** embed Chromium, WebKit, Gecko or Wry. The 
 | --- | --- |
 | bweb-core | Shared engine types and version information |
 | bweb-html | Arena-backed DOM, limited HTML parser, and guarded document resource loader |
-| bweb-css | CSS model and style foundation |
+| bweb-css | CSS lexer/parser, selector matching, cascade and NodeId-indexed computed styles |
 | bweb-js | Reserved foundation for the future Rust JavaScript runtime |
 | bweb-net | Rustls HTTP/HTTPS transport with mandatory Shield admission and privacy headers |
 | bweb-shield | Brave's Rust adblock engine integration and bounded local filter-list cache |
@@ -54,7 +54,7 @@ Every outgoing request forcibly includes `Sec-GPC: 1` and `DNT: 1`. Non-HTTP(S) 
 
 The first `bweb-html` milestone introduces an arena-backed DOM. A `NodeId` is a stable index into a `Vec<Node>`; nodes contain parent and child IDs, and element attributes are stored as owned name/value pairs. This avoids per-node pointer ownership and makes tree traversal and later arena allocation strategies explicit.
 
-The initial parser handles document, element, text, and comment nodes, quoted/unquoted attributes, closing tags, and common void elements. It is deliberately a limited parser, not a conforming HTML5 tokenizer/tree builder. Entity decoding, foster parenting, template contents, raw-text parsing rules, scripting, and full malformed-markup recovery remain future work.
+The initial parser handles document, element, text, and comment nodes, quoted/unquoted attributes, closing tags, and common void elements. It is deliberately a limited parser, not a conforming HTML5 tokenizer/tree builder. Entity decoding, foster parenting, template contents, raw-text parsing rules, scripting, and full malformed-markup recovery remain future work. The DOM exposes a read-only stable-order iterator yielding each NodeId and node.
 
 `DocumentLoader` receives an already constructed `HttpTransport`. It has no independent HTTP client. The main HTML document is fetched as `ResourceType::Document`; linked stylesheets, images, and external scripts are resolved against the document URL and fetched only through the same transport as `Stylesheet`, `Image`, and `Script`. Therefore Shield admission, privacy headers, HTTP(S)-only validation, and redirect rechecks apply to each of these requests. Failed or blocked subresources are recorded without discarding the parsed document.
 
@@ -68,7 +68,7 @@ b-web open https://example.com/
 
 When no filter lists are cached, the shell clearly warns that Shield is inactive; requests still pass through the transport and its policy, but an empty ruleset cannot block advertising or tracking.
 
-## Current status
+## CSS parsing and computed styles\n\nThe first `bweb-css` milestone provides a CSS token lexer (including comments, strings, identifiers, numbers and punctuation), a qualified-rule/declaration parser, and a selector engine for type, universal, ID, class, attribute-presence/equality, `:root`, `:first-child`, `:last-child`, and `:empty` selectors. Descendant and child combinators and comma-separated selector lists are supported. Unsupported pseudo-classes produce parse errors; unsupported at-rules are skipped rather than partially applied.\n\n`Specificity` is represented as the (IDs, classes/attributes/pseudo-classes, types) tuple. `StyleEngine::compute` applies author rules and inline style declarations, respects `!important`, source order and selector specificity, and returns a `ComputedStyleMap` keyed by the existing DOM `NodeId`. Inherited values are carried to descendants and text/comment nodes; a small set of initial values is provided. This is not yet the full CSS cascade: origins, layers, media queries, custom-property substitution, shorthand expansion, selector pseudo-elements, full escape handling, and layout-dependent computed-value resolution remain future work.\n\n## Current status
 
 B-Web is an incremental engine foundation, not yet a complete browser. HTML5 parsing, CSS cascade/layout, JavaScript execution, page lifecycle integration, image decoding, and GPU rendering remain future milestones. No third-party browser engine is embedded.
 

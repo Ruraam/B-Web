@@ -119,6 +119,11 @@ impl HtmlDocument {
         self.nodes.get(id.0)
     }
 
+    /// Returns an iterator over arena nodes in stable document order.
+    pub fn iter(&self) -> impl Iterator<Item = (NodeId, &Node)> {
+        self.nodes.iter().enumerate().map(|(index, node)| (NodeId(index), node))
+    }
+
     /// Returns the number of nodes, including the document root.
     #[must_use]
     pub fn node_count(&self) -> usize {
