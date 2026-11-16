@@ -1,7 +1,7 @@
 //! Adapter from the current layout tree and computed CSS values to the renderer port.
 
-use bweb_css::ComputedStyleMap;
 use crate::{LayoutBox, LayoutTree, Rect};
+use bweb_css::ComputedStyleMap;
 use bweb_renderer::{Color, PaintLayout, PaintNode, PaintStyle, Rect as PaintRect};
 
 /// Exposes a layout tree as an immutable paint-order visitor.
