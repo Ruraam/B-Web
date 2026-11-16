@@ -216,11 +216,8 @@ fn build_line_boxes(
     style: Option<&bweb_css::ComputedStyle>,
 ) -> Vec<LineBox> {
     let white_space = style.and_then(|s| s.get("white-space")).unwrap_or("normal");
-    let font_size = style
-        .and_then(|s| s.get("font-size"))
-        .and_then(parse_length)
-        .unwrap_or(16.0)
-        .max(1.0);
+    let font_size =
+        style.and_then(|s| s.get("font-size")).and_then(parse_length).unwrap_or(16.0).max(1.0);
     let line_height = style
         .and_then(|s| s.get("line-height"))
         .and_then(parse_length)
@@ -575,9 +572,13 @@ mod tests {
     fn pre_white_space_preserves_newlines_as_line_breaks() {
         let (document, tree) =
             layout("<main>first\nsecond</main>", "main { display:block; white-space:pre }");
-        let main = document.iter().find_map(|(id, node)| {
-            matches!(node.kind(), NodeKind::Element { tag_name, .. } if tag_name == "main").then_some(id)
-        }).expect("main");
+        let main = document
+            .iter()
+            .find_map(|(id, node)| {
+                matches!(node.kind(), NodeKind::Element { tag_name, .. } if tag_name == "main")
+                    .then_some(id)
+            })
+            .expect("main");
         let main_box = find(&tree.root, main).expect("main layout box");
         assert_eq!(main_box.line_boxes.len(), 2);
         assert_eq!(main_box.line_boxes[0].fragments[0].text, "first");
