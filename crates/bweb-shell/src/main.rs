@@ -292,7 +292,6 @@ impl<D: raw_window_handle::HasDisplayHandle> WindowApp<D> {
     }
 }
 
-
 /// Copies an RGBA software frame into a packed RGBX surface using nearest-neighbor scaling.
 fn copy_scaled_pixels(
     source: &[u8],
@@ -323,7 +322,8 @@ fn copy_scaled_pixels(
     }
 
     for y in 0..target_height {
-        let source_y = (u64::from(y) * u64::from(source_height) / u64::from(target_height)) as usize;
+        let source_y =
+            (u64::from(y) * u64::from(source_height) / u64::from(target_height)) as usize;
         for x in 0..target_width {
             let source_x =
                 (u64::from(x) * u64::from(source_width) / u64::from(target_width)) as usize;
@@ -344,10 +344,7 @@ mod tests {
 
     #[test]
     fn scales_rgba_frame_to_surface_with_nearest_neighbor_sampling() {
-        let source = [
-            255, 0, 0, 255, 0, 255, 0, 255,
-            0, 0, 255, 255, 255, 255, 255, 255,
-        ];
+        let source = [255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255];
         let mut target = [0; 16];
 
         copy_scaled_pixels(&source, 2, 2, &mut target, 4, 4).unwrap();
@@ -355,10 +352,8 @@ mod tests {
         assert_eq!(
             target,
             [
-                0xFF0000, 0xFF0000, 0x00FF00, 0x00FF00,
-                0xFF0000, 0xFF0000, 0x00FF00, 0x00FF00,
-                0x0000FF, 0x0000FF, 0xFFFFFF, 0xFFFFFF,
-                0x0000FF, 0x0000FF, 0xFFFFFF, 0xFFFFFF,
+                0xFF0000, 0xFF0000, 0x00FF00, 0x00FF00, 0xFF0000, 0xFF0000, 0x00FF00, 0x00FF00,
+                0x0000FF, 0x0000FF, 0xFFFFFF, 0xFFFFFF, 0x0000FF, 0x0000FF, 0xFFFFFF, 0xFFFFFF,
             ]
         );
     }
