@@ -255,13 +255,7 @@ fn build_line_boxes(
 
             if pending_space && x > origin_x {
                 if wrap && x + glyph_width > origin_x + available_width {
-                    finish_line(
-                        &mut lines,
-                        &mut fragments,
-                        origin_x,
-                        y,
-                        line_height,
-                    );
+                    finish_line(&mut lines, &mut fragments, origin_x, y, line_height);
                     x = origin_x;
                     y += line_height;
                 } else {
@@ -283,13 +277,7 @@ fn build_line_boxes(
     }
 
     if !fragments.is_empty() {
-        finish_line(
-            &mut lines,
-            &mut fragments,
-            origin_x,
-            y,
-            line_height,
-        );
+        finish_line(&mut lines, &mut fragments, origin_x, y, line_height);
     }
     lines
 }
