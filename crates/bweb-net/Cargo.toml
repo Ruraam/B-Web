@@ -5,4 +5,5 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+bweb-shield = { path = "../bweb-shield" }
 url.workspace = true
