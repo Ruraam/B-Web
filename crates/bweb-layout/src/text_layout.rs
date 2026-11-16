@@ -307,8 +307,8 @@ mod tests {
         use bweb_html::NodeKind;
 
         let document = HtmlDocument::parse("<main>MMMMMMMMMMMM</main>");
-        let stylesheet = Stylesheet::parse("main { display:block; font-size:20px }")
-            .expect("valid stylesheet");
+        let stylesheet =
+            Stylesheet::parse("main { display:block; font-size:20px }").expect("valid stylesheet");
         let styles = StyleEngine::new().compute(&document, &[stylesheet]);
         let main = document
             .iter()
