@@ -4,9 +4,13 @@
 
 mod display_list;
 mod framebuffer;
+mod paint_layout;
+mod painter;
 
 pub use display_list::{Color, DisplayList, PaintItem};
 pub use framebuffer::{Framebuffer, FramebufferError};
+pub use paint_layout::{PaintLayout, PaintNode, PaintStyle};
+pub use painter::{Painter, PainterError};
 
 /// A rectangle in physical pixel coordinates for rendering commands.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
