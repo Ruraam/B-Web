@@ -376,10 +376,10 @@ mod tests {
             .expect("main text node")
     }
 
-    fn find_layout_box<'a>(
-        layout: &'a crate::LayoutBox,
+    fn find_layout_box(
+        layout: &crate::LayoutBox,
         node: bweb_html::NodeId,
-    ) -> Option<&'a crate::LayoutBox> {
+    ) -> Option<&crate::LayoutBox> {
         if layout.node == node {
             return Some(layout);
         }
