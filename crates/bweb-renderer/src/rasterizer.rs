@@ -35,6 +35,10 @@ impl Rasterizer {
                     let clip = *clips.last().expect("root clip is always present");
                     paint_border(framebuffer, *rect, *widths, clip, *color);
                 }
+                PaintItem::Text { glyphs, color } => {
+                    let clip = *clips.last().expect("root clip is always present");
+                    blit_glyphs(framebuffer, glyphs, clip, *color);
+                }
                 PaintItem::PushClip { rect } => {
                     let parent = *clips.last().expect("root clip is always present");
                     clips.push(intersect(parent, *rect).unwrap_or_default());
@@ -45,6 +49,81 @@ impl Rasterizer {
                     }
                 }
             }
+        }
+    }
+}
+
+/// Blits pre-rasterized glyph masks. Bearings are intentionally ignored:
+/// producers must supply final bitmap top-left positions in physical pixels.
+fn blit_glyphs(
+    framebuffer: &mut Framebuffer,
+    glyphs: &[crate::PositionedGlyph],
+    clip: Rect,
+    color: Color,
+) {
+    if !valid_rect(clip) || color.alpha == 0 {
+        return;
+    }
+
+    for glyph in glyphs {
+        if !glyph.x.is_finite() || !glyph.y.is_finite() {
+            continue;
+        }
+        let coverage = &glyph.coverage;
+        if coverage.width == 0 || coverage.height == 0 {
+            continue;
+        }
+
+        // TODO(renderer-4): retain fractional positions for quarter-pixel
+        // coverage-cache lookup; this milestone deliberately snaps to pixels.
+        let origin_x = glyph.x.round() as i64;
+        let origin_y = glyph.y.round() as i64;
+        let Some(expected_len) = (coverage.width as usize).checked_mul(coverage.height as usize)
+        else {
+            continue;
+        };
+
+        for (index, &mask_alpha) in coverage.data.iter().take(expected_len).enumerate() {
+            if mask_alpha == 0 {
+                continue;
+            }
+            let local_x = index % coverage.width as usize;
+            let local_y = index / coverage.width as usize;
+            let (Ok(local_x), Ok(local_y)) =
+                (i64::try_from(local_x), i64::try_from(local_y))
+            else {
+                continue;
+            };
+            let (Some(x), Some(y)) =
+                (origin_x.checked_add(local_x), origin_y.checked_add(local_y))
+            else {
+                continue;
+            };
+            if x < 0 || y < 0 || x >= i64::from(framebuffer.width())
+                || y >= i64::from(framebuffer.height())
+            {
+                continue;
+            }
+
+            let pixel_center_x = x as f32 + 0.5;
+            let pixel_center_y = y as f32 + 0.5;
+            if pixel_center_x < clip.x
+                || pixel_center_x >= clip.x + clip.width
+                || pixel_center_y < clip.y
+                || pixel_center_y >= clip.y + clip.height
+            {
+                continue;
+            }
+
+            let alpha = ((u16::from(mask_alpha) * u16::from(color.alpha) + 127) / 255) as u8;
+            if alpha == 0 {
+                continue;
+            }
+            framebuffer.set_pixel(
+                x as u32,
+                y as u32,
+                [color.red, color.green, color.blue, alpha],
+            );
         }
     }
 }
@@ -167,6 +246,83 @@ mod tests {
 
     fn fill(list: &mut DisplayList, rect: Rect, color: Color) {
         list.push(PaintItem::FillRect { rect, color });
+    }
+
+    #[test]
+    fn blits_glyph_coverage_with_color_alpha_and_integer_snapping() {
+        let mut list = DisplayList::default();
+        list.push(PaintItem::Text {
+            glyphs: vec![crate::PositionedGlyph {
+                coverage: bweb_text::Coverage {
+                    width: 2, height: 1, left: 100, top: 100, data: vec![255, 128],
+                },
+                x: 0.6,
+                y: 0.4,
+            }],
+            color: Color::rgba(200, 100, 50, 128),
+        });
+        let mut framebuffer = Framebuffer::new(3, 1).expect("framebuffer");
+
+        Rasterizer.rasterize(&list, &mut framebuffer);
+
+        assert_eq!(&framebuffer.pixels()[0..4], &[200, 100, 50, 128]);
+        assert_eq!(&framebuffer.pixels()[4..8], &[200, 100, 50, 64]);
+        assert_eq!(&framebuffer.pixels()[8..12], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn glyph_blit_respects_nested_clip_and_framebuffer_bounds() {
+        let mut list = DisplayList::default();
+        list.push(PaintItem::PushClip { rect: rect(1.0, 0.0, 2.0, 1.0) });
+        list.push(PaintItem::Text {
+            glyphs: vec![crate::PositionedGlyph {
+                coverage: bweb_text::Coverage {
+                    width: 4, height: 1, left: 0, top: 0, data: vec![255; 4],
+                },
+                x: -1.0,
+                y: 0.0,
+            }],
+            color: RED,
+        });
+        list.push(PaintItem::PopClip);
+        let mut framebuffer = Framebuffer::new(3, 1).expect("framebuffer");
+
+        Rasterizer.rasterize(&list, &mut framebuffer);
+
+        assert_eq!(
+            framebuffer.pixels(),
+            &[0, 0, 0, 0, 255, 0, 0, 255, 255, 0, 0, 255],
+        );
+    }
+
+    #[test]
+    fn glyph_blit_ignores_invalid_positions_and_malformed_coverage_tail() {
+        let mut list = DisplayList::default();
+        list.push(PaintItem::Text {
+            glyphs: vec![
+                crate::PositionedGlyph {
+                    coverage: bweb_text::Coverage {
+                        width: 2, height: 2, left: 0, top: 0, data: vec![255],
+                    },
+                    x: 0.0,
+                    y: 0.0,
+                },
+                crate::PositionedGlyph {
+                    coverage: bweb_text::Coverage {
+                        width: 1, height: 1, left: 0, top: 0, data: vec![255],
+                    },
+                    x: f32::NAN,
+                    y: 0.0,
+                },
+            ],
+            color: RED,
+        });
+        let mut framebuffer = Framebuffer::new(2, 2).expect("framebuffer");
+
+        Rasterizer.rasterize(&list, &mut framebuffer);
+
+        assert_eq!(&framebuffer.pixels()[0..4], &[255, 0, 0, 255]);
+        assert!(framebuffer.pixels()[4..].iter().all(|byte| *byte == 0));
     }
 
     #[test]
