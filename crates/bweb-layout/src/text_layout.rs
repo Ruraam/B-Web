@@ -124,7 +124,7 @@ pub fn layout_text(
     };
 
     for character in text.chars() {
-        if character == '\\n' {
+        if character == '\n' {
             flush_word(
                 &word,
                 font,
@@ -214,7 +214,7 @@ mod tests {
     #[test]
     fn preserves_explicit_newlines_and_collapses_whitespace() {
         let mut font = font();
-        let layout = layout_text(&mut font, "M   M\\nM", 0.0, 0.0, 500.0, 18.0, 22.0);
+        let layout = layout_text(&mut font, "M   M\nM", 0.0, 0.0, 500.0, 18.0, 22.0);
 
         assert_eq!(layout.line_count, 2);
         assert_eq!(layout.glyphs.len(), 3);
