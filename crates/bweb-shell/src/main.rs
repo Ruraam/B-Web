@@ -7,10 +7,10 @@ use bweb_html::DocumentLoader;
 use bweb_layout::{LayoutTree, PaintAdapter, Rect as LayoutRect, View, Viewport};
 use bweb_net::{HttpTransport, NetworkPolicy};
 use bweb_renderer::{Framebuffer, Painter, Rasterizer};
-use render_view::BrowserViewBackend;
-use shell::{ResizeController, ResizeDispatch};
 use bweb_shield::{FilterListCache, FilterListError, Shield};
 use bweb_text::Font;
+use render_view::BrowserViewBackend;
+use shell::{ResizeController, ResizeDispatch};
 use softbuffer::{Context, Surface};
 use std::{
     env,
@@ -241,7 +241,9 @@ impl<D: raw_window_handle::HasDisplayHandle + 'static> ApplicationHandler for Wi
         match Surface::new(&self.context, window.clone()) {
             Ok(surface) => {
                 let size = window.inner_size();
-                if let Some(viewport) = Viewport::new(size.width, size.height, window.scale_factor()) {
+                if let Some(viewport) =
+                    Viewport::new(size.width, size.height, window.scale_factor())
+                {
                     self.controller.queue(viewport);
                 }
                 window.request_redraw();
