@@ -19,13 +19,7 @@ pub struct BrowserViewBackend {
 impl BrowserViewBackend {
     #[must_use]
     pub fn new(document: HtmlDocument, styles: ComputedStyleMap, font: Font) -> Self {
-        Self {
-            document,
-            styles,
-            font,
-            display_list: None,
-            framebuffer: None,
-        }
+        Self { document, styles, font, display_list: None, framebuffer: None }
     }
 
     #[must_use]
@@ -59,9 +53,8 @@ impl ViewBackend for BrowserViewBackend {
             Rect { x: 0.0, y: 0.0, width: width_css, height: 0.0 },
         )
         .with_text_runs(&text_runs);
-        let display_list = Painter::new(&adapter, scale)
-            .map_err(|error| error.to_string())?
-            .paint();
+        let display_list =
+            Painter::new(&adapter, scale).map_err(|error| error.to_string())?.paint();
 
         self.display_list = Some(display_list);
         Ok(())
