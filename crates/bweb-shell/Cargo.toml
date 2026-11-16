@@ -17,4 +17,5 @@ bweb-layout = { path = "../bweb-layout" }
 bweb-js = { path = "../bweb-js" }
 bweb-net = { path = "../bweb-net" }
 bweb-renderer = { path = "../bweb-renderer" }
+bweb-text = { path = "../bweb-text" }
 bweb-shield = { path = "../bweb-shield" }
