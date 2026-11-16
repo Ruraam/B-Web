@@ -5,8 +5,124 @@
 //! redirect target is validated and checked by Shield before another request
 //! is sent. TLS is provided by reqwest's rustls feature, not OpenSSL.
 
-use crate::{NetworkPolicy, NetworkPolicyError, parse_web_url};
-use bweb_shield::{Decision, ResourceType};
+use bweb_shield::{Decision, ResourceType, Shield, ShieldError};
+
+/// Errors returned while validating an HTTP or HTTPS URL.
+#[derive(Debug)]
+pub enum WebUrlError {
+    Parse(url::ParseError),
+    UnsupportedScheme(String),
+}
+
+impl fmt::Display for WebUrlError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Parse(error) => write!(f, "invalid web URL: {error}"),
+            Self::UnsupportedScheme(scheme) => write!(f, "unsupported URL scheme: {scheme}"),
+        }
+    }
+}
+
+impl Error for WebUrlError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Parse(error) => Some(error),
+            Self::UnsupportedScheme(_) => None,
+        }
+    }
+}
+
+impl From<url::ParseError> for WebUrlError {
+    fn from(error: url::ParseError) -> Self {
+        Self::Parse(error)
+    }
+}
+
+/// Errors returned by the network admission policy.
+#[derive(Debug)]
+pub enum NetworkPolicyError {
+    InvalidUrl(WebUrlError),
+    Shield(ShieldError),
+}
+
+impl fmt::Display for NetworkPolicyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidUrl(error) => write!(f, "network request rejected: {error}"),
+            Self::Shield(error) => write!(f, "network request could not be checked: {error}"),
+        }
+    }
+}
+
+impl Error for NetworkPolicyError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::InvalidUrl(error) => Some(error),
+            Self::Shield(error) => Some(error),
+        }
+    }
+}
+
+impl From<WebUrlError> for NetworkPolicyError {
+    fn from(error: WebUrlError) -> Self {
+        Self::InvalidUrl(error)
+    }
+}
+
+impl From<ShieldError> for NetworkPolicyError {
+    fn from(error: ShieldError) -> Self {
+        Self::Shield(error)
+    }
+}
+
+/// Parses an absolute HTTP or HTTPS URL.
+pub fn parse_web_url(input: &str) -> Result<Url, WebUrlError> {
+    let url = Url::parse(input)?;
+    match url.scheme() {
+        "http" | "https" => Ok(url),
+        scheme => Err(WebUrlError::UnsupportedScheme(scheme.to_owned())),
+    }
+}
+
+/// Shield-backed policy that must authorize each outgoing web request.
+pub struct NetworkPolicy {
+    shield: Shield,
+}
+
+impl NetworkPolicy {
+    /// Creates a policy using the supplied compiled filter engine.
+    #[must_use]
+    pub fn new(shield: Shield) -> Self {
+        Self { shield }
+    }
+
+    /// Checks a resource URL against Shield when the caller already validated URLs.
+    pub fn authorize(
+        &self,
+        resource_url: &str,
+        page_url: &str,
+        resource_type: ResourceType,
+        method: &str,
+    ) -> Result<Decision, ShieldError> {
+        self.shield.check(resource_url, page_url, resource_type, method)
+    }
+
+    /// Validates both URLs and checks the request against Shield.
+    pub fn authorize_web_request(
+        &self,
+        resource_url: &str,
+        page_url: &str,
+        resource_type: ResourceType,
+        method: &str,
+    ) -> Result<Decision, NetworkPolicyError> {
+        let resource_url = parse_web_url(resource_url)?;
+        let page_url = parse_web_url(page_url)?;
+
+        self.authorize(resource_url.as_str(), page_url.as_str(), resource_type, method)
+            .map_err(NetworkPolicyError::from)
+    }
+}
+
 use reqwest::{
     Method, StatusCode,
     blocking::{Client, Response},
