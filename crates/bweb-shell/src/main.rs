@@ -205,7 +205,8 @@ fn load_system_font() -> Result<Font, Box<dyn Error>> {
 fn write_ppm(path: &Path, framebuffer: &Framebuffer) -> Result<(), io::Error> {
     let file = fs::File::create(path)?;
     let mut writer = BufWriter::new(file);
-    writeln!(writer, "P6\\n{} {}", framebuffer.width(), framebuffer.height())?;
+    writeln!(writer, "P6")?;
+    writeln!(writer, "{} {}", framebuffer.width(), framebuffer.height())?;
     writeln!(writer, "255")?;
     for pixel in framebuffer.pixels().chunks_exact(4) {
         writer.write_all(&pixel[..3])?;
