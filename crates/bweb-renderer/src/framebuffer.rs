@@ -139,10 +139,7 @@ mod tests {
 
     #[test]
     fn rejects_dimension_overflow() {
-        assert_eq!(
-            Framebuffer::new(u32::MAX, u32::MAX),
-            Err(FramebufferError::DimensionsTooLarge)
-        );
+        assert_eq!(Framebuffer::new(u32::MAX, u32::MAX), Err(FramebufferError::DimensionsTooLarge));
     }
 
     #[test]
