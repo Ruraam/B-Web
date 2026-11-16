@@ -1,8 +1,8 @@
 //! Adapter from the current layout tree and computed CSS values to the renderer port.
 
 use bweb_css::ComputedStyleMap;
-use bweb_renderer::{Color, PaintLayout, PaintNode, PaintStyle, Rect as PaintRect};
 use crate::{LayoutBox, LayoutTree, Rect};
+use bweb_renderer::{Color, PaintLayout, PaintNode, PaintStyle, Rect as PaintRect};
 
 /// Exposes a layout tree as an immutable paint-order visitor.
 pub struct PaintAdapter<'a> {
@@ -76,7 +76,10 @@ fn parse_color(value: &str) -> Option<Color> {
     let expand = |digit: u8| digit * 17;
     let channels = match hex.len() {
         3 => {
-            let values: Vec<u8> = hex.bytes().map(|byte| (byte as char).to_digit(16).map(|v| v as u8)).collect::<Option<_>>()?;
+            let values: Vec<u8> = hex
+                .bytes()
+                .map(|byte| (byte as char).to_digit(16).map(|v| v as u8))
+                .collect::<Option<_>>()?;
             [expand(values[0]), expand(values[1]), expand(values[2]), 255]
         }
         4 => {
