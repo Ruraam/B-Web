@@ -346,8 +346,8 @@ mod tests {
     #[test]
     fn viewport_height_change_does_not_recompute_layout_or_text_geometry() {
         let document = HtmlDocument::parse("<main>MMMMMMMMMMMM</main>");
-        let stylesheet = Stylesheet::parse("main { display:block; font-size:20px }")
-            .expect("valid stylesheet");
+        let stylesheet =
+            Stylesheet::parse("main { display:block; font-size:20px }").expect("valid stylesheet");
         let styles = StyleEngine::new().compute(&document, &[stylesheet]);
 
         // Height belongs to the paint viewport, not the top-down layout inputs.
