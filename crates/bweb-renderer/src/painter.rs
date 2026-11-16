@@ -1,6 +1,6 @@
 //! Converts layout-port data into a deterministic physical-pixel DisplayList.
 
-use crate::display_list::{DisplayList, TextRun};
+use crate::display_list::DisplayList;
 use crate::paint_layout::{PaintLayout, PaintNode};
 use crate::{Edges, PaintItem, Rect};
 
