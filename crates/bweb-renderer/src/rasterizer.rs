@@ -265,9 +265,9 @@ mod tests {
 
         Rasterizer.rasterize(&list, &mut framebuffer);
 
-        assert_eq!(&framebuffer.pixels()[0..4], &[200, 100, 50, 128]);
-        assert_eq!(&framebuffer.pixels()[4..8], &[200, 100, 50, 64]);
-        assert_eq!(&framebuffer.pixels()[8..12], &[0, 0, 0, 0]);
+        assert_eq!(&framebuffer.pixels()[0..4], &[0, 0, 0, 0]);
+        assert_eq!(&framebuffer.pixels()[4..8], &[200, 100, 50, 128]);
+        assert_eq!(&framebuffer.pixels()[8..12], &[200, 100, 50, 64]);
     }
 
     #[test]
