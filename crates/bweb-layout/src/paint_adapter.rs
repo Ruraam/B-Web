@@ -83,7 +83,10 @@ fn parse_color(value: &str) -> Option<Color> {
             [expand(values[0]), expand(values[1]), expand(values[2]), 255]
         }
         4 => {
-            let values: Vec<u8> = hex.bytes().map(|byte| (byte as char).to_digit(16).map(|v| v as u8)).collect::<Option<_>>()?;
+            let values: Vec<u8> = hex
+                .bytes()
+                .map(|byte| (byte as char).to_digit(16).map(|v| v as u8))
+                .collect::<Option<_>>()?;
             [expand(values[0]), expand(values[1]), expand(values[2]), expand(values[3])]
         }
         6 | 8 => {
