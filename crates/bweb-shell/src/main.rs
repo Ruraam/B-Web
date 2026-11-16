@@ -2,10 +2,10 @@ use bweb_css::{StyleEngine, Stylesheet};
 use bweb_filterlists::FilterListDownloader;
 use bweb_html::DocumentLoader;
 use bweb_layout::{LayoutTree, PaintAdapter, Rect as LayoutRect};
-use bweb_renderer::{Framebuffer, Painter, Rasterizer};
-use bweb_text::Font;
 use bweb_net::{HttpTransport, NetworkPolicy};
+use bweb_renderer::{Framebuffer, Painter, Rasterizer};
 use bweb_shield::{FilterListCache, FilterListError, Shield};
+use bweb_text::Font;
 use std::{
     env,
     error::Error,
@@ -75,7 +75,11 @@ fn show_status() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn open_document(url: &str, dump_layout: bool, render_path: Option<&Path>) -> Result<(), Box<dyn Error>> {
+fn open_document(
+    url: &str,
+    dump_layout: bool,
+    render_path: Option<&Path>,
+) -> Result<(), Box<dyn Error>> {
     let (transport, shield_active) = build_transport()?;
     println!("Loading: {url}");
     if !shield_active {
@@ -115,12 +119,8 @@ fn open_document(url: &str, dump_layout: bool, render_path: Option<&Path>) -> Re
     println!("Computed styles: {} NodeId entries", computed.len());
     println!("Layout boxes: {}", layout.box_count);
     if let Some(path) = render_path {
-        let (width, height, glyph_count) =
-            render_document(&layout, &computed, path, 1280, 720)?;
-        println!(
-            "Rendered frame: {width}x{height} px, {glyph_count} glyphs -> {}",
-            path.display()
-        );
+        let (width, height, glyph_count) = render_document(&layout, &computed, path, 1280, 720)?;
+        println!("Rendered frame: {width}x{height} px, {glyph_count} glyphs -> {}", path.display());
     }
     if dump_layout {
         println!();
@@ -156,12 +156,7 @@ fn render_document(
     let scale_factor = 1.0;
     let text_runs = bweb_layout::prepare_text_runs(layout, styles, &mut font, scale_factor);
     let glyph_count = text_runs.values().map(|run| run.glyphs.len()).sum();
-    let viewport = LayoutRect {
-        x: 0.0,
-        y: 0.0,
-        width: width as f32,
-        height: height as f32,
-    };
+    let viewport = LayoutRect { x: 0.0, y: 0.0, width: width as f32, height: height as f32 };
     let adapter = PaintAdapter::new(layout, styles, viewport).with_text_runs(&text_runs);
     let display_list = Painter::new(&adapter, scale_factor)?.paint();
     let mut framebuffer = Framebuffer::new(width, height)
@@ -239,9 +234,13 @@ fn print_usage() {
     println!();
     println!("Usage:");
     println!("  b-web                 Show status and load cached Shield rules");
-    println!("  b-web open <URL> [--dump-layout] [--render-ppm FILE]  Fetch, layout, and optionally render a frame");
+    println!(
+        "  b-web open <URL> [--dump-layout] [--render-ppm FILE]  Fetch, layout, and optionally render a frame"
+    );
     println!("  b-web update-filters  Download and cache EasyList and EasyPrivacy");
-    println!("  b-web --help          Show this help\n\nRendering: set BWEB_FONT to select a TTF/OTF font; otherwise common Linux sans fonts are tried.");
+    println!(
+        "  b-web --help          Show this help\n\nRendering: set BWEB_FONT to select a TTF/OTF font; otherwise common Linux sans fonts are tried."
+    );
 }
 
 fn update_filters() -> Result<(), Box<dyn Error>> {
