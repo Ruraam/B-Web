@@ -19,3 +19,6 @@ bweb-net = { path = "../bweb-net" }
 bweb-renderer = { path = "../bweb-renderer" }
 bweb-text = { path = "../bweb-text" }
 bweb-shield = { path = "../bweb-shield" }
+winit = "0.30"
+softbuffer = "0.4"
+raw-window-handle = "0.6"
