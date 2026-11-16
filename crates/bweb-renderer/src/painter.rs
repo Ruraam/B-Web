@@ -70,10 +70,7 @@ impl<'a, L: PaintLayout> Painter<'a, L> {
             // Text runs are already positioned in physical pixels by layout.
             // Keep them after this node's border and before its descendants.
             if let Some(run) = node.text {
-                list.push(PaintItem::Text {
-                    glyphs: run.glyphs.clone(),
-                    color: run.color,
-                });
+                list.push(PaintItem::Text { glyphs: run.glyphs.clone(), color: run.color });
             }
 
             if node.style.clips_children {
