@@ -918,11 +918,7 @@ fn is_element_sibling_position(document: &HtmlDocument, id: NodeId, first: bool)
                 .is_some_and(|sibling_node| matches!(sibling_node.kind(), NodeKind::Element { .. }))
         })
         .collect();
-    if first {
-        siblings.first() == Some(&id)
-    } else {
-        siblings.last() == Some(&id)
-    }
+    if first { siblings.first() == Some(&id) } else { siblings.last() == Some(&id) }
 }
 
 #[cfg(test)]
