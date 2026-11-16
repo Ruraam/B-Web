@@ -334,7 +334,7 @@ fn parse_start_tag(token: &str) -> (String, Vec<Attribute>, bool) {
                 }
             } else {
                 let value_start = index;
-                while index < bytes.len() && !bytes[index].is_ascii_whitespace() && bytes[index] != b'/' {
+                while index < bytes.len() && !bytes[index].is_ascii_whitespace() {
                     index += 1;
                 }
                 value = String::from_utf8_lossy(&bytes[value_start..index]).into_owned();
@@ -606,6 +606,15 @@ mod tests {
         let document = HtmlDocument::parse("<body><!-- note --><img src='x'><p>ok</p></body>");
         assert!(document.nodes.iter().any(|node| matches!(node.kind, NodeKind::Comment(_))));
         assert_eq!(document.resource_references().len(), 1);
+    }
+
+    #[test]
+    fn parses_unquoted_urls_containing_slashes() {
+        let document = HtmlDocument::parse("<img src=https://cdn.example.test/assets/logo.png>");
+        assert_eq!(
+            document.resource_references()[0].url,
+            "https://cdn.example.test/assets/logo.png"
+        );
     }
 
     #[test]
