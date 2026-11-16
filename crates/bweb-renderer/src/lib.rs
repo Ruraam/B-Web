@@ -297,7 +297,7 @@ mod tests {
         let main = document
             .iter()
             .find_map(|(id, node)| {
-                matches!(node.kind(), NodeKind::Element { tag_name, .. if tag_name == "main")
+                matches!(node.kind(), NodeKind::Element { tag_name, .. } if tag_name == "main")
                     .then_some(id)
             })
             .expect("main");
