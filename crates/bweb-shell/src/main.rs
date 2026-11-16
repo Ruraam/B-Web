@@ -22,7 +22,11 @@ fn run() -> Result<(), Box<dyn Error>> {
                 io::Error::new(io::ErrorKind::InvalidInput, "usage: b-web open <http(s)-url>")
             })?;
             if arguments.next().is_some() {
-                return Err(io::Error::new(io::ErrorKind::InvalidInput, "too many arguments for 'open'").into());
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "too many arguments for 'open'",
+                )
+                .into());
             }
             open_document(url.to_string_lossy().as_ref())?;
         }
@@ -60,17 +64,14 @@ fn open_document(url: &str) -> Result<(), Box<dyn Error>> {
     println!("Loaded subresources: {}", loaded.resources.len());
     println!("Failed/blocked subresources: {}", loaded.failed_resources.len());
     for resource in &loaded.resources {
-        println!(
-            "  {:?}: {} ({} bytes)",
-            resource.kind,
-            resource.url,
-            resource.bytes.len()
-        );
+        println!("  {:?}: {} ({} bytes)", resource.kind, resource.url, resource.bytes.len());
     }
     for failure in &loaded.failed_resources {
         println!("  blocked/unavailable: {} ({})", failure.reference.url, failure.error);
     }
-    println!("Note: this milestone parses a limited HTML subset; CSS/JS execution and rendering are not implemented.");
+    println!(
+        "Note: this milestone parses a limited HTML subset; CSS/JS execution and rendering are not implemented."
+    );
     Ok(())
 }
 
@@ -124,7 +125,10 @@ fn filter_list_cache_directory() -> Result<PathBuf, io::Error> {
         }
     }
     let home = env::var_os("HOME").ok_or_else(|| {
-        io::Error::new(io::ErrorKind::NotFound, "HOME is not set; cannot locate the filter-list cache")
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "HOME is not set; cannot locate the filter-list cache",
+        )
     })?;
     Ok(PathBuf::from(home).join(".cache").join("b-web").join("filter-lists"))
 }

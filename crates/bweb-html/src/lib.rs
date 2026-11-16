@@ -128,12 +128,11 @@ impl HtmlDocument {
     /// Returns the first title element's text content, if present.
     #[must_use]
     pub fn title(&self) -> Option<String> {
-        let title_id = self.nodes.iter().enumerate().find_map(|(index, node)| {
-            match &node.kind {
+        let title_id =
+            self.nodes.iter().enumerate().find_map(|(index, node)| match &node.kind {
                 NodeKind::Element { tag_name, .. } if tag_name == "title" => Some(NodeId(index)),
                 _ => None,
-            }
-        })?;
+            })?;
         let mut text = String::new();
         self.collect_text(title_id, &mut text);
         let title = text.trim().to_owned();
@@ -153,8 +152,10 @@ impl HtmlDocument {
             };
             let reference = match tag_name.as_str() {
                 "link"
-                    if attribute("rel")
-                        .is_some_and(|rel| rel.split_ascii_whitespace().any(|part| part.eq_ignore_ascii_case("stylesheet"))) =>
+                    if attribute("rel").is_some_and(|rel| {
+                        rel.split_ascii_whitespace()
+                            .any(|part| part.eq_ignore_ascii_case("stylesheet"))
+                    }) =>
                 {
                     attribute("href").map(|url| (url, ResourceKind::Stylesheet))
                 }
@@ -194,7 +195,10 @@ impl HtmlDocument {
                 if let Some(relative_end) = self.source[open + 4..].find("-->") {
                     let end = open + 4 + relative_end;
                     let parent = *stack.last().unwrap_or(&self.root);
-                    self.append_node(parent, NodeKind::Comment(self.source[open + 4..end].to_owned()));
+                    self.append_node(
+                        parent,
+                        NodeKind::Comment(self.source[open + 4..end].to_owned()),
+                    );
                     cursor = end + 3;
                     continue;
                 }
@@ -224,7 +228,10 @@ impl HtmlDocument {
                 let (name, attributes, self_closing) = parse_start_tag(token);
                 if !name.is_empty() {
                     let parent = *stack.last().unwrap_or(&self.root);
-                    let id = self.append_node(parent, NodeKind::Element { tag_name: name.clone(), attributes });
+                    let id = self.append_node(
+                        parent,
+                        NodeKind::Element { tag_name: name.clone(), attributes },
+                    );
                     if !self_closing && !is_void_element(&name) {
                         stack.push(id);
                     }
@@ -269,7 +276,9 @@ fn find_tag_end(source: &str, start: usize) -> Option<usize> {
 fn parse_name(input: &str) -> String {
     input
         .trim_start()
-        .split(|character: char| character.is_ascii_whitespace() || character == '/' || character == '>')
+        .split(|character: char| {
+            character.is_ascii_whitespace() || character == '/' || character == '>'
+        })
         .next()
         .unwrap_or_default()
         .to_ascii_lowercase()
@@ -350,8 +359,20 @@ fn parse_start_tag(token: &str) -> (String, Vec<Attribute>, bool) {
 fn is_void_element(name: &str) -> bool {
     matches!(
         name,
-        "area" | "base" | "br" | "col" | "embed" | "hr" | "img" | "input" | "link"
-            | "meta" | "param" | "source" | "track" | "wbr"
+        "area"
+            | "base"
+            | "br"
+            | "col"
+            | "embed"
+            | "hr"
+            | "img"
+            | "input"
+            | "link"
+            | "meta"
+            | "param"
+            | "source"
+            | "track"
+            | "wbr"
     )
 }
 
@@ -480,11 +501,10 @@ impl DocumentLoader {
         if !response.status().is_success() {
             return Err(DocumentLoadError::HttpStatus(response.status().as_u16()));
         }
-        let source = read_bounded(response, MAX_DOCUMENT_BYTES)
-            .map_err(|error| match error {
-                BoundedReadError::Io(error) => DocumentLoadError::Io(error),
-                BoundedReadError::TooLarge => DocumentLoadError::TooLarge { limit: MAX_DOCUMENT_BYTES },
-            })?;
+        let source = read_bounded(response, MAX_DOCUMENT_BYTES).map_err(|error| match error {
+            BoundedReadError::Io(error) => DocumentLoadError::Io(error),
+            BoundedReadError::TooLarge => DocumentLoadError::TooLarge { limit: MAX_DOCUMENT_BYTES },
+        })?;
         let source = String::from_utf8(source).map_err(|_| DocumentLoadError::InvalidUtf8)?;
         let document = HtmlDocument::parse(source);
         let references = document.resource_references();
@@ -541,10 +561,9 @@ impl DocumentLoader {
                     content_type,
                     bytes,
                 }),
-                Err(BoundedReadError::Io(error)) => failed_resources.push(FailedResource {
-                    reference,
-                    error: error.to_string(),
-                }),
+                Err(BoundedReadError::Io(error)) => {
+                    failed_resources.push(FailedResource { reference, error: error.to_string() })
+                }
                 Err(BoundedReadError::TooLarge) => failed_resources.push(FailedResource {
                     reference,
                     error: format!("resource exceeded the {limit}-byte limit"),
