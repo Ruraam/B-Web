@@ -34,6 +34,12 @@ impl Viewport {
     pub const fn scale_factor(self) -> f64 {
         self.scale_factor
     }
+
+    /// Returns this viewport with a new height, rejecting zero.
+    #[must_use]
+    pub fn with_height(self, height: u32) -> Option<Self> {
+        Self::new(self.width, height, self.scale_factor)
+    }
 }
 
 /// Work performed in response to a viewport change.
@@ -98,6 +104,14 @@ impl<B: ViewBackend> View<B> {
         self.viewport = Some(next);
 
         Ok(if needs_reflow { ResizeOutcome::Reflowed } else { ResizeOutcome::Repainted })
+    }
+
+    /// Changes only the viewport height and repaints without running layout.
+    /// Returns None if the view is not initialized or height is zero.
+    pub fn set_viewport_height(&mut self, height: u32) -> Result<Option<ResizeOutcome>, B::Error> {
+        let Some(current) = self.viewport else { return Ok(None) };
+        let Some(next) = current.with_height(height) else { return Ok(None) };
+        self.resize(next).map(Some)
     }
 
     #[must_use]
@@ -194,6 +208,26 @@ mod tests {
         assert_eq!(view.backend().reflow_calls, 1);
         assert_eq!(view.backend().repaint_calls, 2);
         assert_eq!(view.backend().last_paint, Some(viewport(800, 720, 1.0)));
+    }
+
+    #[test]
+    fn set_viewport_height_repaints_without_reflow() {
+        let mut view = View::new(MockLayout::default());
+        view.resize(viewport(800, 600, 1.0)).expect("initial render");
+        assert_eq!(view.set_viewport_height(720), Ok(Some(ResizeOutcome::Repainted)));
+        assert_eq!(view.backend().reflow_calls, 1);
+        assert_eq!(view.backend().repaint_calls, 2);
+        assert_eq!(view.viewport(), Some(viewport(800, 720, 1.0)));
+    }
+
+    #[test]
+    fn set_viewport_height_is_idempotent_and_rejects_zero() {
+        let mut view = View::new(MockLayout::default());
+        view.resize(viewport(800, 600, 1.0)).expect("initial render");
+        assert_eq!(view.set_viewport_height(600), Ok(Some(ResizeOutcome::Unchanged)));
+        assert_eq!(view.set_viewport_height(0), Ok(None));
+        assert_eq!(view.backend().reflow_calls, 1);
+        assert_eq!(view.backend().repaint_calls, 1);
     }
 
     #[test]
