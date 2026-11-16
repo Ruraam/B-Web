@@ -549,13 +549,16 @@ mod tests {
         assert_eq!(box_node.rect.width, 200.0);
     }
 
-
     #[test]
     fn creates_line_boxes_and_preserves_text_node_identity() {
         let (document, tree) = layout("<main>hello   world</main>", "main { display:block }");
-        let main = document.iter().find_map(|(id, node)| {
-            matches!(node.kind(), NodeKind::Element { tag_name, .. } if tag_name == "main").then_some(id)
-        }).expect("main");
+        let main = document
+            .iter()
+            .find_map(|(id, node)| {
+                matches!(node.kind(), NodeKind::Element { tag_name, .. } if tag_name == "main")
+                    .then_some(id)
+            })
+            .expect("main");
         let main_box = find(&tree.root, main).expect("main layout box");
         assert_eq!(main_box.line_boxes.len(), 1);
         let fragments = &main_box.line_boxes[0].fragments;
