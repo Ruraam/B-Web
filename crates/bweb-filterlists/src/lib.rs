@@ -9,9 +9,9 @@
 
 use bweb_shield::{FilterListCache, FilterListError, FilterListId, MAX_FILTER_LIST_BYTES};
 use reqwest::{
+    StatusCode,
     blocking::{Client, Response},
     redirect::Policy,
-    StatusCode,
 };
 use std::{
     error::Error,
@@ -124,10 +124,7 @@ impl FilterListDownloader {
     }
 
     /// Downloads and validates one built-in list without modifying the cache.
-    pub fn download_list(
-        &self,
-        id: FilterListId,
-    ) -> Result<String, FilterListDownloadError> {
+    pub fn download_list(&self, id: FilterListId) -> Result<String, FilterListDownloadError> {
         let response = self.client.get(id.source_url()).send()?;
         let response = ensure_success(response)?;
         let contents = read_response_bounded(response)?;
@@ -159,16 +156,13 @@ impl FilterListDownloader {
     }
 }
 
-
 fn ensure_success(response: Response) -> Result<Response, FilterListDownloadError> {
     if !response.status().is_success() {
         return Err(FilterListDownloadError::HttpStatus(response.status()));
     }
 
     if response.content_length().is_some_and(|length| length > MAX_FILTER_LIST_BYTES as u64) {
-        return Err(FilterListDownloadError::TooLarge {
-            limit: MAX_FILTER_LIST_BYTES,
-        });
+        return Err(FilterListDownloadError::TooLarge { limit: MAX_FILTER_LIST_BYTES });
     }
 
     Ok(response)
@@ -178,14 +172,9 @@ fn read_response_bounded(response: Response) -> Result<Vec<u8>, FilterListDownlo
     read_bounded(response, MAX_FILTER_LIST_BYTES)
 }
 
-fn read_bounded(
-    reader: impl Read,
-    limit: usize,
-) -> Result<Vec<u8>, FilterListDownloadError> {
+fn read_bounded(reader: impl Read, limit: usize) -> Result<Vec<u8>, FilterListDownloadError> {
     let mut bytes = Vec::with_capacity(limit.min(64 * 1024));
-    reader
-        .take(limit as u64 + 1)
-        .read_to_end(&mut bytes)?;
+    reader.take(limit as u64 + 1).read_to_end(&mut bytes)?;
 
     if bytes.len() > limit {
         return Err(FilterListDownloadError::TooLarge { limit });
@@ -198,10 +187,7 @@ fn read_bounded(
     Ok(bytes)
 }
 
-fn validate_list_identity(
-    id: FilterListId,
-    contents: &str,
-) -> Result<(), FilterListDownloadError> {
+fn validate_list_identity(id: FilterListId, contents: &str) -> Result<(), FilterListDownloadError> {
     let expected_title = match id {
         FilterListId::EasyList => "! Title: EasyList",
         FilterListId::EasyPrivacy => "! Title: EasyPrivacy",
