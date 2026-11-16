@@ -143,7 +143,6 @@ pub fn layout_text(
 }
 
 
-
 /// Builds renderer-ready text runs from the inline fragments in a layout tree.
 ///
 /// The caller supplies the selected font face. Font-family matching and fallback
@@ -156,9 +155,9 @@ pub fn prepare_text_runs(
     font: &mut Font,
     scale_factor: f32,
 ) -> std::collections::HashMap<bweb_html::NodeId, std::sync::Arc<bweb_renderer::TextRun>> {
-    use std::{collections::HashMap, sync::Arc};
-    use bweb_renderer::{Color, TextRun};
     use bweb_html::NodeId;
+    use bweb_renderer::{Color, TextRun};
+    use std::{collections::HashMap, sync::Arc};
 
     fn collect<'a>(layout: &'a crate::LayoutBox, output: &mut Vec<&'a crate::TextFragment>) {
         for line in &layout.line_boxes {
@@ -182,10 +181,7 @@ pub fn prepare_text_runs(
         if style.get("visibility") == Some("hidden") || style.get("color") == Some("transparent") {
             continue;
         }
-        let font_size = style
-            .get("font-size")
-            .and_then(parse_css_px)
-            .unwrap_or(16.0);
+        let font_size = style.get("font-size").and_then(parse_css_px).unwrap_or(16.0);
         if font_size <= 0.0 {
             continue;
         }
@@ -204,10 +200,8 @@ pub fn prepare_text_runs(
         if layout.glyphs.is_empty() {
             continue;
         }
-        let run = runs.entry(fragment.node).or_insert_with(|| TextRun {
-            glyphs: Vec::new(),
-            color,
-        });
+        let run =
+            runs.entry(fragment.node).or_insert_with(|| TextRun { glyphs: Vec::new(), color });
         run.glyphs.extend(layout.glyphs);
     }
 
@@ -304,5 +298,4 @@ mod tests {
         assert_eq!(run.glyphs.len(), 5);
         assert!(run.glyphs.iter().all(|glyph| glyph.x >= 0.0 && glyph.y >= 0.0));
     }
-
 }
