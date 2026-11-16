@@ -180,37 +180,44 @@ impl HtmlDocument {
     }
 
     fn build_tree(&mut self) {
+        // Move the source out temporarily so tree construction can mutate the
+        // arena while borrowing markup slices without cloning the document.
+        let source = std::mem::take(&mut self.source);
         let mut stack = vec![self.root];
         let mut cursor = 0;
-        while cursor < self.source.len() {
-            let Some(relative_open) = self.source[cursor..].find('<') else {
-                self.append_text(*stack.last().unwrap_or(&self.root), &self.source[cursor..]);
+        while cursor < source.len() {
+            let Some(relative_open) = source[cursor..].find('<') else {
+                let parent = *stack.last().unwrap_or(&self.root);
+                self.append_text(parent, &source[cursor..]);
                 break;
             };
             let open = cursor + relative_open;
             if open > cursor {
-                self.append_text(*stack.last().unwrap_or(&self.root), &self.source[cursor..open]);
+                let parent = *stack.last().unwrap_or(&self.root);
+                self.append_text(parent, &source[cursor..open]);
             }
-            if self.source[open..].starts_with("<!--") {
-                if let Some(relative_end) = self.source[open + 4..].find("-->") {
+            if source[open..].starts_with("<!--") {
+                if let Some(relative_end) = source[open + 4..].find("-->") {
                     let end = open + 4 + relative_end;
                     let parent = *stack.last().unwrap_or(&self.root);
                     self.append_node(
                         parent,
-                        NodeKind::Comment(self.source[open + 4..end].to_owned()),
+                        NodeKind::Comment(source[open + 4..end].to_owned()),
                     );
                     cursor = end + 3;
                     continue;
                 }
-                self.append_text(*stack.last().unwrap_or(&self.root), &self.source[open..]);
+                let parent = *stack.last().unwrap_or(&self.root);
+                self.append_text(parent, &source[open..]);
                 break;
             }
-            let Some(relative_end) = find_tag_end(&self.source, open + 1) else {
-                self.append_text(*stack.last().unwrap_or(&self.root), &self.source[open..]);
+            let Some(relative_end) = find_tag_end(&source, open + 1) else {
+                let parent = *stack.last().unwrap_or(&self.root);
+                self.append_text(parent, &source[open..]);
                 break;
             };
             let end = open + 1 + relative_end;
-            let token = self.source[open + 1..end].trim();
+            let token = source[open + 1..end].trim();
             if let Some(closing_name) = token.strip_prefix('/') {
                 let name = parse_name(closing_name);
                 if let Some(position) = stack.iter().rposition(|id| {
@@ -239,6 +246,7 @@ impl HtmlDocument {
             }
             cursor = end + 1;
         }
+        self.source = source;
     }
 
     fn append_text(&mut self, parent: NodeId, text: &str) {
