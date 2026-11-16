@@ -8,13 +8,13 @@
 use crate::{NetworkPolicy, NetworkPolicyError, parse_web_url};
 use bweb_shield::{Decision, ResourceType};
 use reqwest::{
+    Method, StatusCode,
     blocking::{Client, Response},
     header::{
         AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, COOKIE, HeaderMap, HeaderValue, LOCATION,
         PROXY_AUTHORIZATION,
     },
     redirect::Policy,
-    Method, StatusCode,
 };
 use std::{error::Error, fmt, time::Duration};
 use url::Url;
@@ -43,7 +43,9 @@ impl fmt::Display for HttpTransportError {
             Self::Blocked { url } => write!(f, "request blocked by Shield: {url}"),
             Self::InvalidMethod(error) => write!(f, "invalid HTTP method: {error}"),
             Self::InvalidRedirectUrl(error) => write!(f, "invalid redirect URL: {error}"),
-            Self::RedirectWithoutLocation => f.write_str("redirect response has no Location header"),
+            Self::RedirectWithoutLocation => {
+                f.write_str("redirect response has no Location header")
+            }
             Self::TooManyRedirects { limit } => write!(f, "HTTP redirect limit exceeded ({limit})"),
         }
     }
@@ -123,10 +125,8 @@ impl HttpTransport {
 
             // Apply the mandatory privacy signals after caller-provided values.
             let request_headers = with_privacy_headers(headers.clone());
-            let mut request = self
-                .client
-                .request(method.clone(), current_url.clone())
-                .headers(request_headers);
+            let mut request =
+                self.client.request(method.clone(), current_url.clone()).headers(request_headers);
 
             if let Some(request_body) = body.as_ref() {
                 request = request.body(request_body.clone());
@@ -148,9 +148,8 @@ impl HttpTransport {
                 .ok_or(HttpTransportError::RedirectWithoutLocation)?
                 .to_str()
                 .map_err(|_| HttpTransportError::RedirectWithoutLocation)?;
-            let next_url = current_url
-                .join(location)
-                .map_err(HttpTransportError::InvalidRedirectUrl)?;
+            let next_url =
+                current_url.join(location).map_err(HttpTransportError::InvalidRedirectUrl)?;
 
             // Do not consume the redirect body or connect to the next hop yet.
             drop(response);
@@ -188,9 +187,7 @@ impl HttpTransport {
             method.as_str(),
         )? {
             Decision::Allow => Ok(()),
-            Decision::Block => Err(HttpTransportError::Blocked {
-                url: resource_url.to_string(),
-            }),
+            Decision::Block => Err(HttpTransportError::Blocked { url: resource_url.to_string() }),
         }
     }
 }
@@ -220,7 +217,9 @@ fn should_switch_to_get(status: StatusCode, method: &Method) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{HttpTransport, HttpTransportError, is_redirect, should_switch_to_get, with_privacy_headers};
+    use super::{
+        HttpTransport, HttpTransportError, is_redirect, should_switch_to_get, with_privacy_headers,
+    };
     use crate::NetworkPolicy;
     use bweb_shield::{ResourceType, Shield};
     use reqwest::{
