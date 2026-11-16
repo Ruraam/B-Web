@@ -1,0 +1,10 @@
+[package]
+name = "bweb-shell"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+bweb-core = { path = "../bweb-core" }
+bweb-js = { path = "../bweb-js" }
+bweb-shield = { path = "../bweb-shield" }
