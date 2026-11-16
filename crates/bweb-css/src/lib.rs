@@ -126,9 +126,7 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>, CssError> {
             || (byte == b'.' && bytes.get(index + 1).is_some_and(u8::is_ascii_digit))
         {
             index += 1;
-            while index < bytes.len()
-                && (bytes[index].is_ascii_digit() || bytes[index] == b'.')
-            {
+            while index < bytes.len() && (bytes[index].is_ascii_digit() || bytes[index] == b'.') {
                 index += 1;
             }
             tokens.push(token(TokenKind::Number, source, start, index));
@@ -183,7 +181,11 @@ pub struct Declaration {
 impl Declaration {
     #[must_use]
     pub fn new(property: impl Into<String>, value: impl Into<String>) -> Self {
-        Self { property: property.into().trim().to_ascii_lowercase(), value: value.into().trim().to_owned(), important: false }
+        Self {
+            property: property.into().trim().to_ascii_lowercase(),
+            value: value.into().trim().to_owned(),
+            important: false,
+        }
     }
 
     #[must_use]
@@ -243,7 +245,10 @@ impl Stylesheet {
             }
             if index == tokens.len() {
                 if prelude_start != index {
-                    return Err(CssError::new(tokens[prelude_start].offset, "rule has no declaration block"));
+                    return Err(CssError::new(
+                        tokens[prelude_start].offset,
+                        "rule has no declaration block",
+                    ));
                 }
                 break;
             }
@@ -268,7 +273,7 @@ impl Stylesheet {
             if depth != 0 {
                 return Err(CssError::new(open_offset, "unterminated declaration block"));
             }
-            let declarations = parse_declarations(&tokens[block_start..index])?;
+            let declarations = parse_declarations(&tokens[block_start..index]);
             let selectors = parse_selector_list(&selector_text)?;
             if !selectors.is_empty() && !declarations.is_empty() {
                 rules.push(StyleRule { selectors, declarations, source_order: rules.len() });
@@ -302,7 +307,7 @@ fn skip_block(tokens: &[Token], open: usize) -> Result<usize, CssError> {
     Err(CssError::new(tokens[open].offset, "unterminated at-rule block"))
 }
 
-fn parse_declarations(tokens: &[Token]) -> Result<Vec<Declaration>, CssError> {
+fn parse_declarations(tokens: &[Token]) -> Vec<Declaration> {
     let mut declarations = Vec::new();
     let mut start = 0;
     let mut depth = 0usize;
@@ -319,9 +324,13 @@ fn parse_declarations(tokens: &[Token]) -> Result<Vec<Declaration>, CssError> {
             let part = &tokens[start..index];
             if !part.is_empty() {
                 if let Some(colon) = part.iter().position(|token| token.kind == TokenKind::Colon) {
-                    let property = part[..colon].iter().map(|token| token.text.as_str()).collect::<String>();
+                    let property =
+                        part[..colon].iter().map(|token| token.text.as_str()).collect::<String>();
                     let property = property.trim().to_ascii_lowercase();
-                    let mut value = part[colon + 1..].iter().map(|token| token.text.as_str()).collect::<String>();
+                    let mut value = part[colon + 1..]
+                        .iter()
+                        .map(|token| token.text.as_str())
+                        .collect::<String>();
                     value = value.trim().to_owned();
                     if !property.is_empty() && !value.is_empty() {
                         let important = value.to_ascii_lowercase().ends_with("!important");
@@ -336,7 +345,7 @@ fn parse_declarations(tokens: &[Token]) -> Result<Vec<Declaration>, CssError> {
             start = index + 1;
         }
     }
-    Ok(declarations)
+    declarations
 }
 
 /// Specificity tuple (IDs, classes/attributes/pseudo-classes, type selectors).
@@ -427,7 +436,6 @@ fn parse_complex_selector(source: &str) -> Result<ComplexSelector, CssError> {
     let chars: Vec<char> = source.chars().collect();
     let mut index = 0;
     let mut specificity = Specificity::default();
-    let mut pending_descendant = false;
     while index < chars.len() {
         let mut consumed_space = false;
         while index < chars.len() && chars[index].is_ascii_whitespace() {
@@ -440,9 +448,6 @@ fn parse_complex_selector(source: &str) -> Result<ComplexSelector, CssError> {
         if chars[index] == '>' {
             if compounds.is_empty() || combinators.len() + 1 != compounds.len() {
                 return Err(CssError::new(0, "misplaced child combinator"));
-            }
-            if pending_descendant {
-                pending_descendant = false;
             }
             index += 1;
             while index < chars.len() && chars[index].is_ascii_whitespace() {
@@ -465,7 +470,6 @@ fn parse_complex_selector(source: &str) -> Result<ComplexSelector, CssError> {
         }
         let compound = parse_compound(&chars, &mut index, &mut specificity)?;
         compounds.push(compound);
-        pending_descendant = false;
     }
     if compounds.is_empty() || combinators.len() + 1 != compounds.len() {
         return Err(CssError::new(0, "invalid selector"));
@@ -495,7 +499,9 @@ fn parse_compound(
             '#' => {
                 *index += 1;
                 let value = read_ident(chars, index);
-                if value.is_empty() { return Err(CssError::new(0, "empty ID selector")); }
+                if value.is_empty() {
+                    return Err(CssError::new(0, "empty ID selector"));
+                }
                 compound.id = Some(value);
                 specificity.0 += 1;
                 consumed = true;
@@ -503,7 +509,9 @@ fn parse_compound(
             '.' => {
                 *index += 1;
                 let value = read_ident(chars, index);
-                if value.is_empty() { return Err(CssError::new(0, "empty class selector")); }
+                if value.is_empty() {
+                    return Err(CssError::new(0, "empty class selector"));
+                }
                 compound.classes.push(value);
                 specificity.1 += 1;
                 consumed = true;
@@ -512,7 +520,9 @@ fn parse_compound(
                 *index += 1;
                 skip_char_space(chars, index);
                 let name = read_ident(chars, index).to_ascii_lowercase();
-                if name.is_empty() { return Err(CssError::new(0, "empty attribute selector")); }
+                if name.is_empty() {
+                    return Err(CssError::new(0, "empty attribute selector"));
+                }
                 skip_char_space(chars, index);
                 let value = if *index < chars.len() && chars[*index] == '=' {
                     *index += 1;
@@ -583,7 +593,9 @@ fn read_attribute_value(chars: &[char], index: &mut usize) -> String {
             *index += 1;
         }
         let value = chars[start..*index].iter().collect();
-        if *index < chars.len() { *index += 1; }
+        if *index < chars.len() {
+            *index += 1;
+        }
         value
     } else {
         read_ident(chars, index)
@@ -626,6 +638,37 @@ impl ComputedStyle {
         style.set("white-space".into(), "normal".into());
         style
     }
+
+    fn inherited_from(parent: &Self) -> Self {
+        const INHERITED: &[&str] = &[
+            "color",
+            "font-family",
+            "font-size",
+            "font-style",
+            "font-weight",
+            "line-height",
+            "visibility",
+            "white-space",
+            "text-align",
+            "text-indent",
+            "letter-spacing",
+            "word-spacing",
+            "direction",
+            "cursor",
+        ];
+        let mut style = Self::initial();
+        for property in INHERITED {
+            if let Some(value) = parent.properties.get(*property) {
+                style.set((*property).to_owned(), value.clone());
+            }
+        }
+        for (property, value) in &parent.properties {
+            if property.starts_with("--") {
+                style.set(property.clone(), value.clone());
+            }
+        }
+        style
+    }
 }
 
 /// NodeId-indexed collection of computed styles.
@@ -661,8 +704,12 @@ struct Priority {
 
 impl Ord for Priority {
     fn cmp(&self, other: &Self) -> Ordering {
-        (self.important, self.inline, self.specificity, self.order)
-            .cmp(&(other.important, other.inline, other.specificity, other.order))
+        (self.important, self.inline, self.specificity, self.order).cmp(&(
+            other.important,
+            other.inline,
+            other.specificity,
+            other.order,
+        ))
     }
 }
 
@@ -684,16 +731,15 @@ impl StyleEngine {
 
     /// Computes styles for every DOM NodeId. Text/comment nodes inherit their
     /// parent's inherited properties; layout-dependent values are not resolved.
-    pub fn compute(
-        &self,
-        document: &HtmlDocument,
-        stylesheets: &[Stylesheet],
-    ) -> ComputedStyleMap {
+    pub fn compute(&self, document: &HtmlDocument, stylesheets: &[Stylesheet]) -> ComputedStyleMap {
         let mut result = ComputedStyleMap::default();
         let mut priorities: HashMap<NodeId, HashMap<String, Priority>> = HashMap::new();
         for (id, node) in document.iter() {
-            let parent_style = node.parent().and_then(|parent| result.styles.get(&parent)).cloned();
-            let mut computed = parent_style.unwrap_or_else(ComputedStyle::initial);
+            let mut computed = node
+                .parent()
+                .and_then(|parent| result.styles.get(&parent))
+                .map(ComputedStyle::inherited_from)
+                .unwrap_or_else(ComputedStyle::initial);
             if let NodeKind::Element { attributes, .. } = node.kind() {
                 for (sheet_index, sheet) in stylesheets.iter().enumerate() {
                     for rule in &sheet.rules {
@@ -713,7 +759,8 @@ impl StyleEngine {
                                         important: declaration.important,
                                         inline: false,
                                         specificity,
-                                        order: sheet_index.saturating_mul(1_000_000) + rule.source_order,
+                                        order: sheet_index.saturating_mul(1_000_000)
+                                            + rule.source_order,
                                     },
                                 );
                             }
@@ -762,7 +809,7 @@ fn apply_declaration(
 
 fn parse_inline_declarations(source: &str) -> Result<Vec<Declaration>, CssError> {
     let tokens = tokenize(source)?;
-    parse_declarations(&tokens)
+    Ok(parse_declarations(&tokens))
 }
 
 fn matches_selector(document: &HtmlDocument, id: NodeId, selector: &ComplexSelector) -> bool {
@@ -817,13 +864,17 @@ fn matches_compound(
         return false;
     }
     let attr = |name: &str| attributes.iter().find(|attribute| attribute.name == name);
-    if selector.id.as_ref().is_some_and(|expected| {
-        attr("id").is_none_or(|actual| actual.value != *expected)
-    }) {
+    if selector
+        .id
+        .as_ref()
+        .is_some_and(|expected| attr("id").is_none_or(|actual| actual.value != *expected))
+    {
         return false;
     }
     if selector.classes.iter().any(|expected| {
-        attr("class").is_none_or(|actual| !actual.value.split_ascii_whitespace().any(|part| part == expected))
+        attr("class").is_none_or(|actual| {
+            !actual.value.split_ascii_whitespace().any(|part| part == expected)
+        })
     }) {
         return false;
     }
@@ -835,16 +886,18 @@ fn matches_compound(
         return false;
     }
     selector.pseudos.iter().all(|pseudo| match pseudo {
-        PseudoClass::Root => document.node(id).and_then(|node| node.parent()).is_some_and(|parent| {
-            document.node(parent).is_some_and(|node| matches!(node.kind(), NodeKind::Document))
-        }),
+        PseudoClass::Root => {
+            document.node(id).and_then(|node| node.parent()).is_some_and(|parent| {
+                document.node(parent).is_some_and(|node| matches!(node.kind(), NodeKind::Document))
+            })
+        }
         PseudoClass::FirstChild => is_element_sibling_position(document, id, true),
         PseudoClass::LastChild => is_element_sibling_position(document, id, false),
         PseudoClass::Empty => document.node(id).is_some_and(|node| {
             node.children().iter().all(|child| {
-                document.node(*child).is_none_or(|child_node| {
-                    matches!(child_node.kind(), NodeKind::Comment(_))
-                })
+                document
+                    .node(*child)
+                    .is_none_or(|child_node| matches!(child_node.kind(), NodeKind::Comment(_)))
             })
         }),
     })
@@ -860,12 +913,16 @@ fn is_element_sibling_position(document: &HtmlDocument, id: NodeId, first: bool)
         .iter()
         .copied()
         .filter(|sibling| {
-            document.node(*sibling).is_some_and(|sibling_node| {
-                matches!(sibling_node.kind(), NodeKind::Element { .. })
-            })
+            document
+                .node(*sibling)
+                .is_some_and(|sibling_node| matches!(sibling_node.kind(), NodeKind::Element { .. }))
         })
         .collect();
-    if first { siblings.first() == Some(&id) } else { siblings.last() == Some(&id) }
+    if first {
+        siblings.first() == Some(&id)
+    } else {
+        siblings.last() == Some(&id)
+    }
 }
 
 #[cfg(test)]
@@ -883,7 +940,8 @@ mod tests {
 
     #[test]
     fn parses_rules_and_important_declarations() {
-        let sheet = Stylesheet::parse("p, .notice { color: red !important; margin: 0; }").expect("stylesheet");
+        let sheet = Stylesheet::parse("p, .notice { color: red !important; margin: 0; }")
+            .expect("stylesheet");
         assert_eq!(sheet.rules.len(), 1);
         assert_eq!(sheet.rules[0].selectors.len(), 2);
         assert!(sheet.rules[0].declarations[0].important);
@@ -900,9 +958,13 @@ mod tests {
         )
         .expect("stylesheet");
         let styles = StyleEngine::new().compute(&document, &[sheet]);
-        let paragraph = document.iter().find_map(|(id, node)| {
-            matches!(node.kind(), NodeKind::Element { tag_name, .. } if tag_name == "p").then_some(id)
-        }).expect("paragraph");
+        let paragraph = document
+            .iter()
+            .find_map(|(id, node)| {
+                matches!(node.kind(), NodeKind::Element { tag_name, .. } if tag_name == "p")
+                    .then_some(id)
+            })
+            .expect("paragraph");
         let style = styles.get(paragraph).expect("computed style");
         assert_eq!(style.get("color"), Some("red"));
         assert_eq!(style.get("font-size"), Some("20px"));
@@ -911,11 +973,16 @@ mod tests {
     #[test]
     fn inline_style_wins_over_normal_author_rules_and_important_wins_over_inline_normal() {
         let document = HtmlDocument::parse(r#"<p style="color: blue; margin: 2px">Hello</p>"#);
-        let sheet = Stylesheet::parse("p { color: red; margin: 0 !important; }").expect("stylesheet");
+        let sheet =
+            Stylesheet::parse("p { color: red; margin: 0 !important; }").expect("stylesheet");
         let styles = StyleEngine::new().compute(&document, &[sheet]);
-        let id = document.iter().find_map(|(id, node)| {
-            matches!(node.kind(), NodeKind::Element { tag_name, .. } if tag_name == "p").then_some(id)
-        }).expect("paragraph");
+        let id = document
+            .iter()
+            .find_map(|(id, node)| {
+                matches!(node.kind(), NodeKind::Element { tag_name, .. } if tag_name == "p")
+                    .then_some(id)
+            })
+            .expect("paragraph");
         let style = styles.get(id).expect("computed style");
         assert_eq!(style.get("color"), Some("blue"));
         assert_eq!(style.get("margin"), Some("0"));
@@ -926,9 +993,10 @@ mod tests {
         let document = HtmlDocument::parse("<p>Text</p>");
         let sheet = Stylesheet::parse("p { color: purple; }").expect("stylesheet");
         let styles = StyleEngine::new().compute(&document, &[sheet]);
-        let text_id = document.iter().find_map(|(id, node)| {
-            matches!(node.kind(), NodeKind::Text(_)).then_some(id)
-        }).expect("text node");
+        let text_id = document
+            .iter()
+            .find_map(|(id, node)| matches!(node.kind(), NodeKind::Text(_)).then_some(id))
+            .expect("text node");
         assert_eq!(styles.get(text_id).and_then(|style| style.get("color")), Some("purple"));
         assert!(!styles.is_empty());
     }
