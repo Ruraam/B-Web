@@ -6,9 +6,7 @@
 
 mod filter_lists;
 
-pub use filter_lists::{
-    FilterListCache, FilterListError, FilterListId, MAX_FILTER_LIST_BYTES,
-};
+pub use filter_lists::{FilterListCache, FilterListError, FilterListId, MAX_FILTER_LIST_BYTES};
 
 use adblock::{
     Engine,

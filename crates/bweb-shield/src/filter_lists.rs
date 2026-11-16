@@ -149,10 +149,8 @@ impl FilterListCache {
     fn create_temporary_file(&self) -> Result<(PathBuf, fs::File), FilterListError> {
         loop {
             let sequence = TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-            let path = self.directory.join(format!(
-                ".filter-list-{}-{sequence}.tmp",
-                std::process::id()
-            ));
+            let path =
+                self.directory.join(format!(".filter-list-{}-{sequence}.tmp", std::process::id()));
 
             match OpenOptions::new().write(true).create_new(true).open(&path) {
                 Ok(file) => return Ok((path, file)),
@@ -171,10 +169,7 @@ impl FilterListCache {
 
 fn validate_list(bytes: &[u8]) -> Result<(), FilterListError> {
     if bytes.len() > MAX_FILTER_LIST_BYTES {
-        return Err(FilterListError::TooLarge {
-            size: bytes.len(),
-            limit: MAX_FILTER_LIST_BYTES,
-        });
+        return Err(FilterListError::TooLarge { size: bytes.len(), limit: MAX_FILTER_LIST_BYTES });
     }
     if bytes.is_empty() || bytes.iter().all(u8::is_ascii_whitespace) {
         return Err(FilterListError::EmptyList);
@@ -186,13 +181,15 @@ fn validate_list(bytes: &[u8]) -> Result<(), FilterListError> {
 #[cfg(test)]
 mod tests {
     use super::{FilterListCache, FilterListId};
-    use std::{fs, path::PathBuf, time::{SystemTime, UNIX_EPOCH}};
+    use std::{
+        fs,
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     fn temporary_directory() -> PathBuf {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock after epoch")
-            .as_nanos();
+        let nonce =
+            SystemTime::now().duration_since(UNIX_EPOCH).expect("clock after epoch").as_nanos();
         std::env::temp_dir().join(format!("bweb-filter-cache-{}-{nonce}", std::process::id()))
     }
 
