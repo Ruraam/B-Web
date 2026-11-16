@@ -5,5 +5,3 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-bweb-css = { path = "../bweb-css" }
-bweb-html = { path = "../bweb-html" }
