@@ -2,7 +2,9 @@
 //!
 //! This module intentionally contains no DOM, CSS, or layout-engine types.
 
-use crate::{Color, Edges, Rect};
+use std::sync::Arc;
+
+use crate::{Color, Edges, Rect, TextRun};
 
 /// Paint properties already resolved by the producer.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -15,13 +17,18 @@ pub struct PaintStyle {
     pub clips_children: bool,
 }
 
-/// A paintable node with absolute logical-pixel geometry.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// A paintable node with absolute logical-pixel geometry and optional text.
+///
+/// Text runs contain final physical-pixel glyph positions. The Arc lets an
+/// adapter share one prepared run across visits without cloning glyph masks.
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct PaintNode {
     /// DFS pre-order depth; the root must have depth zero.
     pub depth: u32,
     pub rect: Rect,
     pub style: PaintStyle,
+    /// Prepared text run, if this node paints text.
+    pub text: Option<Arc<TextRun>>,
 }
 
 /// Adapter contract between a layout engine and the renderer.
