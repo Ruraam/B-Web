@@ -43,7 +43,6 @@ impl<B: ViewBackend> ResizeController<B> {
         &self.view
     }
 
-
     #[must_use]
     pub fn has_pending(&self) -> bool {
         self.pending.is_some()
