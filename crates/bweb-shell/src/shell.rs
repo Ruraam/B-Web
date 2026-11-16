@@ -39,12 +39,18 @@ impl<B: ViewBackend> ResizeController<B> {
     }
 
     #[must_use]
-    pub const fn view(&self) -> &View<B> { &self.view }
+    pub const fn view(&self) -> &View<B> {
+        &self.view
+    }
 
-    pub fn view_mut(&mut self) -> &mut View<B> { &mut self.view }
+    pub fn view_mut(&mut self) -> &mut View<B> {
+        &mut self.view
+    }
 
     #[must_use]
-    pub fn has_pending(&self) -> bool { self.pending.is_some() }
+    pub fn has_pending(&self) -> bool {
+        self.pending.is_some()
+    }
 }
 
 #[cfg(test)]
@@ -54,7 +60,10 @@ mod tests {
     use std::convert::Infallible;
 
     #[derive(Debug, Default)]
-    struct MockView { reflows: usize, repaints: usize }
+    struct MockView {
+        reflows: usize,
+        repaints: usize,
+    }
 
     impl ViewBackend for MockView {
         type Error = Infallible;
