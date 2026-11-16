@@ -11,7 +11,7 @@ use reqwest::{
     Method, StatusCode,
     blocking::{Client, Response},
     header::{
-        AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, COOKIE, HeaderMap, HeaderValue, LOCATION,
+        AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, COOKIE, HOST, HeaderMap, HeaderValue, LOCATION,
         PROXY_AUTHORIZATION,
     },
     redirect::Policy,
@@ -118,6 +118,8 @@ impl HttpTransport {
             .map_err(NetworkPolicyError::from)
             .map_err(HttpTransportError::Policy)?;
         let mut headers = headers;
+        // The URL, not caller-controlled headers, determines the HTTP authority.
+        headers.remove(HOST);
         let mut body = body;
 
         for redirect_count in 0..=MAX_REDIRECTS {
