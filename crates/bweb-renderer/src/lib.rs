@@ -216,11 +216,8 @@ fn build_line_boxes(
     style: Option<&bweb_css::ComputedStyle>,
 ) -> Vec<LineBox> {
     let white_space = style.and_then(|s| s.get("white-space")).unwrap_or("normal");
-    let font_size = style
-        .and_then(|s| s.get("font-size"))
-        .and_then(parse_length)
-        .unwrap_or(16.0)
-        .max(1.0);
+    let font_size =
+        style.and_then(|s| s.get("font-size")).and_then(parse_length).unwrap_or(16.0).max(1.0);
     let line_height = style
         .and_then(|s| s.get("line-height"))
         .and_then(parse_length)
@@ -245,13 +242,7 @@ fn build_line_boxes(
         for ch in text.chars() {
             if ch == '\n' && preserve_newlines {
                 pending_space = false;
-                finish_line(
-                    &mut lines,
-                    &mut fragments,
-                    origin_x,
-                    y,
-                    line_height,
-                );
+                finish_line(&mut lines, &mut fragments, origin_x, y, line_height);
                 x = origin_x;
                 y += line_height;
                 continue;
@@ -274,41 +265,19 @@ fn build_line_boxes(
                     x = origin_x;
                     y += line_height;
                 } else {
-                    append_fragment_char(
-                        &mut fragments,
-                        node,
-                        ' ',
-                        x,
-                        y,
-                        glyph_width,
-                        line_height,
-                    );
+                    append_fragment_char(&mut fragments, node, ' ', x, y, glyph_width, line_height);
                     x += glyph_width;
                 }
             }
             pending_space = false;
 
             if wrap && x > origin_x && x + glyph_width > origin_x + available_width {
-                finish_line(
-                    &mut lines,
-                    &mut fragments,
-                    origin_x,
-                    y,
-                    line_height,
-                );
+                finish_line(&mut lines, &mut fragments, origin_x, y, line_height);
                 x = origin_x;
                 y += line_height;
             }
 
-            append_fragment_char(
-                &mut fragments,
-                node,
-                ch,
-                x,
-                y,
-                glyph_width,
-                line_height,
-            );
+            append_fragment_char(&mut fragments, node, ch, x, y, glyph_width, line_height);
             x += glyph_width;
         }
     }
@@ -325,11 +294,7 @@ fn build_line_boxes(
     lines
 }
 
-fn collect_text_nodes(
-    document: &HtmlDocument,
-    id: NodeId,
-    output: &mut Vec<(NodeId, String)>,
-) {
+fn collect_text_nodes(document: &HtmlDocument, id: NodeId, output: &mut Vec<(NodeId, String)>) {
     let Some(node) = document.node(id) else {
         return;
     };
@@ -363,12 +328,7 @@ fn append_fragment_char(
     fragments.push(TextFragment {
         node,
         text: ch.to_string(),
-        rect: Rect {
-            x,
-            y,
-            width: glyph_width,
-            height: line_height,
-        },
+        rect: Rect { x, y, width: glyph_width, height: line_height },
     });
 }
 
@@ -379,16 +339,10 @@ fn finish_line(
     y: f32,
     line_height: f32,
 ) {
-    let width = fragments
-        .last()
-        .map_or(0.0, |fragment| fragment.rect.x + fragment.rect.width - origin_x);
+    let width =
+        fragments.last().map_or(0.0, |fragment| fragment.rect.x + fragment.rect.width - origin_x);
     lines.push(LineBox {
-        rect: Rect {
-            x: origin_x,
-            y,
-            width,
-            height: line_height,
-        },
+        rect: Rect { x: origin_x, y, width, height: line_height },
         fragments: std::mem::take(fragments),
     });
 }
@@ -635,11 +589,8 @@ mod tests {
             })
             .expect("main");
         let main_box = find(&tree.root, main).expect("main layout box");
-        let fragments: Vec<_> = main_box
-            .line_boxes
-            .iter()
-            .flat_map(|line| &line.fragments)
-            .collect();
+        let fragments: Vec<_> =
+            main_box.line_boxes.iter().flat_map(|line| &line.fragments).collect();
         let text_nodes: Vec<_> = document
             .iter()
             .filter_map(|(id, node)| matches!(node.kind(), NodeKind::Text(_)).then_some(id))
@@ -648,17 +599,16 @@ mod tests {
         assert!(fragments.iter().any(|fragment| fragment.text == "inside"));
         assert!(fragments.iter().any(|fragment| fragment.text == "deep"));
         assert!(fragments.iter().all(|fragment| text_nodes.contains(&fragment.node)));
-        assert!(fragments.iter().any(|fragment| {
-            fragment.node == text_nodes[2] && fragment.text == "deep"
-        }));
+        assert!(
+            fragments
+                .iter()
+                .any(|fragment| { fragment.node == text_nodes[2] && fragment.text == "deep" })
+        );
     }
 
     #[test]
     fn collapsed_whitespace_is_trimmed_at_line_boundaries() {
-        let (document, tree) = layout(
-            "<main>   alpha   beta   </main>",
-            "main { display:block }",
-        );
+        let (document, tree) = layout("<main>   alpha   beta   </main>", "main { display:block }");
         let main = document
             .iter()
             .find_map(|(id, node)| {
@@ -673,18 +623,18 @@ mod tests {
             .map(|fragment| fragment.text.as_str())
             .collect();
         assert_eq!(text, "alpha beta");
-        assert!(main_box.line_boxes[0]
-            .fragments
-            .iter()
-            .all(|fragment| !fragment.text.starts_with(' ') && !fragment.text.ends_with(' ')));
+        assert!(
+            main_box.line_boxes[0]
+                .fragments
+                .iter()
+                .all(|fragment| !fragment.text.starts_with(' ') && !fragment.text.ends_with(' '))
+        );
     }
 
     #[test]
     fn wraps_without_leading_or_trailing_collapsed_spaces() {
-        let (document, tree) = layout(
-            "<main>one two three</main>",
-            "main { display:block; width:32px }",
-        );
+        let (document, tree) =
+            layout("<main>one two three</main>", "main { display:block; width:32px }");
         let main = document
             .iter()
             .find_map(|(id, node)| {
@@ -695,7 +645,8 @@ mod tests {
         let main_box = find(&tree.root, main).expect("main layout box");
         assert!(main_box.line_boxes.len() >= 2);
         for line in &main_box.line_boxes {
-            let text: String = line.fragments.iter().map(|fragment| fragment.text.as_str()).collect();
+            let text: String =
+                line.fragments.iter().map(|fragment| fragment.text.as_str()).collect();
             assert!(!text.starts_with(' '));
             assert!(!text.ends_with(' '));
         }
