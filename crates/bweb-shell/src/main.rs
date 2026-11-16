@@ -140,7 +140,6 @@ fn open_document(
     Ok(())
 }
 
-
 /// Runs the HTML/CSS layout through text preparation, painting, and rasterization.
 ///
 /// The PPM output is a diagnostic software-rendered frame. It deliberately
