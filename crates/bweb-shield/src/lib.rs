@@ -11,6 +11,9 @@ use adblock::{
 };
 use std::{error::Error, fmt};
 
+/// Name of the network filtering engine used by B-Web Shield.
+pub const FILTER_ENGINE: &str = "Brave adblock-rust";
+
 /// Resource category passed to the filter engine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResourceType {
