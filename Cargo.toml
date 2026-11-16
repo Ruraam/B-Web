@@ -10,6 +10,7 @@ members = [
     "crates/bweb-filterlists",
     "crates/bweb-renderer",
     "crates/bweb-layout",
+    "crates/bweb-text",
     "crates/bweb-shell",
 ]
 
