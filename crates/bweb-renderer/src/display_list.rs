@@ -31,7 +31,7 @@ impl Color {
 }
 
 /// One ordered drawing or clipping command.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum PaintItem {
     /// Paints a solid rectangle.
     FillRect { rect: Rect, color: Color },

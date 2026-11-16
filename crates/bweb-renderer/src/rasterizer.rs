@@ -26,18 +26,18 @@ impl Rasterizer {
         let mut clips = vec![root];
 
         for item in &list.items {
-            match *item {
+            match item {
                 PaintItem::FillRect { rect, color } => {
                     let clip = *clips.last().expect("root clip is always present");
-                    paint_rect(framebuffer, rect, clip, color);
+                    paint_rect(framebuffer, *rect, clip, *color);
                 }
                 PaintItem::BorderRect { rect, widths, color, .. } => {
                     let clip = *clips.last().expect("root clip is always present");
-                    paint_border(framebuffer, rect, widths, clip, color);
+                    paint_border(framebuffer, *rect, *widths, clip, *color);
                 }
                 PaintItem::PushClip { rect } => {
                     let parent = *clips.last().expect("root clip is always present");
-                    clips.push(intersect(parent, rect).unwrap_or_default());
+                    clips.push(intersect(parent, *rect).unwrap_or_default());
                 }
                 PaintItem::PopClip => {
                     if clips.len() > 1 {
