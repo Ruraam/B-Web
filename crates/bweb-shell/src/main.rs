@@ -1,4 +1,5 @@
 use bweb_filterlists::FilterListDownloader;
+use bweb_html::DocumentLoader;
 use bweb_net::{HttpTransport, NetworkPolicy};
 use bweb_shield::{FilterListCache, FilterListError, Shield};
 use std::{env, error::Error, io, path::PathBuf, process};
@@ -11,12 +12,20 @@ fn main() {
 }
 
 fn run() -> Result<(), Box<dyn Error>> {
-    let command = env::args_os().nth(1);
-
-    match command.as_deref() {
+    let mut arguments = env::args_os().skip(1);
+    match arguments.next().as_deref() {
         None => show_status()?,
         Some(command) if command == "--help" || command == "-h" => print_usage(),
         Some(command) if command == "update-filters" => update_filters()?,
+        Some(command) if command == "open" => {
+            let url = arguments.next().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "usage: b-web open <http(s)-url>")
+            })?;
+            if arguments.next().is_some() {
+                return Err(io::Error::new(io::ErrorKind::InvalidInput, "too many arguments for 'open'").into());
+            }
+            open_document(url.to_string_lossy().as_ref())?;
+        }
         Some(command) => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -25,7 +34,6 @@ fn run() -> Result<(), Box<dyn Error>> {
             .into());
         }
     }
-
     Ok(())
 }
 
@@ -34,28 +42,56 @@ fn show_status() -> Result<(), Box<dyn Error>> {
     println!("Stage: {:?}", bweb_core::EngineStage::Bootstrap);
     println!("Privacy engine: {}", bweb_shield::FILTER_ENGINE);
     println!("JavaScript runtime: {:?}", bweb_js::RuntimeStatus::NotImplemented);
+    let (_transport, _shield_active) = build_transport()?;
+    println!("HTTP/HTTPS transport: ready (rustls, Shield-gated, Sec-GPC/DNT enabled)");
+    Ok(())
+}
 
+fn open_document(url: &str) -> Result<(), Box<dyn Error>> {
+    let (transport, shield_active) = build_transport()?;
+    println!("Loading: {url}");
+    if !shield_active {
+        println!("Warning: Shield is inactive because no cached filter lists are available.");
+    }
+    let loaded = DocumentLoader::new(transport).load(url)?;
+    println!("Document: {}", loaded.url);
+    println!("Title: {}", loaded.document.title().as_deref().unwrap_or("(untitled)"));
+    println!("DOM nodes: {}", loaded.document.node_count());
+    println!("Loaded subresources: {}", loaded.resources.len());
+    println!("Failed/blocked subresources: {}", loaded.failed_resources.len());
+    for resource in &loaded.resources {
+        println!(
+            "  {:?}: {} ({} bytes)",
+            resource.kind,
+            resource.url,
+            resource.bytes.len()
+        );
+    }
+    for failure in &loaded.failed_resources {
+        println!("  blocked/unavailable: {} ({})", failure.reference.url, failure.error);
+    }
+    println!("Note: this milestone parses a limited HTML subset; CSS/JS execution and rendering are not implemented.");
+    Ok(())
+}
+
+fn build_transport() -> Result<(HttpTransport, bool), Box<dyn Error>> {
     let cache_directory = filter_list_cache_directory()?;
     let cache = FilterListCache::new(&cache_directory);
-
-    // The transport owns the compiled policy and keeps its reqwest client private.
     let shield = match cache.load_shield() {
         Ok(shield) => {
             println!("Shield: ready (cached EasyList/EasyPrivacy rules loaded)");
-            shield
+            (shield, true)
         }
         Err(FilterListError::NoCachedLists) => {
             println!("Shield: inactive (empty ruleset; no cached filter lists)");
             println!("Run 'b-web update-filters' to download the built-in filter lists.");
-            Shield::empty()
+            (Shield::empty(), false)
         }
         Err(error) => return Err(error.into()),
     };
-
-    let _transport = HttpTransport::new(NetworkPolicy::new(shield))?;
-    println!("HTTP/HTTPS transport: ready (rustls, Shield-gated, Sec-GPC/DNT enabled)");
+    let transport = HttpTransport::new(NetworkPolicy::new(shield.0))?;
     println!("Cache: {}", cache.directory().display());
-    Ok(())
+    Ok((transport, shield.1))
 }
 
 fn print_usage() {
@@ -63,6 +99,7 @@ fn print_usage() {
     println!();
     println!("Usage:");
     println!("  b-web                 Show status and load cached Shield rules");
+    println!("  b-web open <URL>      Fetch an HTML document and guarded subresources");
     println!("  b-web update-filters  Download and cache EasyList and EasyPrivacy");
     println!("  b-web --help          Show this help");
 }
@@ -71,15 +108,12 @@ fn update_filters() -> Result<(), Box<dyn Error>> {
     let cache_directory = filter_list_cache_directory()?;
     let cache = FilterListCache::new(&cache_directory);
     let downloader = FilterListDownloader::new()?;
-
     println!("Updating built-in filter lists...");
     let update = downloader.update_cache(&cache)?;
-
     println!("Filter lists updated successfully.");
     println!("  EasyList:    {} bytes", update.easylist_bytes);
     println!("  EasyPrivacy: {} bytes", update.easyprivacy_bytes);
     println!("  Cache:       {}", cache.directory().display());
-
     Ok(())
 }
 
@@ -89,13 +123,8 @@ fn filter_list_cache_directory() -> Result<PathBuf, io::Error> {
             return Ok(path.join("b-web").join("filter-lists"));
         }
     }
-
     let home = env::var_os("HOME").ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            "HOME is not set; cannot locate the filter-list cache",
-        )
+        io::Error::new(io::ErrorKind::NotFound, "HOME is not set; cannot locate the filter-list cache")
     })?;
-
     Ok(PathBuf::from(home).join(".cache").join("b-web").join("filter-lists"))
 }
