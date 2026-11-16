@@ -11,8 +11,8 @@ use reqwest::{
     Method, StatusCode,
     blocking::{Client, Response},
     header::{
-        AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, COOKIE, HOST, HeaderMap, HeaderValue, LOCATION,
-        PROXY_AUTHORIZATION,
+        AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, COOKIE, HOST, HeaderMap, HeaderValue,
+        LOCATION, PROXY_AUTHORIZATION,
     },
     redirect::Policy,
 };
