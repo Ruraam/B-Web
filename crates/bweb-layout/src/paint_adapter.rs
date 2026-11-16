@@ -42,7 +42,12 @@ impl PaintLayout for PaintAdapter<'_> {
                     .is_some_and(|value| value == "hidden" || value == "clip"),
             };
 
-            visitor(PaintNode { depth, rect: to_paint_rect(layout.rect), style });
+            visitor(PaintNode {
+                depth,
+                rect: to_paint_rect(layout.rect),
+                style,
+                text: None, // Text-run preparation is wired in the next adapter step.
+            });
 
             for child in &layout.children {
                 walk(child, styles, depth.saturating_add(1), visitor);
