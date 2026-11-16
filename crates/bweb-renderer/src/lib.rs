@@ -668,6 +668,8 @@ mod tests {
     }
 }
 
+mod display_list;
 mod framebuffer;
 
+pub use display_list::{Color, DisplayList, PaintItem};
 pub use framebuffer::{Framebuffer, FramebufferError};
