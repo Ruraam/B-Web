@@ -10,7 +10,7 @@
 use std::fmt;
 
 use swash::scale::image::Content;
-use swash::scale::{Render, ScaleContext, Source, StrikeWith};
+use swash::scale::{Render, ScaleContext, Source};
 use swash::{CacheKey, FontRef};
 
 /// Errors that can occur while loading font data.
@@ -97,9 +97,12 @@ impl Font {
 
     /// Loads a face by zero-based index from TTF, OTF, or TTC font data.
     pub fn from_index(data: Vec<u8>, index: usize) -> Result<Self, FontError> {
-        let font = FontRef::from_index(&data, index).ok_or(FontError::Invalid)?;
+        let (offset, key) = {
+            let font = FontRef::from_index(&data, index).ok_or(FontError::Invalid)?;
+            (font.offset, font.key)
+        };
 
-        Ok(Self { data, offset: font.offset, key: font.key, scale_context: ScaleContext::new() })
+        Ok(Self { data, offset, key, scale_context: ScaleContext::new() })
     }
 
     fn font_ref(&self) -> FontRef<'_> {
@@ -159,7 +162,6 @@ impl Font {
 
         let image = Render::new(&[Source::Outline])
             .format(swash::zeno::Format::Alpha)
-            .strike_with(StrikeWith::BestFit)
             .render(&mut scaler, glyph)?;
 
         if image.content != Content::Mask {
