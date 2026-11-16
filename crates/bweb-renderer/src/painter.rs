@@ -141,9 +141,18 @@ mod tests {
 
     #[test]
     fn rejects_invalid_scale_factors() {
-        assert!(matches!(Painter::new(&MockLayout { viewport: viewport(), nodes: vec![] }, 0.0), Err(PainterError::InvalidScaleFactor)));
-        assert!(matches!(Painter::new(&MockLayout { viewport: viewport(), nodes: vec![] }, f32::NAN), Err(PainterError::InvalidScaleFactor)));
-        assert!(matches!(Painter::new(&MockLayout { viewport: viewport(), nodes: vec![] }, f32::INFINITY), Err(PainterError::InvalidScaleFactor)));
+        assert!(matches!(
+            Painter::new(&MockLayout { viewport: viewport(), nodes: vec![] }, 0.0),
+            Err(PainterError::InvalidScaleFactor)
+        ));
+        assert!(matches!(
+            Painter::new(&MockLayout { viewport: viewport(), nodes: vec![] }, f32::NAN),
+            Err(PainterError::InvalidScaleFactor)
+        ));
+        assert!(matches!(
+            Painter::new(&MockLayout { viewport: viewport(), nodes: vec![] }, f32::INFINITY),
+            Err(PainterError::InvalidScaleFactor)
+        ));
     }
 
     #[test]
@@ -166,13 +175,17 @@ mod tests {
             )],
         };
         let list = Painter::new(&layout, 2.0).expect("valid scale").paint();
-        assert_eq!(list.items[0], PaintItem::PushClip {
-            rect: Rect { x: 0.0, y: 0.0, width: 1600.0, height: 1200.0 },
-        });
-        assert_eq!(list.items[1], PaintItem::FillRect {
-            rect: Rect { x: 20.0, y: 40.0, width: 200.0, height: 100.0 },
-            color: RED,
-        });
+        assert_eq!(
+            list.items[0],
+            PaintItem::PushClip { rect: Rect { x: 0.0, y: 0.0, width: 1600.0, height: 1200.0 } }
+        );
+        assert_eq!(
+            list.items[1],
+            PaintItem::FillRect {
+                rect: Rect { x: 20.0, y: 40.0, width: 200.0, height: 100.0 },
+                color: RED,
+            }
+        );
         assert_eq!(list.items[2], PaintItem::PopClip);
     }
 
@@ -193,12 +206,15 @@ mod tests {
         };
         let list = Painter::new(&layout, 1.0).expect("valid scale").paint();
         assert!(matches!(list.items[1], PaintItem::FillRect { .. }));
-        assert_eq!(list.items[2], PaintItem::BorderRect {
-            rect: Rect { x: 0.0, y: 0.0, width: 100.0, height: 50.0 },
-            widths: Edges { top: 1.0, right: 2.0, bottom: 3.0, left: 4.0 },
-            radius: 0.0,
-            color: BLACK,
-        });
+        assert_eq!(
+            list.items[2],
+            PaintItem::BorderRect {
+                rect: Rect { x: 0.0, y: 0.0, width: 100.0, height: 50.0 },
+                widths: Edges { top: 1.0, right: 2.0, bottom: 3.0, left: 4.0 },
+                radius: 0.0,
+                color: BLACK,
+            }
+        );
     }
 
     #[test]
@@ -206,19 +222,33 @@ mod tests {
         let layout = MockLayout {
             viewport: viewport(),
             nodes: vec![
-                node(0, Rect { x: 0.0, y: 0.0, width: 100.0, height: 100.0 }, PaintStyle { background: Some(WHITE), ..PaintStyle::default() }),
-                node(1, Rect { x: 10.0, y: 10.0, width: 20.0, height: 20.0 }, PaintStyle { background: Some(RED), ..PaintStyle::default() }),
+                node(
+                    0,
+                    Rect { x: 0.0, y: 0.0, width: 100.0, height: 100.0 },
+                    PaintStyle { background: Some(WHITE), ..PaintStyle::default() },
+                ),
+                node(
+                    1,
+                    Rect { x: 10.0, y: 10.0, width: 20.0, height: 20.0 },
+                    PaintStyle { background: Some(RED), ..PaintStyle::default() },
+                ),
             ],
         };
         let list = Painter::new(&layout, 1.0).expect("valid scale").paint();
-        assert_eq!(list.items[1], PaintItem::FillRect {
-            rect: Rect { x: 0.0, y: 0.0, width: 100.0, height: 100.0 },
-            color: WHITE,
-        });
-        assert_eq!(list.items[2], PaintItem::FillRect {
-            rect: Rect { x: 10.0, y: 10.0, width: 20.0, height: 20.0 },
-            color: RED,
-        });
+        assert_eq!(
+            list.items[1],
+            PaintItem::FillRect {
+                rect: Rect { x: 0.0, y: 0.0, width: 100.0, height: 100.0 },
+                color: WHITE,
+            }
+        );
+        assert_eq!(
+            list.items[2],
+            PaintItem::FillRect {
+                rect: Rect { x: 10.0, y: 10.0, width: 20.0, height: 20.0 },
+                color: RED,
+            }
+        );
     }
 
     #[test]
@@ -226,19 +256,36 @@ mod tests {
         let layout = MockLayout {
             viewport: viewport(),
             nodes: vec![
-                node(0, Rect { x: 0.0, y: 0.0, width: 100.0, height: 100.0 }, PaintStyle { clips_children: true, ..PaintStyle::default() }),
-                node(1, Rect { x: 5.0, y: 5.0, width: 10.0, height: 10.0 }, PaintStyle { background: Some(RED), ..PaintStyle::default() }),
-                node(1, Rect { x: 20.0, y: 5.0, width: 10.0, height: 10.0 }, PaintStyle { background: Some(BLUE), ..PaintStyle::default() }),
-                node(0, Rect { x: 200.0, y: 0.0, width: 100.0, height: 100.0 }, PaintStyle { background: Some(WHITE), ..PaintStyle::default() }),
+                node(
+                    0,
+                    Rect { x: 0.0, y: 0.0, width: 100.0, height: 100.0 },
+                    PaintStyle { clips_children: true, ..PaintStyle::default() },
+                ),
+                node(
+                    1,
+                    Rect { x: 5.0, y: 5.0, width: 10.0, height: 10.0 },
+                    PaintStyle { background: Some(RED), ..PaintStyle::default() },
+                ),
+                node(
+                    1,
+                    Rect { x: 20.0, y: 5.0, width: 10.0, height: 10.0 },
+                    PaintStyle { background: Some(BLUE), ..PaintStyle::default() },
+                ),
+                node(
+                    0,
+                    Rect { x: 200.0, y: 0.0, width: 100.0, height: 100.0 },
+                    PaintStyle { background: Some(WHITE), ..PaintStyle::default() },
+                ),
             ],
         };
         let list = Painter::new(&layout, 1.0).expect("valid scale").paint();
         let items = &list.items;
         assert_eq!(items.len(), 7);
         assert!(matches!(items[0], PaintItem::PushClip { .. }));
-        assert_eq!(items[1], PaintItem::PushClip {
-            rect: Rect { x: 0.0, y: 0.0, width: 100.0, height: 100.0 },
-        });
+        assert_eq!(
+            items[1],
+            PaintItem::PushClip { rect: Rect { x: 0.0, y: 0.0, width: 100.0, height: 100.0 } }
+        );
         assert!(matches!(items[2], PaintItem::FillRect { color: RED, .. }));
         assert!(matches!(items[3], PaintItem::FillRect { color: BLUE, .. }));
         assert_eq!(items[4], PaintItem::PopClip);
@@ -251,9 +298,21 @@ mod tests {
         let layout = MockLayout {
             viewport: viewport(),
             nodes: vec![
-                node(0, Rect { x: 0.0, y: 0.0, width: 500.0, height: 500.0 }, PaintStyle { clips_children: true, ..PaintStyle::default() }),
-                node(1, Rect { x: 50.0, y: 50.0, width: 200.0, height: 200.0 }, PaintStyle { clips_children: true, ..PaintStyle::default() }),
-                node(2, Rect { x: 60.0, y: 60.0, width: 50.0, height: 50.0 }, PaintStyle { background: Some(RED), ..PaintStyle::default() }),
+                node(
+                    0,
+                    Rect { x: 0.0, y: 0.0, width: 500.0, height: 500.0 },
+                    PaintStyle { clips_children: true, ..PaintStyle::default() },
+                ),
+                node(
+                    1,
+                    Rect { x: 50.0, y: 50.0, width: 200.0, height: 200.0 },
+                    PaintStyle { clips_children: true, ..PaintStyle::default() },
+                ),
+                node(
+                    2,
+                    Rect { x: 60.0, y: 60.0, width: 50.0, height: 50.0 },
+                    PaintStyle { background: Some(RED), ..PaintStyle::default() },
+                ),
             ],
         };
         let list = Painter::new(&layout, 1.0).expect("valid scale").paint();
