@@ -338,35 +338,6 @@ fn copy_scaled_pixels(
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::copy_scaled_pixels;
-
-    #[test]
-    fn scales_rgba_frame_to_surface_with_nearest_neighbor_sampling() {
-        let source = [255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255];
-        let mut target = [0; 16];
-
-        copy_scaled_pixels(&source, 2, 2, &mut target, 4, 4).unwrap();
-
-        assert_eq!(
-            target,
-            [
-                0xFF0000, 0xFF0000, 0x00FF00, 0x00FF00, 0xFF0000, 0xFF0000, 0x00FF00, 0x00FF00,
-                0x0000FF, 0x0000FF, 0xFFFFFF, 0xFFFFFF, 0x0000FF, 0x0000FF, 0xFFFFFF, 0xFFFFFF,
-            ]
-        );
-    }
-
-    #[test]
-    fn rejects_pixel_buffers_smaller_than_their_dimensions() {
-        let mut target = [0; 4];
-        let error = copy_scaled_pixels(&[0; 3], 1, 1, &mut target, 2, 2).unwrap_err();
-
-        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
-    }
-}
-
 /// Loads a user-selected font or the first available common Linux sans font.
 fn load_system_font() -> Result<Font, Box<dyn Error>> {
     if let Some(path) = env::var_os("BWEB_FONT") {
@@ -469,4 +440,33 @@ fn filter_list_cache_directory() -> Result<PathBuf, io::Error> {
         )
     })?;
     Ok(PathBuf::from(home).join(".cache").join("b-web").join("filter-lists"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::copy_scaled_pixels;
+
+    #[test]
+    fn scales_rgba_frame_to_surface_with_nearest_neighbor_sampling() {
+        let source = [255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255];
+        let mut target = [0; 16];
+
+        copy_scaled_pixels(&source, 2, 2, &mut target, 4, 4).unwrap();
+
+        assert_eq!(
+            target,
+            [
+                0xFF0000, 0xFF0000, 0x00FF00, 0x00FF00, 0xFF0000, 0xFF0000, 0x00FF00, 0x00FF00,
+                0x0000FF, 0x0000FF, 0xFFFFFF, 0xFFFFFF, 0x0000FF, 0x0000FF, 0xFFFFFF, 0xFFFFFF,
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_pixel_buffers_smaller_than_their_dimensions() {
+        let mut target = [0; 4];
+        let error = copy_scaled_pixels(&[0; 3], 1, 1, &mut target, 2, 2).unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }
 }
