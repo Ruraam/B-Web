@@ -254,7 +254,7 @@ fn build_line_boxes(
             }
 
             if pending_space && x > origin_x {
-                if wrap && x + glyph_width > origin_x + available_width {
+                if wrap && x + glyph_width * 2.0 > origin_x + available_width {
                     finish_line(&mut lines, &mut fragments, origin_x, y, line_height);
                     x = origin_x;
                     y += line_height;
@@ -307,7 +307,11 @@ fn append_fragment_char(
     line_height: f32,
 ) {
     if let Some(last) = fragments.last_mut() {
-        if last.node == node && (last.rect.x + last.rect.width - x).abs() < f32::EPSILON {
+        if last.node == node
+            && !last.text.chars().last().is_some_and(char::is_whitespace)
+            && !ch.is_whitespace()
+            && (last.rect.x + last.rect.width - x).abs() < f32::EPSILON
+        {
             last.text.push(ch);
             last.rect.width += glyph_width;
             return;
