@@ -93,8 +93,8 @@ impl DisplayList {
 #[cfg(test)]
 mod tests {
     use super::{Color, DisplayList, PaintItem, PositionedGlyph};
-    use bweb_text::Coverage;
     use crate::{Edges, Rect};
+    use bweb_text::Coverage;
 
     #[test]
     fn color_preserves_straight_rgba_channels() {
@@ -133,7 +133,10 @@ mod tests {
             y: 3.75,
         };
         let mut list = DisplayList::default();
-        list.push(PaintItem::Text { glyphs: vec![glyph.clone()], color: Color::rgba(10, 20, 30, 255) });
+        list.push(PaintItem::Text {
+            glyphs: vec![glyph.clone()],
+            color: Color::rgba(10, 20, 30, 255),
+        });
 
         assert!(matches!(&list.items[0], PaintItem::Text { glyphs, .. } if glyphs == &[glyph]));
     }
