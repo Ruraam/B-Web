@@ -482,7 +482,7 @@ mod tests {
 
     #[test]
     fn pre_white_space_preserves_newlines_as_line_breaks() {
-        let (document, tree) =\n            layout("<main>first\\nsecond</main>", "main { display:block; white-space:pre }");
+        let (document, tree) =\n            layout("<main>first\nsecond</main>", "main { display:block; white-space:pre }");
         let main = document.iter().find_map(|(id, node)| {
             matches!(node.kind(), NodeKind::Element { tag_name, .. } if tag_name == "main").then_some(id)
         }).expect("main");
