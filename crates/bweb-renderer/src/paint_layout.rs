@@ -2,7 +2,7 @@
 //!
 //! This module intentionally contains no DOM, CSS, or layout-engine types.
 
-use crate::{Edges, Rect, Color};
+use crate::{Color, Edges, Rect};
 
 /// Paint properties already resolved by the producer.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
