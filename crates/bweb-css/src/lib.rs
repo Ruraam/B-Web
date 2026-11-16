@@ -614,7 +614,6 @@ impl ComputedStyle {
         self.properties.get(&property.to_ascii_lowercase()).map(String::as_str)
     }
 
-    #[must_use]
     pub fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
         self.properties.iter().map(|(name, value)| (name.as_str(), value.as_str()))
     }
