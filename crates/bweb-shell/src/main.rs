@@ -6,6 +6,7 @@ use bweb_net::{HttpTransport, NetworkPolicy};
 use bweb_renderer::{Framebuffer, Painter, Rasterizer};
 use bweb_shield::{FilterListCache, FilterListError, Shield};
 use bweb_text::Font;
+use softbuffer::{Context, Surface};
 use std::{
     env,
     error::Error,
@@ -16,7 +17,6 @@ use std::{
     process,
     sync::Arc,
 };
-use softbuffer::{Context, Surface};
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
@@ -176,12 +176,7 @@ fn render_frame(
     let scale_factor = 1.0;
     let text_runs = bweb_layout::prepare_text_runs(layout, styles, &mut font, scale_factor);
     let glyph_count = text_runs.values().map(|run| run.glyphs.len()).sum();
-    let viewport = LayoutRect {
-        x: 0.0,
-        y: 0.0,
-        width: width as f32,
-        height: height as f32,
-    };
+    let viewport = LayoutRect { x: 0.0, y: 0.0, width: width as f32, height: height as f32 };
     let adapter = PaintAdapter::new(layout, styles, viewport).with_text_runs(&text_runs);
     let display_list = Painter::new(&adapter, scale_factor)?.paint();
     let mut framebuffer = Framebuffer::new(width, height)
@@ -195,13 +190,7 @@ fn render_frame(
 fn show_framebuffer(framebuffer: Framebuffer) -> Result<(), Box<dyn Error>> {
     let event_loop = EventLoop::new()?;
     let context = Context::new(event_loop.owned_display_handle())?;
-    let mut app = WindowApp {
-        context,
-        framebuffer,
-        window: None,
-        surface: None,
-        failure: None,
-    };
+    let mut app = WindowApp { context, framebuffer, window: None, surface: None, failure: None };
     event_loop.run_app(&mut app)?;
     if let Some(error) = app.failure {
         return Err(io::Error::other(error).into());
@@ -223,12 +212,9 @@ impl<D: raw_window_handle::HasDisplayHandle + 'static> ApplicationHandler for Wi
             return;
         }
         let window = match event_loop.create_window(
-            Window::default_attributes()
-                .with_title("B-Web")
-                .with_inner_size(winit::dpi::PhysicalSize::new(
-                    self.framebuffer.width(),
-                    self.framebuffer.height(),
-                )),
+            Window::default_attributes().with_title("B-Web").with_inner_size(
+                winit::dpi::PhysicalSize::new(self.framebuffer.width(), self.framebuffer.height()),
+            ),
         ) {
             Ok(window) => Arc::new(window),
             Err(error) => {
@@ -278,10 +264,8 @@ impl<D: raw_window_handle::HasDisplayHandle + 'static> ApplicationHandler for Wi
 
 impl<D> WindowApp<D> {
     fn present_frame(&mut self) -> Result<(), Box<dyn Error>> {
-        let window = self
-            .window
-            .as_ref()
-            .ok_or_else(|| io::Error::other("window is not initialized"))?;
+        let window =
+            self.window.as_ref().ok_or_else(|| io::Error::other("window is not initialized"))?;
         let size = window.inner_size();
         let (Some(width), Some(height)) =
             (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
