@@ -256,7 +256,7 @@ impl<D: raw_window_handle::HasDisplayHandle + 'static> ApplicationHandler for Wi
         window_id: WindowId,
         event: WindowEvent,
     ) {
-        let Some(window) = self.window.as_ref() else {
+        let Some(window) = self.window.as_ref().cloned() else {
             return;
         };
         if window.id() != window_id {
