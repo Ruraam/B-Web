@@ -1,6 +1,6 @@
 //! Converts layout-port data into a deterministic physical-pixel DisplayList.
 
-use crate::display_list::DisplayList;
+use crate::display_list::{DisplayList, TextRun};
 use crate::paint_layout::{PaintLayout, PaintNode};
 use crate::{Edges, PaintItem, Rect};
 
@@ -67,6 +67,15 @@ impl<'a, L: PaintLayout> Painter<'a, L> {
                 }
             }
 
+            // Text runs are already positioned in physical pixels by layout.
+            // Keep them after this node's border and before its descendants.
+            if let Some(run) = node.text {
+                list.push(PaintItem::Text {
+                    glyphs: run.glyphs.clone(),
+                    color: run.color,
+                });
+            }
+
             if node.style.clips_children {
                 list.push(PaintItem::PushClip { rect });
                 clip_depths.push(node.depth);
@@ -107,7 +116,9 @@ fn has_visible_width(edges: Edges) -> bool {
 mod tests {
     use super::{Painter, PainterError};
     use crate::paint_layout::{PaintLayout, PaintNode, PaintStyle};
-    use crate::{Color, Edges, PaintItem, Rect};
+    use crate::{Color, Edges, PaintItem, PositionedGlyph, Rect, TextRun};
+    use bweb_text::Coverage;
+    use std::sync::Arc;
 
     const RED: Color = Color::rgba(255, 0, 0, 255);
     const BLUE: Color = Color::rgba(0, 0, 255, 255);
@@ -126,7 +137,7 @@ mod tests {
 
         fn visit(&self, visitor: &mut dyn FnMut(PaintNode)) {
             for node in &self.nodes {
-                visitor(*node);
+                visitor(node.clone());
             }
         }
     }
@@ -136,7 +147,77 @@ mod tests {
     }
 
     fn node(depth: u32, rect: Rect, style: PaintStyle) -> PaintNode {
-        PaintNode { depth, rect, style }
+        PaintNode { depth, rect, style, ..PaintNode::default() }
+    }
+
+    fn text_node(depth: u32, rect: Rect, style: PaintStyle, run: TextRun) -> PaintNode {
+        PaintNode { depth, rect, style, text: Some(Arc::new(run)) }
+    }
+
+    fn simple_run() -> TextRun {
+        TextRun {
+            glyphs: vec![PositionedGlyph {
+                coverage: Coverage { width: 1, height: 1, left: 0, top: 0, data: vec![255] },
+                x: 12.0,
+                y: 8.0,
+            }],
+            color: BLACK,
+        }
+    }
+
+    #[test]
+    fn emits_text_after_border_and_before_children_without_rescaling_positions() {
+        let run = simple_run();
+        let layout = MockLayout {
+            viewport: viewport(),
+            nodes: vec![
+                text_node(
+                    0,
+                    Rect { x: 0.0, y: 0.0, width: 100.0, height: 40.0 },
+                    PaintStyle {
+                        background: Some(WHITE),
+                        border_color: Some(BLACK),
+                        border_widths: Edges { top: 1.0, right: 1.0, bottom: 1.0, left: 1.0 },
+                        clips_children: false,
+                    },
+                    run.clone(),
+                ),
+                node(
+                    1,
+                    Rect { x: 10.0, y: 10.0, width: 20.0, height: 20.0 },
+                    PaintStyle { background: Some(RED), ..PaintStyle::default() },
+                ),
+            ],
+        };
+
+        let list = Painter::new(&layout, 2.0).expect("valid scale").paint();
+        assert!(matches!(list.items[1], PaintItem::FillRect { .. }));
+        assert!(matches!(list.items[2], PaintItem::BorderRect { .. }));
+        match &list.items[3] {
+            PaintItem::Text { glyphs, color } => {
+                assert_eq!(glyphs, &run.glyphs);
+                assert_eq!(*color, run.color);
+                assert_eq!(glyphs[0].x, 12.0);
+                assert_eq!(glyphs[0].y, 8.0);
+            }
+            other => panic!("expected text before child, got {other:?}"),
+        }
+        assert!(matches!(list.items[4], PaintItem::FillRect { color: RED, .. }));
+    }
+
+    #[test]
+    fn text_only_node_emits_a_text_command() {
+        let layout = MockLayout {
+            viewport: viewport(),
+            nodes: vec![text_node(
+                0,
+                Rect { x: 0.0, y: 0.0, width: 100.0, height: 20.0 },
+                PaintStyle::default(),
+                simple_run(),
+            )],
+        };
+        let list = Painter::new(&layout, 1.0).expect("valid scale").paint();
+        assert!(matches!(list.items[1], PaintItem::Text { .. }));
     }
 
     #[test]
