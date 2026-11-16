@@ -301,6 +301,91 @@ mod tests {
         assert_eq!(run.glyphs.len(), 5);
         assert!(run.glyphs.iter().all(|glyph| glyph.x >= 0.0 && glyph.y >= 0.0));
     }
+
+    #[test]
+    fn viewport_width_change_reflows_lines_and_prepared_glyph_positions() {
+        use bweb_html::NodeKind;
+
+        let document = HtmlDocument::parse("<main>MMMMMMMMMMMM</main>");
+        let stylesheet = Stylesheet::parse("main { display:block; font-size:20px }")
+            .expect("valid stylesheet");
+        let styles = StyleEngine::new().compute(&document, &[stylesheet]);
+        let main = document
+            .iter()
+            .find_map(|(id, node)| {
+                matches!(node.kind(), NodeKind::Element { tag_name, .. } if tag_name == "main")
+                    .then_some(id)
+            })
+            .expect("main element");
+
+        let wide_tree = LayoutTree::build(&document, &styles, 400.0);
+        let narrow_tree = LayoutTree::build(&document, &styles, 40.0);
+        let wide_main = find_layout_box(&wide_tree.root, main).expect("wide main box");
+        let narrow_main = find_layout_box(&narrow_tree.root, main).expect("narrow main box");
+
+        assert_eq!(wide_main.line_boxes.len(), 1);
+        assert!(narrow_main.line_boxes.len() > wide_main.line_boxes.len());
+
+        let mut wide_font = font();
+        let mut narrow_font = font();
+        let wide_runs = prepare_text_runs(&wide_tree, &styles, &mut wide_font, 1.0);
+        let narrow_runs = prepare_text_runs(&narrow_tree, &styles, &mut narrow_font, 1.0);
+        let wide_glyphs = &wide_runs.get(&main_text_node(&document)).expect("wide text run").glyphs;
+        let narrow_glyphs =
+            &narrow_runs.get(&main_text_node(&document)).expect("narrow text run").glyphs;
+
+        assert_eq!(wide_glyphs.len(), 12);
+        assert_eq!(narrow_glyphs.len(), 12);
+        assert!(wide_glyphs.iter().all(|glyph| glyph.y == wide_glyphs[0].y));
+        assert!(
+            narrow_glyphs.iter().any(|glyph| glyph.y > narrow_glyphs[0].y),
+            "narrower viewport must reposition glyphs onto subsequent lines",
+        );
+    }
+
+    #[test]
+    fn viewport_height_change_does_not_recompute_layout_or_text_geometry() {
+        let document = HtmlDocument::parse("<main>MMMMMMMMMMMM</main>");
+        let stylesheet = Stylesheet::parse("main { display:block; font-size:20px }")
+            .expect("valid stylesheet");
+        let styles = StyleEngine::new().compute(&document, &[stylesheet]);
+
+        // Height belongs to the paint viewport, not the top-down layout inputs.
+        let first_layout = LayoutTree::build(&document, &styles, 80.0);
+        let second_layout = LayoutTree::build(&document, &styles, 80.0);
+        assert_eq!(first_layout, second_layout);
+
+        let mut first_font = font();
+        let mut second_font = font();
+        let first_runs = prepare_text_runs(&first_layout, &styles, &mut first_font, 1.0);
+        let second_runs = prepare_text_runs(&second_layout, &styles, &mut second_font, 1.0);
+
+        let first_text = first_runs.values().next().expect("prepared text");
+        let second_text = second_runs.values().next().expect("prepared text");
+        assert_eq!(first_text.glyphs.len(), second_text.glyphs.len());
+        for (first, second) in first_text.glyphs.iter().zip(&second_text.glyphs) {
+            assert_eq!((first.x, first.y), (second.x, second.y));
+        }
+    }
+
+    fn main_text_node(document: &HtmlDocument) -> bweb_html::NodeId {
+        use bweb_html::NodeKind;
+        document
+            .iter()
+            .find_map(|(id, node)| matches!(node.kind(), NodeKind::Text(_)).then_some(id))
+            .expect("main text node")
+    }
+
+    fn find_layout_box<'a>(
+        layout: &'a crate::LayoutBox,
+        node: bweb_html::NodeId,
+    ) -> Option<&'a crate::LayoutBox> {
+        if layout.node == node {
+            return Some(layout);
+        }
+        layout.children.iter().find_map(|child| find_layout_box(child, node))
+    }
+
     #[test]
     fn prepared_dom_text_reaches_the_framebuffer_through_the_full_paint_pipeline() {
         let document = HtmlDocument::parse("<main>MMMMM</main>");
