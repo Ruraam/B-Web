@@ -6,5 +6,6 @@ rust-version.workspace = true
 
 [dependencies]
 bweb-core = { path = "../bweb-core" }
+bweb-filterlists = { path = "../bweb-filterlists" }
 bweb-js = { path = "../bweb-js" }
 bweb-shield = { path = "../bweb-shield" }
