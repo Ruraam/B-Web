@@ -46,7 +46,6 @@ pub struct LayoutBox {
     pub line_boxes: Vec<LineBox>,
 }
 
-
 /// A line box emitted by the initial inline formatting pass.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LineBox {
@@ -208,14 +207,20 @@ fn layout_node(
     })
 }
 
-
 fn build_line_boxes(
-    document: &HtmlDocument, children: &[LayoutBox], origin_x: f32, origin_y: f32,
-    available_width: f32, style: Option<&bweb_css::ComputedStyle>,
+    document: &HtmlDocument,
+    children: &[LayoutBox],
+    origin_x: f32,
+    origin_y: f32,
+    available_width: f32,
+    style: Option<&bweb_css::ComputedStyle>,
 ) -> Vec<LineBox> {
     let white_space = style.and_then(|s| s.get("white-space")).unwrap_or("normal");
-    let font_size =
-        style.and_then(|s| s.get("font-size")).and_then(parse_length).unwrap_or(16.0).max(1.0);
+    let font_size = style
+        .and_then(|s| s.get("font-size"))
+        .and_then(parse_length)
+        .unwrap_or(16.0)
+        .max(1.0);
     let line_height = style
         .and_then(|s| s.get("line-height"))
         .and_then(parse_length)
@@ -231,6 +236,7 @@ fn build_line_boxes(
     let mut y = origin_y;
     let mut line_width: f32 = 0.0;
     let mut pending_space = false;
+
     for child in children.iter().filter(|child| child.display == Display::Inline) {
         let mut text = String::new();
         collect_text(document, child.node, &mut text);
@@ -245,13 +251,20 @@ fn build_line_boxes(
             let ch = chars[index];
             if ch == '\n' && preserve_newlines {
                 if !run.is_empty() {
-                    fragments.push(TextFragment { node: child.node, text: std::mem::take(&mut run),
-                        rect: Rect { x, y, width: run_width, height: line_height } });
-                    x += run_width; line_width = x - origin_x; run_width = 0.0;
+                    fragments.push(TextFragment {
+                        node: child.node,
+                        text: std::mem::take(&mut run),
+                        rect: Rect { x, y, width: run_width, height: line_height },
+                    });
+                    x += run_width;
+                    line_width = x - origin_x;
+                    run_width = 0.0;
                 }
                 if !fragments.is_empty() {
-                    lines.push(LineBox { rect: Rect { x: origin_x, y, width: line_width, height: line_height },
-                        fragments: std::mem::take(&mut fragments) });
+                    lines.push(LineBox {
+                        rect: Rect { x: origin_x, y, width: line_width, height: line_height },
+                        fragments: std::mem::take(&mut fragments),
+                    });
                 }
                 y += line_height;
                 x = origin_x;
@@ -262,16 +275,27 @@ fn build_line_boxes(
             }
             if ch.is_whitespace() && !preserve {
                 if !run.is_empty() {
-                    fragments.push(TextFragment { node: child.node, text: std::mem::take(&mut run),
-                        rect: Rect { x, y, width: run_width, height: line_height } });
-                    x += run_width; line_width = x - origin_x; run_width = 0.0;
+                    fragments.push(TextFragment {
+                        node: child.node,
+                        text: std::mem::take(&mut run),
+                        rect: Rect { x, y, width: run_width, height: line_height },
+                    });
+                    x += run_width;
+                    line_width = x - origin_x;
+                    run_width = 0.0;
                 }
                 let mut end = index + 1;
-                while end < chars.len() && chars[end].is_whitespace() && chars[end] != '\n' { end += 1; }
+                while end < chars.len() && chars[end].is_whitespace() && chars[end] != '\n' {
+                    end += 1;
+                }
                 if !pending_space && x > origin_x {
-                    fragments.push(TextFragment { node: child.node, text: " ".to_owned(),
-                        rect: Rect { x, y, width: glyph_width, height: line_height } });
-                    x += glyph_width; line_width = x - origin_x;
+                    fragments.push(TextFragment {
+                        node: child.node,
+                        text: " ".to_owned(),
+                        rect: Rect { x, y, width: glyph_width, height: line_height },
+                    });
+                    x += glyph_width;
+                    line_width = x - origin_x;
                 }
                 pending_space = true;
                 index = end;
@@ -286,13 +310,19 @@ fn build_line_boxes(
                 run.pop();
                 run_width -= glyph_width;
                 if !run.is_empty() {
-                    fragments.push(TextFragment { node: child.node, text: std::mem::take(&mut run),
-                        rect: Rect { x, y, width: run_width, height: line_height } });
-                    x += run_width; line_width = x - origin_x;
+                    fragments.push(TextFragment {
+                        node: child.node,
+                        text: std::mem::take(&mut run),
+                        rect: Rect { x, y, width: run_width, height: line_height },
+                    });
+                    x += run_width;
+                    line_width = x - origin_x;
                 }
                 if !fragments.is_empty() {
-                    lines.push(LineBox { rect: Rect { x: origin_x, y, width: line_width, height: line_height },
-                        fragments: std::mem::take(&mut fragments) });
+                    lines.push(LineBox {
+                        rect: Rect { x: origin_x, y, width: line_width, height: line_height },
+                        fragments: std::mem::take(&mut fragments),
+                    });
                 }
                 y += line_height;
                 x = origin_x;
@@ -302,9 +332,13 @@ fn build_line_boxes(
             }
         }
         if !run.is_empty() {
-            fragments.push(TextFragment { node: child.node, text: run,
-                rect: Rect { x, y, width: run_width, height: line_height } });
-            x += run_width; line_width = x - origin_x;
+            fragments.push(TextFragment {
+                node: child.node,
+                text: run,
+                rect: Rect { x, y, width: run_width, height: line_height },
+            });
+            x += run_width;
+            line_width = x - origin_x;
         }
     }
     if !fragments.is_empty() {
@@ -318,8 +352,12 @@ fn build_line_boxes(
 
 fn collect_text(document: &HtmlDocument, id: NodeId, output: &mut String) {
     let Some(node) = document.node(id) else { return };
-    if let NodeKind::Text(value) = node.kind() { output.push_str(value); }
-    for child in node.children() { collect_text(document, *child, output); }
+    if let NodeKind::Text(value) = node.kind() {
+        output.push_str(value);
+    }
+    for child in node.children() {
+        collect_text(document, *child, output);
+    }
 }
 
 fn dump_box(output: &mut String, document: &HtmlDocument, layout: &LayoutBox, depth: usize) {
@@ -332,15 +370,28 @@ fn dump_box(output: &mut String, document: &HtmlDocument, layout: &LayoutBox, de
         Some(NodeKind::Comment(_)) => "#comment".to_owned(),
         None => format!("#node-{}", layout.node.index()),
     };
-    let _ = writeln!(output, "{indent}{label} {:?} x={:.1} y={:.1} w={:.1} h={:.1}",
-        layout.display, layout.rect.x, layout.rect.y, layout.rect.width, layout.rect.height);
+    let _ = writeln!(
+        output,
+        "{indent}{label} {:?} x={:.1} y={:.1} w={:.1} h={:.1}",
+        layout.display, layout.rect.x, layout.rect.y, layout.rect.width, layout.rect.height
+    );
     for line in &layout.line_boxes {
-        let _ = writeln!(output, "{indent}  LineBox x={:.1} y={:.1} w={:.1} h={:.1}",
-            line.rect.x, line.rect.y, line.rect.width, line.rect.height);
+        let _ = writeln!(
+            output,
+            "{indent}  LineBox x={:.1} y={:.1} w={:.1} h={:.1}",
+            line.rect.x, line.rect.y, line.rect.width, line.rect.height
+        );
         for fragment in &line.fragments {
-            let _ = writeln!(output, "{indent}    Fragment node={} {:?} x={:.1} y={:.1} w={:.1} h={:.1}",
-                fragment.node.index(), fragment.text, fragment.rect.x, fragment.rect.y,
-                fragment.rect.width, fragment.rect.height);
+            let _ = writeln!(
+                output,
+                "{indent}    Fragment node={} {:?} x={:.1} y={:.1} w={:.1} h={:.1}",
+                fragment.node.index(),
+                fragment.text,
+                fragment.rect.x,
+                fragment.rect.y,
+                fragment.rect.width,
+                fragment.rect.height
+            );
         }
     }
     for child in &layout.children {
