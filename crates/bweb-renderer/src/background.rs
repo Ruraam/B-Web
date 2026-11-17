@@ -67,12 +67,12 @@ fn parse_length(value: &str) -> Option<Length> {
         return Some(Length::Auto);
     }
     if let Some(percent) = value.strip_suffix('%') {
-        return percent.trim().parse::<f32>().ok().map(Length::Percent);
+        return percent.trim().parse::<f32>().ok().filter(|v| v.is_finite()).map(Length::Percent);
     }
     if let Some(px) = value.strip_suffix("px") {
-        return px.trim().parse::<f32>().ok().map(Length::Px);
+        return px.trim().parse::<f32>().ok().filter(|v| v.is_finite()).map(Length::Px);
     }
-    value.parse::<f32>().ok().map(Length::Px)
+    value.parse::<f32>().ok().filter(|v| v.is_finite()).map(Length::Px)
 }
 
 fn first_layer(value: Option<&str>) -> &str {
@@ -258,6 +258,21 @@ mod tests {
         assert_eq!(rects[0].width, 40.0);
         assert_eq!(rects[0].height, 20.0);
         assert_eq!(rects[1].x, 40.0);
+    }
+
+    #[test]
+    fn non_finite_lengths_are_rejected() {
+        let size = parse_background_size(Some("1e999px"));
+        assert_eq!(size, BackgroundSize::Explicit { width: Length::Auto, height: Length::Auto });
+        let rects = background_rects(
+            rect(),
+            (10.0, 10.0),
+            &size,
+            &parse_background_position(None),
+            BackgroundRepeat::Repeat,
+        );
+        assert!(!rects.is_empty() && rects.len() <= 512, "finite, bounded tiling");
+        assert!(rects.iter().all(|r| r.width.is_finite() && r.height.is_finite()));
     }
 
     #[test]

@@ -1836,7 +1836,10 @@ fn extract_css_urls(source: &str, output: &mut Vec<String>) {
     let bytes = source.as_bytes();
     let mut index = 0;
     while index + 4 <= bytes.len() {
-        if !source[index..].get(..4).is_some_and(|value| value.eq_ignore_ascii_case("url(")) {
+        // Compare bytes directly: index may land mid-UTF-8 and slicing `source`
+        // there would panic. `url(` is pure ASCII so a byte compare is exact.
+        let is_url = bytes[index] == b'u' || bytes[index] == b'U';
+        if !is_url || !bytes[index + 1..index + 4].eq_ignore_ascii_case(b"rl(") {
             index += 1;
             continue;
         }
@@ -1845,7 +1848,14 @@ fn extract_css_urls(source: &str, output: &mut Vec<String>) {
         while index < bytes.len() && bytes[index] != b')' {
             index += 1;
         }
-        let raw = source[start..index.min(bytes.len())].trim().trim_matches(['\'', '"']).trim();
+        // The extracted URL is ASCII by construction up to the first `)`;
+        // trim via byte-safe lossy conversion in case of stray multibyte input.
+        let raw_owned = String::from_utf8_lossy(&bytes[start..index.min(bytes.len())])
+            .trim()
+            .trim_matches(['\'', '"'])
+            .trim()
+            .to_owned();
+        let raw = raw_owned.as_str();
         if !raw.is_empty() && !raw.starts_with("data:") && !raw.starts_with("javascript:") {
             if let Some(url) =
                 Url::parse(raw).ok().filter(|url| matches!(url.scheme(), "http" | "https"))
@@ -1936,6 +1946,13 @@ mod tests {
         assert!(document.inline_stylesheets().is_empty());
         assert!(document.script_sources().is_empty());
         assert!(document.resource_references().is_empty());
+    }
+
+    #[test]
+    fn extracts_urls_after_utf8_content_without_panicking() {
+        let mut urls = Vec::new();
+        extract_css_urls("a{content:'café ☕'; background:url('/img.png')}", &mut urls);
+        assert_eq!(urls, vec!["/img.png"]);
     }
 
     #[test]

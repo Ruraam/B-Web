@@ -64,10 +64,15 @@ enum Component {
 fn number(value: &str) -> Option<Component> {
     let value = value.trim();
     if let Some(percent) = value.strip_suffix('%') {
-        return percent.trim().parse::<f32>().ok().map(|v| Component::Value(v, true));
+        return percent
+            .trim()
+            .parse::<f32>()
+            .ok()
+            .filter(|v| v.is_finite())
+            .map(|v| Component::Value(v, true));
     }
     let value = value.strip_suffix("px").unwrap_or(value);
-    value.trim().parse::<f32>().ok().map(|v| Component::Value(v, false))
+    value.trim().parse::<f32>().ok().filter(|v| v.is_finite()).map(|v| Component::Value(v, false))
 }
 
 fn resolve(component: Component, basis: f32) -> f32 {

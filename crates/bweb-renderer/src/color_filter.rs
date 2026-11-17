@@ -66,6 +66,7 @@ fn parse_number(value: &str) -> Option<f32> {
         .trim_end_matches('%')
         .parse::<f32>()
         .ok()
+        .filter(|v| v.is_finite())
         .map(|v| if value.trim().ends_with('%') { v / 100.0 } else { v })
 }
 
