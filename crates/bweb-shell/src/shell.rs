@@ -26,6 +26,16 @@ impl<B: ViewBackend> ResizeController<B> {
         self.pending = Some(viewport);
     }
 
+    #[must_use]
+    pub fn view_mut(&mut self) -> &mut View<B> {
+        &mut self.view
+    }
+
+    /// Repaints the current viewport after a content-only change such as scroll.
+    pub fn repaint(&mut self) -> Result<ResizeDispatch, B::Error> {
+        if self.view.repaint()? { Ok(ResizeDispatch::Repaint) } else { Ok(ResizeDispatch::Skip) }
+    }
+
     /// Applies at most one pending configuration.
     pub fn dispatch(&mut self) -> Result<ResizeDispatch, B::Error> {
         let Some(viewport) = self.pending.take() else {
@@ -114,6 +124,17 @@ mod tests {
         assert_eq!(c.dispatch(), Ok(ResizeDispatch::Reflow));
         c.queue(vp(800, 720));
         assert_eq!(c.dispatch(), Ok(ResizeDispatch::Repaint));
+        assert_eq!(c.view().backend().reflows, 1);
+        assert_eq!(c.view().backend().repaints, 2);
+    }
+
+    #[test]
+    fn content_only_repaint_dispatches_repaint() {
+        let mut c = controller();
+        assert_eq!(c.repaint(), Ok(ResizeDispatch::Skip));
+        c.queue(vp(800, 600));
+        assert_eq!(c.dispatch(), Ok(ResizeDispatch::Reflow));
+        assert_eq!(c.repaint(), Ok(ResizeDispatch::Repaint));
         assert_eq!(c.view().backend().reflows, 1);
         assert_eq!(c.view().backend().repaints, 2);
     }

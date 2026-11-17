@@ -18,22 +18,34 @@ layout tree, text and image rasterization, network transport and privacy filteri
 - `Sec-GPC: 1` and `DNT: 1` on all outgoing requests.
 - EasyList/EasyPrivacy downloader with HTTPS-only redirects, finite timeouts and
   bounded, atomic cache updates.
+- CSS `url()` backgrounds discovered, fetched through Shield and painted.
 
 ### HTML and DOM
 - Arena-backed DOM with stable `NodeId`s.
 - Parser for elements, text, comments, attributes and void elements.
-- Character reference decoding, raw `<script>`/`<style>` text.
+- HTML5 insertion modes with implied `html`/`head`/`body`, head-element routing
+  and merged attributes; doctype skipping and a bounded open-element stack.
+- Full WHATWG named character reference table with longest-match decoding,
+  numeric reference C1 remapping and strict attribute-value rules.
+- Raw-text/RCDATA scanning; active formatting element reconstruction and a
+  simplified adoption agency across misnested special blocks.
+- Inert `<template>` content subtree, excluded from styling, layout, scripts
+  and resource loading.
 - Implied end tags for paragraphs, list items, table rows/cells and similar
   elements; foster parenting of misplaced table content.
-- Hyperlink lookup for hit-testing and navigation.
+- Hyperlink lookup for hit-testing and navigation, `<base href>` resolution for
+  subresources and clicked links.
 
 ### CSS
 - Lexer, rule/declaration parser and selector engine.
 - Combinators (descendant, child, adjacent/general sibling), attribute operators,
   structural and negation pseudo-classes.
 - `::before`/`::after` generated content with computed styles.
-- Cascade with specificity, `!important`, source order and inline styles.
+- Cascade with specificity, `!important`, source order, inline styles,
+  user-agent/author origins and `@layer` ordering (reversed for `!important`).
 - Custom properties with `var()` substitution; shorthand expansion.
+- `background` shorthand expanded into all longhands with comma-separated layer
+  support; named, hex, `rgb()`/`rgba()` and `hsl()`/`hsla()` color values.
 - `@media` feature queries evaluated against the active viewport.
 
 ### JavaScript
@@ -48,11 +60,23 @@ layout tree, text and image rasterization, network transport and privacy filteri
   `event.preventDefault()` to cancel navigation.
 
 ### Layout and rendering
-- Box tree with margins, padding, borders, sizing and inline formatting.
+- Box tree with margins (including auto), padding, borders, `max-width`,
+  em/rem sizing and inline formatting.
 - Font-metric-based text layout with Swash shaping (kerning and ligatures),
   using the same advances as glyph rasterization.
 - Images sized from attributes or intrinsic dimensions and painted inline.
 - Deterministic display list, software rasterizer and RGBA framebuffer.
+- Linear-gradient backgrounds rasterized from CSS angles/`to <side>` directions
+  and percentage/length color stops.
+- Single-line flexbox: direction, grow/shrink, justification, alignment, gaps
+  and the `flex`/`gap` shorthands.
+- `position: relative/absolute/fixed` with offsets and positioned containing
+  blocks; out-of-flow boxes stay outside normal flow.
+- CSS grid: `fr`/length/`auto`/`repeat()` tracks, gaps, implicit rows,
+  auto-placement, explicit `grid-column`/`grid-row` line/span placement and
+  named `grid-template-areas`/`grid-area`.
+- Floats with inline wrapping, `clear` and per-formatting-context containment;
+  multiple floats per line.
 
 ### Browser shell
 - `b-web open`, `update-filters`, `--render-ppm`, `--dump-layout`, `--window`.
@@ -61,10 +85,12 @@ layout tree, text and image rasterization, network transport and privacy filteri
 
 ## In progress
 
-- Broader HTML5 tree construction (implied `html`, `head`, `body`, full
-  malformed-markup recovery, template contents).
-- Additional CSS layout: positioning, floats, flex and grid.
-- Full CSS property coverage, especially backgrounds and shorthands.
+- Remaining HTML5 tree construction: the complete adoption-agency inner loop
+  and the full tokenizer state tables.
+- Additional CSS layout: `minmax()` grid tracks, subgrid and orthogonal writing
+  modes.
+- CSS property coverage: background tiling/positioning/sizing, filters,
+  transforms, `minmax()` grid tracks and remaining shorthand variants.
 
 ## Planned
 
