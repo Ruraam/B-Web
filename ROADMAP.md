@@ -73,9 +73,9 @@ layout tree, text and image rasterization, network transport and privacy filteri
   and the `flex`/`gap` shorthands.
 - `position: relative/absolute/fixed` with offsets and positioned containing
   blocks; out-of-flow boxes stay outside normal flow.
-- CSS grid: `fr`/length/`auto`/`repeat()` tracks, gaps, implicit rows,
-  auto-placement, explicit `grid-column`/`grid-row` line/span placement and
-  named `grid-template-areas`/`grid-area`.
+- CSS grid: `fr`/length/`auto`/`minmax()`/`repeat()` tracks, gaps, implicit
+  rows, auto-placement, explicit `grid-column`/`grid-row` line/span placement
+  and named `grid-template-areas`/`grid-area`.
 - Floats with inline wrapping, `clear` and per-formatting-context containment;
   multiple floats per line.
 
@@ -90,8 +90,8 @@ layout tree, text and image rasterization, network transport and privacy filteri
   and the full tokenizer state tables.
 - Additional CSS layout: `minmax()` grid tracks, subgrid and orthogonal writing
   modes.
-- CSS property coverage: background-origin/clip, filters, transforms,
-  `minmax()` grid tracks and remaining shorthand variants.
+- CSS property coverage: background-origin/clip, filters, transforms and
+  remaining shorthand variants.
 
 ## Planned
 

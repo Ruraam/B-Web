@@ -1036,10 +1036,11 @@ fn position_flex_items(
     result
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 enum TrackSize {
     Fixed(f32),
     Fr(f32),
+    MinMax { min: f32, max: Box<TrackSize> },
     Auto,
 }
 
@@ -1076,8 +1077,23 @@ fn split_track_tokens(value: &str) -> Vec<&str> {
 
 fn parse_track(token: &str, available: f32) -> Option<TrackSize> {
     let lower = token.trim().to_ascii_lowercase();
-    if lower == "auto" || lower == "minmax" {
+    if lower == "auto" {
         return Some(TrackSize::Auto);
+    }
+    if let Some(inner) = lower.strip_prefix("minmax(").and_then(|rest| rest.strip_suffix(')')) {
+        let parts: Vec<&str> = inner.splitn(2, ',').map(str::trim).collect();
+        if parts.len() != 2 {
+            return None;
+        }
+        let min = parse_track(parts[0], available)?;
+        let min = match min {
+            TrackSize::Fixed(value) => value,
+            TrackSize::Auto => 0.0,
+            TrackSize::Fr(_) => return None,
+            TrackSize::MinMax { .. } => return None,
+        };
+        let max = parse_track(parts[1], available)?;
+        return Some(TrackSize::MinMax { min, max: Box::new(max) });
     }
     if let Some(fraction) = lower.strip_suffix("fr") {
         return fraction.trim().parse::<f32>().ok().map(|value| TrackSize::Fr(value.max(0.0)));
@@ -1105,7 +1121,7 @@ fn parse_tracks(value: Option<&str>, available: f32) -> Vec<TrackSize> {
                 parts.first().and_then(|value| value.parse::<usize>().ok()).unwrap_or(0).min(64);
             if let Some(track) = parts.get(1).and_then(|value| parse_track(value, available)) {
                 for _ in 0..count {
-                    tracks.push(track);
+                    tracks.push(track.clone());
                 }
             }
             continue;
@@ -1357,14 +1373,30 @@ fn layout_grid_children(
                 fixed_total += *value;
             }
             TrackSize::Fr(fraction) => fr_total += fraction,
+            TrackSize::MinMax { min, max } => {
+                fixed_total += *min;
+                column_sizes[index] = *min;
+                if let TrackSize::Fr(fraction) = max.as_ref() {
+                    fr_total += fraction;
+                } else if let TrackSize::Fixed(value) = max.as_ref() {
+                    column_sizes[index] = value.max(*min);
+                    fixed_total += value.max(*min) - min;
+                }
+            }
             TrackSize::Auto => {}
         }
     }
     if fr_total > 0.0 {
         let remaining = (track_space - fixed_total).max(0.0);
         for (index, track) in template_columns.iter().enumerate() {
-            if let TrackSize::Fr(fraction) = track {
-                column_sizes[index] = remaining * fraction / fr_total;
+            match track {
+                TrackSize::Fr(fraction) => column_sizes[index] = remaining * fraction / fr_total,
+                TrackSize::MinMax { min, max } => {
+                    if let TrackSize::Fr(fraction) = max.as_ref() {
+                        column_sizes[index] = (remaining * fraction / fr_total).max(*min);
+                    }
+                }
+                _ => {}
             }
         }
     } else {
@@ -1392,10 +1424,16 @@ fn layout_grid_children(
     .next();
     let mut row_sizes = vec![0.0_f32; row_count];
     for (row, size) in row_sizes.iter_mut().enumerate() {
-        let track = template_rows.get(row).copied().or(auto_row).unwrap_or(TrackSize::Auto);
+        let track =
+            template_rows.get(row).cloned().or_else(|| auto_row.clone()).unwrap_or(TrackSize::Auto);
         *size = match track {
             TrackSize::Fixed(value) => value,
             TrackSize::Fr(fraction) => fraction * 50.0,
+            TrackSize::MinMax { min, max } => match max.as_ref() {
+                TrackSize::Fr(fraction) => (fraction * 50.0).max(min),
+                TrackSize::Fixed(value) => value.max(min),
+                TrackSize::Auto | TrackSize::MinMax { .. } => min,
+            },
             TrackSize::Auto => 0.0,
         };
         if *size == 0.0 {
@@ -2476,6 +2514,28 @@ mod tests {
         assert_eq!(boxes[2].rect.y, 20.0);
         assert_eq!(boxes[3].rect.x, 150.0);
         assert_eq!(boxes[3].rect.y, 20.0);
+    }
+
+    #[test]
+    fn grid_minmax_respects_the_minimum() {
+        let (document, tree) = layout(
+            "<main><span>1</span><span>2</span></main>",
+            "main { display:grid; width:100px; grid-template-columns:minmax(80px, 1fr) 1fr } \
+             span { display:block; height:10px }",
+        );
+        let main = find(&tree.root, element(&document, "main")).expect("grid box");
+        let spans: Vec<_> = document
+            .iter()
+            .filter_map(|(id, node)| {
+                matches!(node.kind(), NodeKind::Element { tag_name, .. } if tag_name == "span")
+                    .then_some(id)
+            })
+            .collect();
+        let boxes: Vec<_> = spans
+            .iter()
+            .map(|id| main.children.iter().find(|child| child.node == *id).expect("item"))
+            .collect();
+        assert!(boxes[0].rect.width >= 80.0, "minmax floor must be honored: {:?}", boxes[0].rect);
     }
 
     #[test]
