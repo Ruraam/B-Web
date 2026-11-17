@@ -1,9 +1,9 @@
 //! Backend-independent, deterministic paint commands.
 //!
-//! Rectangles are expressed in physical pixels as floating-point values.
-//! The painter is responsible for applying the device scale factor before
-//! adding commands to this list. Text and image commands will be introduced
-//! by later rendering milestones.
+//! Rectangles are expressed in physical pixels as floating-point values. The
+//! painter applies the device scale factor before adding commands. The list
+//! covers fills, gradients, borders, text, images, clips and the transform,
+//! opacity, filter, sticky and rounded-corner markers.
 
 use std::{fmt, sync::Arc};
 

@@ -108,7 +108,7 @@ Navigations run on a background thread and are delivered to the event loop as a 
 
 ## Current status
 
-B-Web currently implements a documented subset of the web platform and is developed milestone by milestone. The main areas still missing are remaining HTML5 tree construction (full tokenizer states and adoption-agency inner loop), advanced CSS features (background-origin/clip, advanced filters, rotate/skew, subgrid, user stylesheets, animations), additional image formats, GPU rendering, horizontal scrolling, and richer browser chrome. See [ROADMAP.md](ROADMAP.md) for the plan and current status. No third-party browser engine is embedded.
+B-Web currently implements a documented subset of the web platform and is developed milestone by milestone. The main areas still missing are remaining HTML5 tree construction (full tokenizer states and adoption-agency inner loop), advanced CSS features (background-origin/clip, blur and other advanced filters, perspective transforms, subgrid, user stylesheets, animations), additional image formats, GPU rendering, horizontal scrolling, and richer browser chrome. See [ROADMAP.md](ROADMAP.md) for the plan and current status. No third-party browser engine is embedded.
 
 ## Design principles
 

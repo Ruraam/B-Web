@@ -1,8 +1,8 @@
 //! Font-metric-based inline text layout and glyph positioning.
 //!
-//! This module is the first bridge between `bweb-text` and the layout tree.
-//! It performs simple character-level layout (without shaping or kerning),
-//! wraps at whitespace boundaries, and resolves bitmap bearings into final
+//! This module bridges `bweb-text` and the layout tree. Words are shaped with
+//! Swash (kerning and ligatures), the layout fragments are wrapped at
+//! whitespace boundaries, and bitmap bearings are resolved into final
 //! physical-pixel glyph positions.
 
 use bweb_renderer::PositionedGlyph;

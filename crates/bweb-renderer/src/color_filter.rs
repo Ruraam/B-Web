@@ -2,8 +2,8 @@
 //!
 //! `brightness()`, `contrast()`, `grayscale()` and `invert()` are per-channel
 //! transforms with no spatial component, so they can be applied directly to
-//! each emitted color. `opacity()` reuses the subtree alpha path. `blur()` is
-//! not supported.
+//! each emitted color. Subtree alpha is handled separately by opacity markers;
+//! spatial filters such as `blur()` are not supported.
 
 use crate::Color;
 

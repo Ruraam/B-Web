@@ -76,8 +76,8 @@ layout tree, text and image rasterization, network transport and privacy filteri
   rounded-corner clipping from `border-radius` and composable color filters.
 - Multi-line flexbox: direction, wrapping, grow/shrink, justification, alignment,
   gaps and the `flex`/`gap` shorthands.
-- `position: relative/absolute/fixed` with offsets and positioned containing
-  blocks; out-of-flow boxes stay outside normal flow.
+- `position: relative/absolute/fixed/sticky` with offsets, positioned containing
+  blocks and scroll-pinned sticky boxes; out-of-flow boxes stay outside flow.
 - CSS grid: `fr`/length/`auto`/`minmax()`/`repeat()` tracks, gaps, implicit
   rows, auto-placement, explicit `grid-column`/`grid-row` line/span placement
   and named `grid-template-areas`/`grid-area`.
