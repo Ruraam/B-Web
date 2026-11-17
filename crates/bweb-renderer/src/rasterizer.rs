@@ -28,6 +28,7 @@ impl Rasterizer {
         };
         let mut clips = vec![root];
         let mut transforms = vec![Transform::IDENTITY];
+        let mut opacities: Vec<f32> = vec![1.0];
 
         for item in &list.items {
             match item {
@@ -37,7 +38,15 @@ impl Rasterizer {
                         framebuffer,
                         transforms.last().expect("root transform").rect(*rect),
                         clip,
-                        *color,
+                        {
+                            let alpha = *opacities.last().expect("root opacity");
+                            Color::rgba(
+                                color.red,
+                                color.green,
+                                color.blue,
+                                (f32::from(color.alpha) * alpha).round() as u8,
+                            )
+                        },
                     );
                 }
                 PaintItem::BorderRect { rect, widths, color, .. } => {
@@ -47,7 +56,15 @@ impl Rasterizer {
                         transforms.last().expect("root transform").rect(*rect),
                         *widths,
                         clip,
-                        *color,
+                        {
+                            let alpha = *opacities.last().expect("root opacity");
+                            Color::rgba(
+                                color.red,
+                                color.green,
+                                color.blue,
+                                (f32::from(color.alpha) * alpha).round() as u8,
+                            )
+                        },
                     );
                 }
                 PaintItem::LinearGradient { rect, gradient } => {
@@ -57,6 +74,7 @@ impl Rasterizer {
                         transforms.last().expect("root transform").rect(*rect),
                         gradient,
                         clip,
+                        *opacities.last().expect("root opacity"),
                     );
                 }
                 PaintItem::Text { glyphs, color } => {
@@ -69,7 +87,15 @@ impl Rasterizer {
                             crate::PositionedGlyph { coverage: glyph.coverage.clone(), x, y }
                         })
                         .collect();
-                    blit_glyphs(framebuffer, &moved, clip, *color);
+                    blit_glyphs(framebuffer, &moved, clip, {
+                        let alpha = *opacities.last().expect("root opacity");
+                        Color::rgba(
+                            color.red,
+                            color.green,
+                            color.blue,
+                            (f32::from(color.alpha) * alpha).round() as u8,
+                        )
+                    });
                 }
                 PaintItem::Image { rect, image } => {
                     let clip = *clips.last().expect("root clip is always present");
@@ -78,10 +104,20 @@ impl Rasterizer {
                         image,
                         transforms.last().expect("root transform").rect(*rect),
                         clip,
+                        *opacities.last().expect("root opacity"),
                     );
                 }
                 PaintItem::PushSticky { .. } | PaintItem::PopSticky => {
                     // Interpreted by the shell's scroll translation pass.
+                }
+                PaintItem::PushOpacity { alpha } => {
+                    let parent = *opacities.last().expect("root opacity");
+                    opacities.push(parent * alpha.clamp(0.0, 1.0));
+                }
+                PaintItem::PopOpacity => {
+                    if opacities.len() > 1 {
+                        opacities.pop();
+                    }
                 }
                 PaintItem::PushTransform { transform } => {
                     let parent = *transforms.last().expect("root transform");
@@ -179,7 +215,13 @@ fn blit_glyphs(
 }
 
 /// Nearest-neighbor image blit with source-over alpha and clipping.
-fn paint_image(framebuffer: &mut Framebuffer, image: &crate::Image, rect: Rect, clip: Rect) {
+fn paint_image(
+    framebuffer: &mut Framebuffer,
+    image: &crate::Image,
+    rect: Rect,
+    clip: Rect,
+    opacity: f32,
+) {
     let Some(area) = intersect(rect, clip) else {
         return;
     };
@@ -195,7 +237,8 @@ fn paint_image(framebuffer: &mut Framebuffer, image: &crate::Image, rect: Rect, 
         let source_y = (source_y as usize).min(source_height as usize - 1);
         let offset = (source_y * source_width as usize + source_x) * 4;
         if let Some(pixel) = pixels.get(offset..offset + 4) {
-            let rgba = [pixel[0], pixel[1], pixel[2], pixel[3]];
+            let alpha = (f32::from(pixel[3]) * opacity).round() as u8;
+            let rgba = [pixel[0], pixel[1], pixel[2], alpha];
             target.set_pixel(x, y, rgba);
         }
     });
@@ -208,6 +251,7 @@ fn paint_linear_gradient(
     rect: Rect,
     gradient: &LinearGradient,
     clip: Rect,
+    opacity: f32,
 ) {
     let Some(area) = intersect(rect, clip) else {
         return;
@@ -229,7 +273,8 @@ fn paint_linear_gradient(
         let projection =
             ((pixel_x - center_x) * sine - (pixel_y - center_y) * cosine) / line_length + 0.5;
         let color = interpolate_stops(&gradient.stops, &positions, projection);
-        target.set_pixel(x, y, color.to_rgba8());
+        let alpha = (f32::from(color.alpha) * opacity).round() as u8;
+        target.set_pixel(x, y, Color::rgba(color.red, color.green, color.blue, alpha).to_rgba8());
     });
 }
 
@@ -595,6 +640,27 @@ mod tests {
         assert_eq!(&framebuffer.pixels()[0..4], &[0, 0, 0, 0]);
         assert_eq!(&framebuffer.pixels()[4..8], &[255, 0, 0, 255]);
         assert_eq!(&framebuffer.pixels()[8..12], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn opacity_multiplies_subtree_alpha() {
+        let mut list = DisplayList::default();
+        list.push(PaintItem::PushClip { rect: rect(0.0, 0.0, 2.0, 1.0) });
+        list.push(PaintItem::PushOpacity { alpha: 0.5 });
+        fill(&mut list, rect(0.0, 0.0, 1.0, 1.0), RED);
+        list.push(PaintItem::PopOpacity);
+        fill(&mut list, rect(1.0, 0.0, 1.0, 1.0), RED);
+        list.push(PaintItem::PopClip);
+        let mut framebuffer = Framebuffer::new(2, 1).expect("framebuffer");
+        framebuffer.clear([255, 255, 255, 255]);
+
+        Rasterizer.rasterize(&list, &mut framebuffer);
+
+        let faded = &framebuffer.pixels()[0..4];
+        let opaque = &framebuffer.pixels()[4..8];
+        assert_eq!(opaque, &[255, 0, 0, 255]);
+        assert_eq!(faded[0], 255);
+        assert!(faded[1] > 0 && faded[1] < 255, "red should be blended: {faded:?}");
     }
 
     #[test]

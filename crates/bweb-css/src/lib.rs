@@ -960,6 +960,7 @@ impl ComputedStyle {
         style.set("grid-row".into(), "auto".into());
         style.set("grid-template-areas".into(), "none".into());
         style.set("grid-area".into(), "auto".into());
+        style.set("opacity".into(), "1".into());
         style.set("float".into(), "none".into());
         style.set("clear".into(), "none".into());
         style

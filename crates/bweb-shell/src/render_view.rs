@@ -204,6 +204,8 @@ fn translate_y(item: &mut PaintItem, offset: f32) {
         }
         PaintItem::PushSticky { .. }
         | PaintItem::PopSticky
+        | PaintItem::PushOpacity { .. }
+        | PaintItem::PopOpacity
         | PaintItem::PushTransform { .. }
         | PaintItem::PopTransform
         | PaintItem::PopClip => {}

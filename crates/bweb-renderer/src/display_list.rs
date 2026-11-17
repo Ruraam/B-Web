@@ -139,6 +139,10 @@ pub enum PaintItem {
     PushSticky { threshold: f32, dx: f32, dy: f32 },
     /// Ends a sticky subtree opened by `PushSticky`.
     PopSticky,
+    /// Multiplies the alpha of subsequent drawing, inherited by descendants.
+    PushOpacity { alpha: f32 },
+    /// Restores the opacity in effect before `PushOpacity`.
+    PopOpacity,
     /// Applies a transform to subsequent drawing, inherited by descendants.
     PushTransform { transform: crate::Transform },
     /// Restores the transform in effect before `PushTransform`.
