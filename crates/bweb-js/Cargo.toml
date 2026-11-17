@@ -1,0 +1,5 @@
+[package]
+name = "bweb-js"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true

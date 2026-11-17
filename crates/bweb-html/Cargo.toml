@@ -1,0 +1,11 @@
+[package]
+name = "bweb-html"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+bweb-net = { path = "../bweb-net" }
+bweb-shield = { path = "../bweb-shield" }
+reqwest.workspace = true
+url.workspace = true

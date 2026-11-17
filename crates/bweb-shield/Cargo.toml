@@ -1,0 +1,8 @@
+[package]
+name = "bweb-shield"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+adblock.workspace = true

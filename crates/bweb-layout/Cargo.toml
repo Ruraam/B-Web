@@ -1,0 +1,11 @@
+[package]
+name = "bweb-layout"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+bweb-css = { path = "../bweb-css" }
+bweb-html = { path = "../bweb-html" }
+bweb-renderer = { path = "../bweb-renderer" }
+bweb-text = { path = "../bweb-text" }

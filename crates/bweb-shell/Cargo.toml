@@ -1,0 +1,26 @@
+[package]
+name = "bweb-shell"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "b-web"
+path = "src/main.rs"
+
+[dependencies]
+bweb-core = { path = "../bweb-core" }
+bweb-css = { path = "../bweb-css" }
+bweb-filterlists = { path = "../bweb-filterlists" }
+bweb-html = { path = "../bweb-html" }
+bweb-layout = { path = "../bweb-layout" }
+bweb-js = { path = "../bweb-js" }
+bweb-net = { path = "../bweb-net" }
+bweb-renderer = { path = "../bweb-renderer" }
+bweb-text = { path = "../bweb-text" }
+bweb-shield = { path = "../bweb-shield" }
+image.workspace = true
+url.workspace = true
+winit = "0.30"
+softbuffer = "0.4"
+raw-window-handle = "0.6"

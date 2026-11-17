@@ -1,0 +1,141 @@
+# B-Web roadmap
+
+B-Web is a browser engine implemented from scratch in Rust. This document tracks
+what the tree actually contains and what is still being built. It is a
+development plan, not a claim of full web-platform compatibility.
+
+## Current stage
+
+`Interactive` — pages are fetched, styled, laid out, painted and navigated in a
+native window. The engine exposes its own DOM, CSS engine, JavaScript runtime,
+layout tree, text and image rasterization, network transport and privacy filtering.
+
+## Delivered
+
+### Networking and privacy
+- Dedicated `bweb-net` HTTP/HTTPS client with Rustls and a private reqwest client.
+- Mandatory Shield admission gate for every request, including redirects.
+- `Sec-GPC: 1` and `DNT: 1` on all outgoing requests.
+- EasyList/EasyPrivacy downloader with HTTPS-only redirects, finite timeouts and
+  bounded, atomic cache updates.
+- CSS `url()` backgrounds discovered, fetched through Shield and painted, with
+  size (`cover`/`contain`/lengths), position and repeat tiling.
+
+### HTML and DOM
+- Arena-backed DOM with stable `NodeId`s.
+- Parser for elements, text, comments, attributes and void elements.
+- HTML5 insertion modes with implied `html`/`head`/`body`, head-element routing
+  and merged attributes; doctype skipping and a bounded open-element stack.
+- Full WHATWG named character reference table with longest-match decoding,
+  numeric reference C1 remapping and strict attribute-value rules.
+- Raw-text/RCDATA scanning; active formatting element reconstruction and a
+  simplified adoption agency across misnested special blocks.
+- Inert `<template>` content subtree, excluded from styling, layout, scripts
+  and resource loading.
+- Implied end tags for paragraphs, list items, table rows/cells and similar
+  elements; foster parenting of misplaced table content.
+- Hyperlink lookup for hit-testing and navigation, `<base href>` resolution for
+  subresources and clicked links.
+- Form controls rendered with a UA stylesheet and inline-block sizing: input
+  values/placeholder/size, password masking, button labels, textarea content.
+
+### CSS
+- Lexer, rule/declaration parser and selector engine.
+- Combinators (descendant, child, adjacent/general sibling), attribute operators,
+  structural and negation pseudo-classes.
+- `::before`/`::after` generated content with computed styles.
+- Cascade with specificity, `!important`, source order, inline styles,
+  user-agent/author origins and `@layer` ordering (reversed for `!important`).
+- Custom properties with `var()` substitution; shorthand expansion.
+- `background` shorthand expanded into all longhands with comma-separated layer
+  support; named, hex, `rgb()`/`rgba()` and `hsl()`/`hsla()` color values.
+- `@media` feature queries evaluated against the active viewport.
+
+### JavaScript
+- Lexer, parser and tree-walking evaluator implemented in Rust.
+- Variables, functions/closures/arrows, template literals, control flow,
+  arrays, objects and operators.
+- Built-ins: `Math`, number parsing helpers, string methods, array methods.
+- Host bridge for `document.title`, `getElementById`, `querySelector(All)`,
+  `createElement`/`appendChild`, `setAttribute`/`getAttribute`, `classList`,
+  `textContent`, inline styles and `document.write`; scripts run on load and can
+  change the rendered page.
+- `addEventListener('click', …)` with bubbling dispatch on real clicks and
+  `event.preventDefault()` to cancel navigation.
+
+### Layout and rendering
+- Box tree with margins (including auto), padding, borders, `max-width`,
+  em/rem/vw/vh sizing, `calc()` length expressions, inline formatting,
+  `text-align`, `text-indent` and letter/word spacing.
+- Font-metric-based text layout with Swash shaping (kerning and ligatures),
+  using the same advances as glyph rasterization.
+- Images sized from attributes or intrinsic dimensions and painted inline.
+- Deterministic display list, software rasterizer and RGBA framebuffer.
+- Linear-gradient backgrounds rasterized from CSS angles/`to <side>` directions
+  and percentage/length color stops.
+- Composable `transform` translate/scale/rotate/skew with inverse pixel mapping
+  and explicit `transform-origin`; subtree `opacity`, `text-decoration` lines,
+  rounded-corner clipping from `border-radius`, outer/inset `box-shadow` and
+  inherited `text-shadow` layers, and composable color filters.
+- Multi-line flexbox: direction, wrapping, grow/shrink, justification, alignment,
+  gaps and the `flex`/`gap` shorthands.
+- `position: relative/absolute/fixed/sticky` with offsets, positioned containing
+  blocks and scroll-pinned sticky boxes; out-of-flow boxes stay outside flow.
+- CSS grid: `fr`/length/`auto`/`minmax()`/`repeat()` tracks, gaps, implicit
+  rows, auto-placement, explicit `grid-column`/`grid-row` line/span placement
+  and named `grid-template-areas`/`grid-area`.
+- Floats with inline wrapping, `clear` and per-formatting-context containment;
+  multiple floats per line.
+
+### Browser shell
+- `b-web open`, `update-filters`, `--render-ppm`, `--dump-layout`, `--window`.
+- Address bar, clickable links, history (`Alt+←`/`Alt+→`) and vertical scroll.
+- Navigation on a background thread with stale-result rejection.
+
+### Testing and robustness
+- End-to-end integration tests covering HTML → CSS → layout → text → paint →
+  rasterize, plus tests that drive the real navigation path through a local HTTP
+  server (document fetch, script extraction, subresource fetching and decoding).
+- Compatibility suite for representative real-web patterns: flex cards and
+  navbars, `fr` grid galleries, selector specificity, shorthands, custom
+  properties, `@layer`/`@media` cascade, and common DOM/JS list, iteration and
+  event-handler patterns.
+- Bounded text-shadow blur (radius clamped to 64px, restricted to the glyph
+  bounding box) composited source-over in premultiplied alpha, with clip
+  propagation and linear sliding-window box blur.
+- Image decode limits applied before allocation, a global per-page pixel budget,
+  shared decoded bitmaps and support for panoramic images within that budget.
+
+### Performance
+- `cargo run --release -p bweb-renderer --example shadow_bench [blur] [iterations]`
+  measures blurred text-shadow rasterization. The blur uses a sliding-window box
+  filter (O(pixels) per pass rather than O(pixels × radius)) and reuses three
+  scratch buffers across passes. On a reference 800×600 frame with 40 shadowed
+  text runs this cut frame time from ~164 ms to ~49 ms at blur 8, and from
+  ~622 ms to ~100 ms at blur 16.
+
+## In progress
+
+- Remaining HTML5 tree construction: the complete adoption-agency inner loop
+  and the full tokenizer state tables.
+- Additional CSS layout: subgrid, orthogonal writing modes and intrinsic sizing
+  edge cases.
+- CSS property coverage: background-origin/clip, blur/advanced filters,
+  perspective transforms and remaining shorthand variants.
+
+## Planned
+
+- Broader JavaScript language and DOM API coverage inside `bweb-js`.
+- Bidirectional text and full OpenType feature configuration.
+- GPU-accelerated painting behind the renderer port.
+- Horizontal scrolling, selection, focus/keyboard interaction for form controls
+  and richer browser chrome.
+- Growing the compatibility suite into standards conformance reporting.
+
+## Design constraints
+
+- Every web-facing component is implemented in this workspace.
+- No third-party browser engine or JavaScript runtime is embedded.
+- Every request passes through the privacy-filtered transport.
+- Response sizes and network timeouts remain bounded.
+- Crates stay small, independently testable and documented.

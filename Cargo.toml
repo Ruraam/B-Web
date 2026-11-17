@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/bweb-core",
+    "crates/bweb-html",
+    "crates/bweb-css",
+    "crates/bweb-js",
+    "crates/bweb-net",
+    "crates/bweb-shield",
+    "crates/bweb-filterlists",
+    "crates/bweb-renderer",
+    "crates/bweb-layout",
+    "crates/bweb-text",
+    "crates/bweb-shell",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+
+[workspace.dependencies]
+adblock = "0.13.5"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+url = "2.5"
