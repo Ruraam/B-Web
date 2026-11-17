@@ -119,6 +119,15 @@ fn open_document(
     .expect("built-in user-agent stylesheet");
     stylesheets.push(user_agent);
     let mut stylesheet_count = 0usize;
+    for source in loaded.document.inline_stylesheets() {
+        match Stylesheet::parse(&source) {
+            Ok(sheet) => {
+                stylesheets.push(sheet);
+                stylesheet_count += 1;
+            }
+            Err(error) => eprintln!("  invalid inline stylesheet: {error}"),
+        }
+    }
     for resource in loaded
         .resources
         .iter()
