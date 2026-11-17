@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use crate::{Color, Edges, Rect, TextRun};
+use crate::{BackgroundImage, Color, Edges, Image, Rect, TextRun};
 
 /// Paint properties already resolved by the producer.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -29,6 +29,14 @@ pub struct PaintNode {
     pub style: PaintStyle,
     /// Prepared text run, if this node paints text.
     pub text: Option<Arc<TextRun>>,
+    /// Decoded image, if this node paints a replaced element.
+    pub image: Option<Arc<Image>>,
+    /// Background image, if this node paints a CSS gradient or image layer.
+    pub background_image: Option<Arc<BackgroundImage>>,
+    /// Decoded bitmap for a `url()` background, matched by resolved URL.
+    pub background_image_bitmap: Option<Arc<Image>>,
+    /// Scroll-dependent sticky shift: `(active, threshold, dx, dy)`.
+    pub sticky: Option<(bool, f32, f32, f32)>,
 }
 
 /// Adapter contract between a layout engine and the renderer.

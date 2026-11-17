@@ -5,7 +5,10 @@ use std::{collections::HashMap, sync::Arc};
 use crate::{LayoutBox, LayoutTree, Rect};
 use bweb_css::ComputedStyleMap;
 use bweb_html::NodeId;
-use bweb_renderer::{Color, PaintLayout, PaintNode, PaintStyle, Rect as PaintRect, TextRun};
+use bweb_renderer::{
+    BackgroundImage, Image, PaintLayout, PaintNode, PaintStyle, Rect as PaintRect, TextRun,
+    parse_background_image, parse_color,
+};
 
 /// Exposes a layout tree as an immutable paint-order visitor.
 pub struct PaintAdapter<'a> {
@@ -13,13 +16,15 @@ pub struct PaintAdapter<'a> {
     pub styles: &'a ComputedStyleMap,
     pub viewport: Rect,
     text_runs: Option<&'a HashMap<NodeId, Arc<TextRun>>>,
+    images: Option<&'a HashMap<NodeId, Arc<Image>>>,
+    background_images: Option<&'a HashMap<String, Arc<Image>>>,
 }
 
 impl<'a> PaintAdapter<'a> {
     /// Creates an adapter without prepared text runs.
     #[must_use]
     pub fn new(tree: &'a LayoutTree, styles: &'a ComputedStyleMap, viewport: Rect) -> Self {
-        Self { tree, styles, viewport, text_runs: None }
+        Self { tree, styles, viewport, text_runs: None, images: None, background_images: None }
     }
 
     /// Adds prepared runs keyed by the DOM text node that produced them.
@@ -30,6 +35,20 @@ impl<'a> PaintAdapter<'a> {
     #[must_use]
     pub fn with_text_runs(mut self, text_runs: &'a HashMap<NodeId, Arc<TextRun>>) -> Self {
         self.text_runs = Some(text_runs);
+        self
+    }
+
+    /// Adds decoded images keyed by the DOM element that references them.
+    #[must_use]
+    pub fn with_images(mut self, images: &'a HashMap<NodeId, Arc<Image>>) -> Self {
+        self.images = Some(images);
+        self
+    }
+
+    /// Adds decoded CSS background images keyed by their resolved URL.
+    #[must_use]
+    pub fn with_background_images(mut self, images: &'a HashMap<String, Arc<Image>>) -> Self {
+        self.background_images = Some(images);
         self
     }
 }
@@ -44,6 +63,8 @@ impl PaintLayout for PaintAdapter<'_> {
             layout: &LayoutBox,
             styles: &ComputedStyleMap,
             text_runs: Option<&HashMap<NodeId, Arc<TextRun>>>,
+            images: Option<&HashMap<NodeId, Arc<Image>>>,
+            background_images: Option<&HashMap<String, Arc<Image>>>,
             depth: u32,
             visitor: &mut dyn FnMut(PaintNode),
         ) {
@@ -66,74 +87,61 @@ impl PaintLayout for PaintAdapter<'_> {
                     .is_some_and(|value| value == "hidden" || value == "clip"),
             };
 
+            let background_image: Option<Arc<BackgroundImage>> = computed
+                .and_then(|style| style.get("background-image"))
+                .and_then(parse_background_image)
+                .map(Arc::new);
+            let background_image_bitmap = background_image.as_ref().and_then(|image| {
+                if let BackgroundImage::Url(url) = image.as_ref() {
+                    background_images?.get(url).cloned()
+                } else {
+                    None
+                }
+            });
+
             visitor(PaintNode {
                 depth,
                 rect: to_paint_rect(layout.rect),
                 style,
                 text: text_runs.and_then(|runs| runs.get(&layout.node).cloned()),
+                image: images.and_then(|items| items.get(&layout.node).cloned()),
+                background_image,
+                background_image_bitmap,
+                sticky: layout.sticky.active.then_some((
+                    layout.sticky.active,
+                    layout.sticky.threshold,
+                    layout.sticky.dx,
+                    layout.sticky.dy,
+                )),
             });
 
             for child in &layout.children {
-                walk(child, styles, text_runs, depth.saturating_add(1), visitor);
+                walk(
+                    child,
+                    styles,
+                    text_runs,
+                    images,
+                    background_images,
+                    depth.saturating_add(1),
+                    visitor,
+                );
             }
         }
 
-        walk(&self.tree.root, self.styles, self.text_runs, 0, visitor);
+        walk(
+            &self.tree.root,
+            self.styles,
+            self.text_runs,
+            self.images,
+            self.background_images,
+            0,
+            visitor,
+        );
     }
 }
 
 fn to_paint_rect(rect: Rect) -> PaintRect {
     PaintRect { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
-}
-
-/// Parses the small, explicit CSS color subset currently supported by painting.
-pub(crate) fn parse_color(value: &str) -> Option<Color> {
-    let value = value.trim().to_ascii_lowercase();
-    match value.as_str() {
-        "transparent" => return None,
-        "black" => return Some(Color::rgba(0, 0, 0, 255)),
-        "white" => return Some(Color::rgba(255, 255, 255, 255)),
-        "red" => return Some(Color::rgba(255, 0, 0, 255)),
-        "green" => return Some(Color::rgba(0, 128, 0, 255)),
-        "blue" => return Some(Color::rgba(0, 0, 255, 255)),
-        "yellow" => return Some(Color::rgba(255, 255, 0, 255)),
-        "gray" | "grey" => return Some(Color::rgba(128, 128, 128, 255)),
-        _ => {}
-    }
-
-    let hex = value.strip_prefix('#')?;
-    let expand = |digit: u8| digit * 17;
-    let channels = match hex.len() {
-        3 => {
-            let values: Vec<u8> = hex
-                .bytes()
-                .map(|byte| (byte as char).to_digit(16).map(|v| v as u8))
-                .collect::<Option<_>>()?;
-            [expand(values[0]), expand(values[1]), expand(values[2]), 255]
-        }
-        4 => {
-            let values: Vec<u8> = hex
-                .bytes()
-                .map(|byte| (byte as char).to_digit(16).map(|v| v as u8))
-                .collect::<Option<_>>()?;
-            [expand(values[0]), expand(values[1]), expand(values[2]), expand(values[3])]
-        }
-        6 | 8 => {
-            let mut values = [0_u8; 4];
-            let mut bytes = hex.bytes();
-            for channel in values.iter_mut().take(if hex.len() == 8 { 4 } else { 3 }) {
-                let high = (bytes.next()? as char).to_digit(16)? as u8;
-                let low = (bytes.next()? as char).to_digit(16)? as u8;
-                *channel = high * 16 + low;
-            }
-            if hex.len() == 6 {
-                values[3] = 255;
-            }
-            values
-        }
-        _ => return None,
-    };
-    Some(Color::rgba(channels[0], channels[1], channels[2], channels[3]))
 }
 
 #[cfg(test)]
@@ -142,7 +150,10 @@ mod tests {
     use crate::{LayoutTree, Rect};
     use bweb_css::{StyleEngine, Stylesheet};
     use bweb_html::{HtmlDocument, NodeId, NodeKind};
-    use bweb_renderer::{Color, PaintLayout, TextRun};
+    use bweb_renderer::{
+        BackgroundImage, Color, Framebuffer, Image, PaintItem, PaintLayout, Painter, Rasterizer,
+        TextRun,
+    };
     use bweb_text::Coverage;
     use std::{collections::HashMap, sync::Arc};
 
@@ -153,6 +164,103 @@ mod tests {
         assert_eq!(parse_color("#11223380"), Some(Color::rgba(17, 34, 51, 128)));
         assert_eq!(parse_color("transparent"), None);
         assert_eq!(parse_color("not-a-color"), None);
+    }
+
+    fn gradient_document() -> (HtmlDocument, Vec<Stylesheet>) {
+        let document = HtmlDocument::parse(
+            "<html><head><style>\
+             div { display:block; width:100px; height:40px; background: linear-gradient(to right, red, blue); }\
+             </style></head><body><div>x</div></body></html>",
+        );
+        let sheets: Vec<_> = document
+            .inline_stylesheets()
+            .iter()
+            .map(|source| Stylesheet::parse(source).expect("inline stylesheet"))
+            .collect();
+        (document, sheets)
+    }
+
+    #[test]
+    fn background_gradient_reaches_the_paint_adapter() {
+        let (document, sheets) = gradient_document();
+        let styles = StyleEngine::new().compute(&document, &sheets);
+        let tree = LayoutTree::build(&document, &styles, 320.0);
+        let adapter =
+            PaintAdapter::new(&tree, &styles, Rect { x: 0.0, y: 0.0, width: 320.0, height: 200.0 });
+
+        let mut gradients = Vec::new();
+        adapter.visit(&mut |node| {
+            if let Some(image) = node.background_image {
+                gradients.push(image);
+            }
+        });
+
+        assert_eq!(gradients.len(), 1);
+        assert!(matches!(
+            gradients[0].as_ref(),
+            BackgroundImage::Linear(gradient) if gradient.angle == 90.0 && gradient.stops.len() == 2
+        ));
+    }
+
+    #[test]
+    fn url_background_reaches_the_display_list_and_framebuffer() {
+        let document = HtmlDocument::parse(
+            "<html><head><style>div { display:block; width:40px; height:20px; \
+             background-image:url('https://example.test/bg.png') }</style></head><body><div>x</div></body></html>",
+        );
+        let sheets: Vec<_> = document
+            .inline_stylesheets()
+            .iter()
+            .map(|source| Stylesheet::parse(source).expect("inline stylesheet"))
+            .collect();
+        let mut styles = StyleEngine::new().compute(&document, &sheets);
+        styles.resolve_urls("https://example.test/page/index.html");
+        let tree = LayoutTree::build(&document, &styles, 320.0);
+        let background = Arc::new(Image::new(2, 2, [255, 0, 0, 255].repeat(4)).expect("image"));
+        let backgrounds =
+            HashMap::from([("https://example.test/bg.png".to_owned(), Arc::clone(&background))]);
+        let adapter =
+            PaintAdapter::new(&tree, &styles, Rect { x: 0.0, y: 0.0, width: 320.0, height: 200.0 })
+                .with_background_images(&backgrounds);
+        let list = Painter::new(&adapter, 1.0).expect("valid scale").paint();
+        assert!(list.items.iter().any(|item| matches!(item, PaintItem::Image { .. })));
+
+        let mut framebuffer = Framebuffer::new(320, 200).expect("framebuffer");
+        Rasterizer.rasterize(&list, &mut framebuffer);
+        assert_eq!(framebuffer.pixels()[0..4], [255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn rasterizes_a_css_gradient_background_into_pixels() {
+        let (document, sheets) = gradient_document();
+        let styles = StyleEngine::new().compute(&document, &sheets);
+        let tree = LayoutTree::build(&document, &styles, 320.0);
+        let adapter =
+            PaintAdapter::new(&tree, &styles, Rect { x: 0.0, y: 0.0, width: 320.0, height: 200.0 });
+        let list = Painter::new(&adapter, 1.0).expect("valid scale").paint();
+        let rect = list
+            .items
+            .iter()
+            .find_map(|item| match item {
+                PaintItem::LinearGradient { rect, .. } => Some(*rect),
+                _ => None,
+            })
+            .expect("gradient paint command");
+
+        let mut framebuffer = Framebuffer::new(320, 200).expect("framebuffer");
+        framebuffer.clear([255, 255, 255, 255]);
+        Rasterizer.rasterize(&list, &mut framebuffer);
+        let pixel = |x: u32, y: u32| {
+            let offset = (y as usize * 320 + x as usize) * 4;
+            framebuffer.pixels()[offset..offset + 4].to_vec()
+        };
+
+        let y = (rect.y + rect.height / 2.0) as u32;
+        let left = pixel((rect.x + 1.0) as u32, y);
+        let right = pixel((rect.x + rect.width - 2.0) as u32, y);
+        assert!(left[0] > left[2], "left side should be red-dominant: {left:?}");
+        assert!(right[2] > right[0], "right side should be blue-dominant: {right:?}");
+        assert_eq!(pixel(310, 190), vec![255, 255, 255, 255]);
     }
 
     #[test]

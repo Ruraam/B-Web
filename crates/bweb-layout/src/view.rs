@@ -106,6 +106,20 @@ impl<B: ViewBackend> View<B> {
         Ok(if needs_reflow { ResizeOutcome::Reflowed } else { ResizeOutcome::Repainted })
     }
 
+    /// Repaints the current viewport without changing its configuration.
+    ///
+    /// Returns whether a repaint was performed. This is used for content-only
+    /// changes such as scrolling, which must not invalidate layout or text.
+    pub fn repaint(&mut self) -> Result<bool, B::Error> {
+        match self.viewport {
+            Some(viewport) => {
+                self.backend.repaint(viewport)?;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
     /// Changes only the viewport height and repaints without running layout.
     /// Returns None if the view is not initialized or height is zero.
     pub fn set_viewport_height(&mut self, height: u32) -> Result<Option<ResizeOutcome>, B::Error> {
@@ -208,6 +222,17 @@ mod tests {
         assert_eq!(view.backend().reflow_calls, 1);
         assert_eq!(view.backend().repaint_calls, 2);
         assert_eq!(view.backend().last_paint, Some(viewport(800, 720, 1.0)));
+    }
+
+    #[test]
+    fn explicit_repaint_reuses_geometry_without_reflow() {
+        let mut view = View::new(MockLayout::default());
+        assert_eq!(view.repaint(), Ok(false));
+        view.resize(viewport(800, 600, 1.0)).expect("initial render");
+
+        assert_eq!(view.repaint(), Ok(true));
+        assert_eq!(view.backend().reflow_calls, 1);
+        assert_eq!(view.backend().repaint_calls, 2);
     }
 
     #[test]

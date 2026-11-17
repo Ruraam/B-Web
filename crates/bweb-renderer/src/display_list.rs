@@ -5,8 +5,71 @@
 //! adding commands to this list. Text and image commands will be introduced
 //! by later rendering milestones.
 
+use std::{fmt, sync::Arc};
+
 use crate::{Edges, Rect};
 use bweb_text::Coverage;
+
+/// Error returned when decoded image dimensions and pixel data disagree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageError {
+    InvalidDimensions,
+    PixelBufferSizeMismatch,
+}
+
+impl fmt::Display for ImageError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidDimensions => formatter.write_str("image dimensions must be non-zero"),
+            Self::PixelBufferSizeMismatch => {
+                formatter.write_str("image pixel buffer does not match its dimensions")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ImageError {}
+
+/// An owned RGBA8 bitmap ready for painting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Image {
+    width: u32,
+    height: u32,
+    pixels: Vec<u8>,
+}
+
+impl Image {
+    /// Wraps decoded RGBA8 pixels after validating their size.
+    pub fn new(width: u32, height: u32, pixels: Vec<u8>) -> Result<Self, ImageError> {
+        if width == 0 || height == 0 {
+            return Err(ImageError::InvalidDimensions);
+        }
+        let expected = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|pixels| pixels.checked_mul(4))
+            .ok_or(ImageError::PixelBufferSizeMismatch)?;
+        if pixels.len() != expected {
+            return Err(ImageError::PixelBufferSizeMismatch);
+        }
+        Ok(Self { width, height, pixels })
+    }
+
+    #[must_use]
+    pub const fn width(&self) -> u32 {
+        self.width
+    }
+
+    #[must_use]
+    pub const fn height(&self) -> u32 {
+        self.height
+    }
+
+    /// Tightly packed RGBA8 rows.
+    #[must_use]
+    pub fn pixels(&self) -> &[u8] {
+        &self.pixels
+    }
+}
 
 /// An sRGB color with straight (non-premultiplied) alpha.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
@@ -61,12 +124,21 @@ pub enum PaintItem {
     /// The current first rasterizer milestone may ignore `radius`; retaining
     /// it here keeps the display-list representation ready for rounded corners.
     BorderRect { rect: Rect, widths: Edges, radius: f32, color: Color },
+    /// Paints a CSS linear gradient into a physical-pixel rectangle.
+    LinearGradient { rect: Rect, gradient: Arc<crate::LinearGradient> },
     /// Blits pre-rasterized glyph masks at final physical-pixel positions.
     ///
     /// Glyph coordinates are snapped to the nearest pixel by the rasterizer.
     /// TODO(renderer-4): add quarter-pixel subpixel positioning and a matching
     /// glyph coverage cache without changing `PositionedGlyph`.
     Text { glyphs: Vec<PositionedGlyph>, color: Color },
+    /// Scales and blits a decoded RGBA image into a physical-pixel rectangle.
+    Image { rect: Rect, image: Arc<Image> },
+    /// Marks the start of a sticky subtree. The shell caps scroll translation
+    /// at `threshold` (in CSS pixels) and adds `dx`/`dy` once scrolling passes it.
+    PushSticky { threshold: f32, dx: f32, dy: f32 },
+    /// Ends a sticky subtree opened by `PushSticky`.
+    PopSticky,
     /// Intersects subsequent drawing with this physical-pixel rectangle.
     PushClip { rect: Rect },
     /// Restores the previous clipping rectangle.

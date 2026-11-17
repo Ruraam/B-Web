@@ -2,14 +2,23 @@
 //!
 //! This crate deliberately has no dependency on the DOM, CSS, or layout engine.
 
+mod color;
 mod display_list;
 mod framebuffer;
+mod gradient;
 mod paint_layout;
 mod painter;
 mod rasterizer;
 
-pub use display_list::{Color, DisplayList, PaintItem, PositionedGlyph, TextRun};
+pub use color::parse_color;
+pub use display_list::{
+    Color, DisplayList, Image, ImageError, PaintItem, PositionedGlyph, TextRun,
+};
 pub use framebuffer::{Framebuffer, FramebufferError};
+pub use gradient::{
+    BackgroundImage, ColorStop, GradientStopPosition, LinearGradient, parse_background_image,
+    parse_linear_gradient,
+};
 pub use paint_layout::{PaintLayout, PaintNode, PaintStyle};
 pub use painter::{Painter, PainterError};
 pub use rasterizer::Rasterizer;

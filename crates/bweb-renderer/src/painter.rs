@@ -1,5 +1,7 @@
 //! Converts layout-port data into a deterministic physical-pixel DisplayList.
 
+use std::sync::Arc;
+
 use crate::display_list::DisplayList;
 use crate::paint_layout::{PaintLayout, PaintNode};
 use crate::{Edges, PaintItem, Rect};
@@ -48,16 +50,45 @@ impl<'a, L: PaintLayout> Painter<'a, L> {
         // Each entry is the depth of a clip pushed for that node. A clip remains
         // active across all descendants and is popped before the next sibling.
         let mut clip_depths: Vec<u32> = Vec::new();
+        let mut sticky_depths: Vec<u32> = Vec::new();
 
         self.layout.visit(&mut |node: PaintNode| {
             while clip_depths.last().is_some_and(|depth| *depth >= node.depth) {
                 clip_depths.pop();
                 list.push(PaintItem::PopClip);
             }
+            while sticky_depths.last().is_some_and(|depth| *depth >= node.depth) {
+                sticky_depths.pop();
+                list.push(PaintItem::PopSticky);
+            }
+            if let Some((active, threshold, dx, dy)) = node.sticky {
+                if active {
+                    list.push(PaintItem::PushSticky {
+                        threshold: threshold * self.scale_factor,
+                        dx: dx * self.scale_factor,
+                        dy: dy * self.scale_factor,
+                    });
+                    sticky_depths.push(node.depth);
+                }
+            }
 
             let rect = scale_rect(node.rect, self.scale_factor);
             if let Some(color) = node.style.background {
                 list.push(PaintItem::FillRect { rect, color });
+            }
+            // Background images paint above the background color but below
+            // borders, inline content and descendants.
+            if let Some(image) = node.background_image {
+                if let crate::BackgroundImage::Linear(gradient) = image.as_ref() {
+                    list.push(PaintItem::LinearGradient {
+                        rect,
+                        gradient: Arc::new(gradient.clone()),
+                    });
+                }
+            }
+            if let Some(image) = node.background_image_bitmap {
+                // CSS background images stretch to fill the padding box for now.
+                list.push(PaintItem::Image { rect, image });
             }
 
             let widths = scale_edges(node.style.border_widths, self.scale_factor);
@@ -67,8 +98,11 @@ impl<'a, L: PaintLayout> Painter<'a, L> {
                 }
             }
 
-            // Text runs are already positioned in physical pixels by layout.
-            // Keep them after this node's border and before its descendants.
+            // Images and text are already positioned in physical pixels by
+            // layout. Keep them after this node's border and before descendants.
+            if let Some(image) = node.image {
+                list.push(PaintItem::Image { rect, image });
+            }
             if let Some(run) = node.text {
                 list.push(PaintItem::Text { glyphs: run.glyphs.clone(), color: run.color });
             }
@@ -81,6 +115,9 @@ impl<'a, L: PaintLayout> Painter<'a, L> {
 
         while clip_depths.pop().is_some() {
             list.push(PaintItem::PopClip);
+        }
+        while sticky_depths.pop().is_some() {
+            list.push(PaintItem::PopSticky);
         }
         list.push(PaintItem::PopClip);
         list
@@ -148,7 +185,7 @@ mod tests {
     }
 
     fn text_node(depth: u32, rect: Rect, style: PaintStyle, run: TextRun) -> PaintNode {
-        PaintNode { depth, rect, style, text: Some(Arc::new(run)) }
+        PaintNode { depth, rect, style, text: Some(Arc::new(run)), ..PaintNode::default() }
     }
 
     fn simple_run() -> TextRun {

@@ -86,11 +86,8 @@ pub fn layout_text(
         } else {
             0.0
         };
-        let word_advance: f32 = word
-            .chars()
-            .filter_map(|character| font.glyph_for(character))
-            .map(|glyph| font.advance(glyph, px_size))
-            .sum();
+        let shaped = font.shape(word, px_size);
+        let word_advance: f32 = shaped.iter().map(|glyph| glyph.advance).sum();
 
         if *pen_x > origin_x && *pen_x - origin_x + space_advance + word_advance > wrap_width {
             *line_index += 1;
@@ -102,18 +99,15 @@ pub fn layout_text(
         *pending_space = false;
 
         let baseline_y = origin_y + *line_index as f32 * line_height + baseline_offset;
-        for character in word.chars() {
-            let Some(glyph) = font.glyph_for(character) else {
-                continue;
-            };
-            if let Some(coverage) = font.rasterize(glyph, px_size) {
+        for glyph in shaped {
+            if let Some(coverage) = font.rasterize(glyph.glyph, px_size) {
                 result.glyphs.push(PositionedGlyph {
-                    x: *pen_x + coverage.left as f32,
+                    x: *pen_x + glyph.x + coverage.left as f32,
                     y: baseline_y - coverage.top as f32,
                     coverage,
                 });
             }
-            *pen_x += font.advance(glyph, px_size);
+            *pen_x += glyph.advance;
         }
         result.width = result.width.max(*pen_x - origin_x);
     };
@@ -176,7 +170,9 @@ pub fn prepare_text_runs(
     let mut runs: HashMap<NodeId, TextRun> = HashMap::new();
 
     for fragment in fragments {
-        let Some(style) = styles.get(fragment.node) else { continue };
+        let Some(style) = fragment.style.as_deref().or_else(|| styles.get(fragment.node)) else {
+            continue;
+        };
         if style.get("visibility") == Some("hidden") || style.get("color") == Some("transparent") {
             continue;
         }
@@ -185,7 +181,7 @@ pub fn prepare_text_runs(
             continue;
         }
         let line_height = fragment.rect.height.max(1.0) * scale_factor;
-        let color = super::paint_adapter::parse_color(style.get("color").unwrap_or("black"))
+        let color = bweb_renderer::parse_color(style.get("color").unwrap_or("black"))
             .unwrap_or(Color::rgba(0, 0, 0, 255));
         let layout = layout_text(
             font,
@@ -244,6 +240,15 @@ mod tests {
         assert_eq!(layout.glyphs[0].y, expected_y);
         assert!((layout.width - expected_advance).abs() < 0.01);
         assert_eq!(layout.line_count, 1);
+    }
+
+    #[test]
+    fn measured_width_uses_shaped_advances() {
+        let mut font = font();
+        let shaped = font.shape("MM", 20.0);
+        let expected: f32 = shaped.iter().map(|glyph| glyph.advance).sum();
+        let layout = layout_text(&mut font, "MM", 0.0, 0.0, 200.0, 20.0, 24.0);
+        assert!((layout.width - expected).abs() < 0.01);
     }
 
     #[test]

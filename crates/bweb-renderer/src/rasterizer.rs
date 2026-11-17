@@ -1,10 +1,12 @@
 //! Deterministic CPU rasterization of the renderer display list.
 //!
-//! The first milestone handles solid axis-aligned rectangles, rectangular
-//! clipping, and square-corner borders. Coverage is evaluated at pixel centers.
-//! Rounded corners and text/image rasterization are intentionally deferred.
+//! The current scope covers solid axis-aligned rectangles, rectangular
+//! clipping, square-corner borders, glyph masks and scaled image blits.
+//! Coverage is evaluated at pixel centers. Rounded corners remain planned.
 
-use crate::{Color, DisplayList, Edges, Framebuffer, PaintItem, Rect};
+use crate::{
+    Color, DisplayList, Edges, Framebuffer, GradientStopPosition, LinearGradient, PaintItem, Rect,
+};
 
 /// CPU rasterizer for the backend-independent display list.
 #[derive(Debug, Default, Clone, Copy)]
@@ -35,9 +37,20 @@ impl Rasterizer {
                     let clip = *clips.last().expect("root clip is always present");
                     paint_border(framebuffer, *rect, *widths, clip, *color);
                 }
+                PaintItem::LinearGradient { rect, gradient } => {
+                    let clip = *clips.last().expect("root clip is always present");
+                    paint_linear_gradient(framebuffer, *rect, gradient, clip);
+                }
                 PaintItem::Text { glyphs, color } => {
                     let clip = *clips.last().expect("root clip is always present");
                     blit_glyphs(framebuffer, glyphs, clip, *color);
+                }
+                PaintItem::Image { rect, image } => {
+                    let clip = *clips.last().expect("root clip is always present");
+                    paint_image(framebuffer, image, *rect, clip);
+                }
+                PaintItem::PushSticky { .. } | PaintItem::PopSticky => {
+                    // Interpreted by the shell's scroll translation pass.
                 }
                 PaintItem::PushClip { rect } => {
                     let parent = *clips.last().expect("root clip is always present");
@@ -122,6 +135,131 @@ fn blit_glyphs(
             framebuffer.set_pixel(x as u32, y as u32, [color.red, color.green, color.blue, alpha]);
         }
     }
+}
+
+/// Nearest-neighbor image blit with source-over alpha and clipping.
+fn paint_image(framebuffer: &mut Framebuffer, image: &crate::Image, rect: Rect, clip: Rect) {
+    let Some(area) = intersect(rect, clip) else {
+        return;
+    };
+    let source_width = image.width();
+    let source_height = image.height();
+    let pixels = image.pixels();
+    for_each_pixel(framebuffer, area, |target, x, y| {
+        let source_x = (f64::from(x) + 0.5 - f64::from(rect.x)) * f64::from(source_width)
+            / f64::from(rect.width);
+        let source_y = (f64::from(y) + 0.5 - f64::from(rect.y)) * f64::from(source_height)
+            / f64::from(rect.height);
+        let source_x = (source_x as usize).min(source_width as usize - 1);
+        let source_y = (source_y as usize).min(source_height as usize - 1);
+        let offset = (source_y * source_width as usize + source_x) * 4;
+        if let Some(pixel) = pixels.get(offset..offset + 4) {
+            let rgba = [pixel[0], pixel[1], pixel[2], pixel[3]];
+            target.set_pixel(x, y, rgba);
+        }
+    });
+}
+
+/// Paints a linear gradient across a rectangle. Stop positions are resolved
+/// against the gradient line, then sampled at every pixel center.
+fn paint_linear_gradient(
+    framebuffer: &mut Framebuffer,
+    rect: Rect,
+    gradient: &LinearGradient,
+    clip: Rect,
+) {
+    let Some(area) = intersect(rect, clip) else {
+        return;
+    };
+    if gradient.stops.is_empty() {
+        return;
+    }
+
+    let (sine, cosine) = gradient.angle.to_radians().sin_cos();
+    // The gradient line crosses the center in the direction (sin, -cos).
+    let line_length = (rect.width * sine.abs() + rect.height * cosine.abs()).max(f32::EPSILON);
+    let center_x = rect.x + rect.width / 2.0;
+    let center_y = rect.y + rect.height / 2.0;
+    let positions = resolve_stop_positions(&gradient.stops, line_length);
+
+    for_each_pixel(framebuffer, area, |target, x, y| {
+        let pixel_x = x as f32 + 0.5;
+        let pixel_y = y as f32 + 0.5;
+        let projection =
+            ((pixel_x - center_x) * sine - (pixel_y - center_y) * cosine) / line_length + 0.5;
+        let color = interpolate_stops(&gradient.stops, &positions, projection);
+        target.set_pixel(x, y, color.to_rgba8());
+    });
+}
+
+/// Resolves implicit stop positions (first 0, last 1, evenly spaced between
+/// known neighbors) and clamps them to a monotonic 0..1 sequence.
+fn resolve_stop_positions(stops: &[crate::ColorStop], line_length: f32) -> Vec<f32> {
+    let mut positions: Vec<f32> = stops
+        .iter()
+        .map(|stop| match stop.position {
+            Some(GradientStopPosition::Fraction(fraction)) => fraction,
+            Some(GradientStopPosition::Length(length)) => length / line_length,
+            None => f32::NAN,
+        })
+        .collect();
+    let last = positions.len() - 1;
+    if positions[0].is_nan() {
+        positions[0] = 0.0;
+    }
+    if positions[last].is_nan() {
+        positions[last] = 1.0;
+    }
+    for index in 0..last {
+        if positions[index].is_finite() {
+            continue;
+        }
+        let previous =
+            positions[..index].iter().rposition(|position| position.is_finite()).unwrap_or(0);
+        let next = positions[index + 1..]
+            .iter()
+            .position(|position| position.is_finite())
+            .map(|offset| index + 1 + offset)
+            .unwrap_or(last);
+        let span = (next - previous) as f32;
+        let fraction = if span > 0.0 { (index - previous) as f32 / span } else { 0.0 };
+        positions[index] = positions[previous] + (positions[next] - positions[previous]) * fraction;
+    }
+    for index in 1..=last {
+        positions[index] = positions[index].max(positions[index - 1]).clamp(0.0, 1.0);
+    }
+    positions[0] = positions[0].clamp(0.0, 1.0);
+    positions
+}
+
+fn interpolate_stops(stops: &[crate::ColorStop], positions: &[f32], value: f32) -> Color {
+    let value = value.clamp(0.0, 1.0);
+    if value <= positions[0] {
+        return stops[0].color;
+    }
+    for index in 1..stops.len() {
+        if value <= positions[index] {
+            let start = positions[index - 1];
+            let span = positions[index] - start;
+            let fraction = if span <= f32::EPSILON { 1.0 } else { (value - start) / span };
+            return mix_colors(stops[index - 1].color, stops[index].color, fraction);
+        }
+    }
+    stops[stops.len() - 1].color
+}
+
+fn mix_colors(from: Color, to: Color, fraction: f32) -> Color {
+    let mix = |start: u8, end: u8| {
+        (f32::from(start) + (f32::from(end) - f32::from(start)) * fraction)
+            .round()
+            .clamp(0.0, 255.0) as u8
+    };
+    Color::rgba(
+        mix(from.red, to.red),
+        mix(from.green, to.green),
+        mix(from.blue, to.blue),
+        mix(from.alpha, to.alpha),
+    )
 }
 
 fn paint_rect(framebuffer: &mut Framebuffer, rect: Rect, clip: Rect, color: Color) {
@@ -230,7 +368,10 @@ fn finite_non_negative(value: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::Rasterizer;
-    use crate::{Color, DisplayList, Edges, Framebuffer, PaintItem, Rect};
+    use crate::{
+        Color, ColorStop, DisplayList, Edges, Framebuffer, Image, LinearGradient, PaintItem, Rect,
+    };
+    use std::sync::Arc;
 
     const RED: Color = Color::rgba(255, 0, 0, 255);
     const BLUE: Color = Color::rgba(0, 0, 255, 255);
@@ -242,6 +383,24 @@ mod tests {
 
     fn fill(list: &mut DisplayList, rect: Rect, color: Color) {
         list.push(PaintItem::FillRect { rect, color });
+    }
+
+    #[test]
+    fn scales_a_decoded_image_into_its_rect() {
+        let image = Arc::new(Image::new(1, 1, vec![255, 0, 0, 255]).expect("image"));
+        let mut list = DisplayList::default();
+        list.push(PaintItem::PushClip { rect: Rect { x: 0.0, y: 0.0, width: 4.0, height: 4.0 } });
+        list.push(PaintItem::Image {
+            rect: Rect { x: 0.0, y: 0.0, width: 2.0, height: 2.0 },
+            image,
+        });
+        list.push(PaintItem::PopClip);
+
+        let mut framebuffer = Framebuffer::new(4, 4).expect("framebuffer");
+        framebuffer.clear([255, 255, 255, 255]);
+        Rasterizer.rasterize(&list, &mut framebuffer);
+        assert_eq!(framebuffer.pixels()[0..4], [255, 0, 0, 255]);
+        assert_eq!(framebuffer.pixels()[12..16], [255, 255, 255, 255]);
     }
 
     #[test]
@@ -343,6 +502,58 @@ mod tests {
         Rasterizer.rasterize(&list, &mut framebuffer);
 
         assert_eq!(framebuffer.pixels(), &[255, 0, 0, 255, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn rasterizes_a_horizontal_gradient_across_the_box() {
+        let gradient = LinearGradient {
+            angle: 90.0,
+            stops: vec![
+                ColorStop { color: RED, position: None },
+                ColorStop { color: BLUE, position: None },
+            ],
+        };
+        let mut list = DisplayList::default();
+        list.push(PaintItem::LinearGradient {
+            rect: rect(0.0, 0.0, 4.0, 1.0),
+            gradient: Arc::new(gradient),
+        });
+        let mut framebuffer = Framebuffer::new(4, 1).expect("framebuffer");
+
+        Rasterizer.rasterize(&list, &mut framebuffer);
+
+        assert_eq!(
+            framebuffer.pixels(),
+            &[223, 0, 32, 255, 159, 0, 96, 255, 96, 0, 159, 255, 32, 0, 223, 255]
+        );
+    }
+
+    #[test]
+    fn gradient_is_clipped_and_honors_explicit_stop_positions() {
+        use crate::GradientStopPosition;
+        let gradient = LinearGradient {
+            angle: 90.0,
+            stops: vec![
+                ColorStop { color: RED, position: Some(GradientStopPosition::Fraction(0.5)) },
+                ColorStop { color: BLUE, position: Some(GradientStopPosition::Fraction(0.5)) },
+            ],
+        };
+        let mut list = DisplayList::default();
+        list.push(PaintItem::PushClip { rect: rect(1.0, 0.0, 1.0, 1.0) });
+        list.push(PaintItem::LinearGradient {
+            rect: rect(0.0, 0.0, 4.0, 1.0),
+            gradient: Arc::new(gradient),
+        });
+        list.push(PaintItem::PopClip);
+        let mut framebuffer = Framebuffer::new(4, 1).expect("framebuffer");
+
+        Rasterizer.rasterize(&list, &mut framebuffer);
+
+        // The clipped pixel at x=1.5 projects before the 50% stop, so it keeps
+        // the first stop's color; everything outside the clip stays empty.
+        assert_eq!(&framebuffer.pixels()[0..4], &[0, 0, 0, 0]);
+        assert_eq!(&framebuffer.pixels()[4..8], &[255, 0, 0, 255]);
+        assert_eq!(&framebuffer.pixels()[8..12], &[0, 0, 0, 0]);
     }
 
     #[test]
