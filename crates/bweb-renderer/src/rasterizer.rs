@@ -1,8 +1,9 @@
 //! Deterministic CPU rasterization of the renderer display list.
 //!
-//! The current scope covers solid axis-aligned rectangles, rectangular
-//! clipping, square-corner borders, glyph masks and scaled image blits.
-//! Coverage is evaluated at pixel centers. Rounded corners remain planned.
+//! Handles solid rectangles, rounded corners, borders, linear gradients,
+//! glyph masks and scaled image blits, with rectangular and rounded clipping,
+//! composable color filters, subtree opacity and 2D transforms. Coverage is
+//! evaluated at pixel centers. Subpixel glyph positioning remains planned.
 
 use crate::{
     Color, DisplayList, Edges, Framebuffer, GradientStopPosition, LinearGradient, PaintItem, Rect,

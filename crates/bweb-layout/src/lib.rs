@@ -1,8 +1,9 @@
-//! DOM-backed layout tree and first-pass CSS box-model implementation.
+//! DOM-backed layout tree and CSS box-model implementation.
 //!
-//! Layout uses logical CSS pixels. Inline formatting is intentionally a
-//! first-pass flow model; text shaping, line wrapping, floats and positioning
-//! are tracked in the roadmap.
+//! Layout uses logical CSS pixels. Text is measured with Swash shaping through
+//! `bweb-text`; the inline formatter handles wrapping, floats and line boxes.
+//! Flex, grid, positioning and `calc()` lengths are resolved here. Full
+//! intrinsic sizing and advanced layout features remain in the roadmap.
 
 mod calc;
 mod paint_adapter;

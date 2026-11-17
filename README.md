@@ -8,7 +8,7 @@ No third-party browser engine is embedded: not Chromium, WebKit, Gecko, Wry, or 
 
 | Crate | Responsibility |
 | --- | --- |
-| bweb-core | Shared engine types and version information |
+| bweb-core | Shared version and development-stage markers |
 | bweb-html | Arena-backed DOM, limited HTML parser, hyperlink lookup and guarded document resource loader |
 | bweb-css | CSS lexer/parser, selector matching, cascade and NodeId-indexed computed styles |
 | bweb-js | Rust JavaScript lexer, parser, tree-walking runtime and DOM host bridge |
@@ -92,7 +92,7 @@ The `bweb-css` milestone provides a CSS token lexer (including comments, strings
 
 `display: grid` and `inline-grid` place items into columns and implicit rows. `grid-template-columns`/`grid-template-rows` accept px, `%`, `fr`, `auto` and `minmax(min, max)` tracks with `repeat()` expansion; `fr` tracks absorb the remaining space after fixed tracks and gaps. Implicit rows are sized from their tallest item, and out-of-flow children are positioned as in other containers. `grid-column`/`grid-row` support explicit line numbers and `span` (start/end and start/span forms); explicitly placed items are assigned first, then remaining items are auto-placed into free cells. `grid-template-areas` with quoted row strings and `grid-area` name references place items into named rectangles. Subgrid is not implemented.
 
-`flex-wrap` splits items across lines with per-line justification and `align-content`; `grid-template-areas`/`grid-area` place items into named rectangles; `position: sticky` stays pinned after scrolling. `display: flex` and `inline-flex` lay out children on a main axis: `flex-direction` (row/column and their reverse forms), `flex-wrap`, `justify-content`, `align-items`/`align-self`, `align-content`, `gap`, and the `flex` shorthand (`flex-grow`, `flex-shrink`, `flex-basis`) are supported. Items are measured, split into lines, grow/shrink and justification are resolved per line, then each item is re-laid out at its final size. Intrinsic sizing edge cases remain future work.
+`display: flex` and `inline-flex` lay out children on a main axis: `flex-direction` (row/column and their reverse forms), `flex-wrap`, `justify-content`, `align-items`/`align-self`, `align-content`, `gap`, and the `flex` shorthand (`flex-grow`, `flex-shrink`, `flex-basis`) are supported. Items are measured, split into lines, grow/shrink and justification are resolved per line, then each item is re-laid out at its final size. Intrinsic sizing edge cases remain future work.
 
 `bweb-renderer` turns that geometry into a deterministic physical-pixel display list (solid fills, linear gradients, borders, text, images, clipping), rasterizes it into an RGBA framebuffer, and `bweb-shell` copies the frame into a winit + softbuffer surface. Layout coordinates are CSS pixels; painting applies the device scale factor. `transform: translate()/translateX()/translateY()/scale()/scaleX()/scaleY()` composes through descendants and is applied by the rasterizer to rectangles, glyphs and clips; percentages in `translate()` resolve against the box. Rotations and perspective are not supported. `opacity` multiplies the alpha of a node's whole subtree in the rasterizer. `text-decoration: underline`/`line-through` draws a line from the prepared glyph bounds. `border-radius` (px or `%`, including `50%` circles) clips the background, border and descendants to rounded corners with pixel-center coverage. `filter: brightness()/contrast()/grayscale()/invert()` composes across subtrees and transforms emitted colors; `blur()` is not supported. A `linear-gradient()` background is sampled at pixel centers along its gradient line: angles and `to <side>` directions are supported, missing stop positions are spaced evenly, and percentage or absolute-length stops are resolved against the box.
 
@@ -108,7 +108,7 @@ Navigations run on a background thread and are delivered to the event loop as a 
 
 ## Current status
 
-B-Web currently implements a documented subset of the web platform and is developed milestone by milestone. The main areas still missing are remaining HTML5 tree construction (full tokenizer states and adoption agency), the complete CSS cascade and layout model, background-origin/clip, additional image formats, GPU rendering, horizontal scrolling, and richer browser chrome. See [ROADMAP.md](ROADMAP.md) for the plan and current status. No third-party browser engine is embedded.
+B-Web currently implements a documented subset of the web platform and is developed milestone by milestone. The main areas still missing are remaining HTML5 tree construction (full tokenizer states and adoption-agency inner loop), advanced CSS features (background-origin/clip, advanced filters, rotate/skew, subgrid, user stylesheets, animations), additional image formats, GPU rendering, horizontal scrolling, and richer browser chrome. See [ROADMAP.md](ROADMAP.md) for the plan and current status. No third-party browser engine is embedded.
 
 ## Design principles
 

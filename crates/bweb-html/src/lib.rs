@@ -1,9 +1,10 @@
 //! HTML document, arena-backed DOM, and policy-gated document resource loading.
 //!
-//! The parser implements a documented subset of HTML tree construction,
-//! including common omitted end tags and foster parenting. Full HTML5 recovery
-//! and scripting semantics are tracked in the roadmap. All network access is
-//! delegated to bweb-net's HttpTransport.
+//! The parser implements a documented subset of HTML5 tree construction:
+//! insertion modes, implied elements, entity decoding, raw-text/RCDATA scanning,
+//! formatting-element reconstruction, foster parenting and inert template
+//! content. The complete tokenizer and adoption-agency inner loop remain in the
+//! roadmap. All network access is delegated to bweb-net's HttpTransport.
 
 mod entities;
 

@@ -72,10 +72,10 @@ layout tree, text and image rasterization, network transport and privacy filteri
 - Linear-gradient backgrounds rasterized from CSS angles/`to <side>` directions
   and percentage/length color stops.
 - Composable `transform` translate/scale with rasterizer application to rects,
-  glyphs and clips; subtree `opacity`, `text-decoration` lines and rounded-corner
+  glyphs and clips; subtree `opacity`, `text-decoration` lines, rounded-corner
   clipping from `border-radius` and composable color filters.
-- Single-line flexbox: direction, grow/shrink, justification, alignment, gaps
-  and the `flex`/`gap` shorthands.
+- Multi-line flexbox: direction, wrapping, grow/shrink, justification, alignment,
+  gaps and the `flex`/`gap` shorthands.
 - `position: relative/absolute/fixed` with offsets and positioned containing
   blocks; out-of-flow boxes stay outside normal flow.
 - CSS grid: `fr`/length/`auto`/`minmax()`/`repeat()` tracks, gaps, implicit
@@ -93,8 +93,8 @@ layout tree, text and image rasterization, network transport and privacy filteri
 
 - Remaining HTML5 tree construction: the complete adoption-agency inner loop
   and the full tokenizer state tables.
-- Additional CSS layout: `minmax()` grid tracks, subgrid and orthogonal writing
-  modes.
+- Additional CSS layout: subgrid, orthogonal writing modes and intrinsic sizing
+  edge cases.
 - CSS property coverage: background-origin/clip, blur/advanced filters,
   rotate/skew/perspective transforms and remaining shorthand variants.
 

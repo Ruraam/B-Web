@@ -128,10 +128,7 @@ pub struct TextRun {
 pub enum PaintItem {
     /// Paints a solid rectangle.
     FillRect { rect: Rect, color: Color },
-    /// Paints a border with independently sized sides.
-    ///
-    /// The current first rasterizer milestone may ignore `radius`; retaining
-    /// it here keeps the display-list representation ready for rounded corners.
+    /// Paints a border with independently sized sides and a corner radius.
     BorderRect { rect: Rect, widths: Edges, radius: f32, color: Color },
     /// Paints a CSS linear gradient into a physical-pixel rectangle.
     LinearGradient { rect: Rect, gradient: Arc<crate::LinearGradient> },
