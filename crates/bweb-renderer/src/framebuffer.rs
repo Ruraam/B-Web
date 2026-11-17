@@ -7,7 +7,7 @@
 //! TODO: linearize sRGB before blending when colorimetrically correct gradients
 //! and translucent transitions become a renderer requirement.
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Framebuffer {
     width: u32,
     height: u32,
@@ -49,6 +49,17 @@ impl Framebuffer {
     #[must_use]
     pub const fn stride(&self) -> usize {
         self.stride
+    }
+
+    /// Reads one pixel as straight RGBA8, or a transparent pixel out of bounds.
+    #[must_use]
+    pub fn pixel(&self, x: u32, y: u32) -> [u8; 4] {
+        if x >= self.width || y >= self.height {
+            return [0; 4];
+        }
+        let offset = y as usize * self.stride + x as usize * 4;
+        let bytes = &self.pixels[offset..offset + 4];
+        [bytes[0], bytes[1], bytes[2], bytes[3]]
     }
 
     /// Straight-alpha RGBA8 bytes, ready for an external buffer wrapper.

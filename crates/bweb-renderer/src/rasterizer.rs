@@ -39,6 +39,53 @@ fn mapped_rect(rect: Rect, transform: Transform) -> (Rect, Option<Mapping>) {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Rasterizer;
 
+/// Describes an inverse mapping from destination (screen) pixels to a rectangle
+/// in local space. When present, only pixels whose pre-image lies inside
+/// `local_rect` are painted, and the callback receives local coordinates.
+#[derive(Clone, Copy)]
+struct Mapping {
+    inverse: Transform,
+    local_rect: Rect,
+}
+
+/// Mutable state threaded through the command loop.
+struct RasterState {
+    clips: Vec<Rect>,
+    clip_radii: Vec<f32>,
+    clip_mappings: Vec<Option<Mapping>>,
+    transforms: Vec<Transform>,
+    opacities: Vec<f32>,
+    filters: Vec<crate::ColorFilter>,
+}
+
+/// Composes a temporary group framebuffer onto its parent with a uniform
+/// alpha. Unlike per-primitive alpha this keeps overlaps at the group's alpha.
+fn composite_group(parent: &mut Framebuffer, group: &Framebuffer, alpha: f32) {
+    if alpha <= 0.0 || parent.width() != group.width() || parent.height() != group.height() {
+        return;
+    }
+    let alpha_u8 = (alpha.clamp(0.0, 1.0) * 255.0).round() as u8;
+    if alpha_u8 == 255 {
+        for x in 0..parent.width() {
+            for y in 0..parent.height() {
+                let s = group.pixel(x, y);
+                parent.set_pixel(x, y, s);
+            }
+        }
+        return;
+    }
+    for x in 0..parent.width() {
+        for y in 0..parent.height() {
+            let mut s = group.pixel(x, y);
+            let effective = ((u16::from(s[3]) * u16::from(alpha_u8) + 127) / 255) as u8;
+            s[3] = effective;
+            if effective > 0 {
+                parent.set_pixel(x, y, s);
+            }
+        }
+    }
+}
+
 impl Rasterizer {
     /// Executes paint commands into an existing RGBA8 framebuffer.
     ///
@@ -52,206 +99,285 @@ impl Rasterizer {
             width: framebuffer.width() as f32,
             height: framebuffer.height() as f32,
         };
-        let mut clips = vec![root];
-        let mut clip_radii: Vec<f32> = vec![0.0];
-        let mut transforms = vec![Transform::IDENTITY];
-        let mut opacities: Vec<f32> = vec![1.0];
-        let mut filters: Vec<crate::ColorFilter> = vec![crate::ColorFilter::default()];
-        for item in &list.items {
-            match item {
-                PaintItem::FillRect { rect, color } => {
-                    let clip = *clips.last().expect("root clip is always present");
-                    let (bounds, mapping) =
-                        mapped_rect(*rect, *transforms.last().expect("root transform"));
-                    paint_rect(
-                        framebuffer,
-                        bounds,
-                        clip,
-                        *clip_radii.last().expect("root radius"),
-                        effective_color(*color, &opacities, &filters),
-                        mapping,
+        let mut state = RasterState {
+            clips: vec![root],
+            clip_radii: vec![0.0],
+            clip_mappings: vec![None],
+            transforms: vec![Transform::IDENTITY],
+            opacities: vec![1.0],
+            filters: vec![crate::ColorFilter::default()],
+        };
+        let mut groups: Vec<(Framebuffer, f32)> = vec![(std::mem::take(framebuffer), 1.0)];
+        run_commands(&list.items, &mut groups, &mut state);
+        *framebuffer = groups.pop().expect("root group").0;
+    }
+}
+
+fn run_commands(
+    items: &[PaintItem],
+    groups: &mut Vec<(Framebuffer, f32)>,
+    state: &mut RasterState,
+) {
+    let RasterState { clips, clip_radii, clip_mappings, transforms, opacities, filters } = state;
+    for item in items {
+        match item {
+            PaintItem::FillRect { rect, color } => {
+                let clip = *clips.last().expect("root clip is always present");
+                let (bounds, mapping) =
+                    mapped_rect(*rect, *transforms.last().expect("root transform"));
+                let current = &mut groups.last_mut().expect("group stack").0;
+                paint_rect(
+                    current,
+                    bounds,
+                    clip,
+                    *clip_radii.last().expect("root radius"),
+                    effective_color(*color, opacities, filters),
+                    mapping,
+                    clip_mappings.last().copied().unwrap_or(None),
+                );
+            }
+            PaintItem::BorderRect { rect, widths, color, .. } => {
+                let clip = *clips.last().expect("root clip is always present");
+                let (bounds, mapping) =
+                    mapped_rect(*rect, *transforms.last().expect("root transform"));
+                let current = &mut groups.last_mut().expect("group stack").0;
+                paint_border(
+                    current,
+                    bounds,
+                    *widths,
+                    clip,
+                    *clip_radii.last().expect("root radius"),
+                    effective_color(*color, opacities, filters),
+                    mapping,
+                    clip_mappings.last().copied().unwrap_or(None),
+                );
+            }
+            PaintItem::LinearGradient { rect, gradient } => {
+                let clip = *clips.last().expect("root clip is always present");
+                let (bounds, mapping) =
+                    mapped_rect(*rect, *transforms.last().expect("root transform"));
+                let current = &mut groups.last_mut().expect("group stack").0;
+                paint_linear_gradient(
+                    current,
+                    bounds,
+                    gradient,
+                    clip,
+                    *clip_radii.last().expect("root radius"),
+                    *opacities.last().expect("root opacity"),
+                    mapping,
+                    clip_mappings.last().copied().unwrap_or(None),
+                );
+            }
+            PaintItem::BoxShadow { rect, shadow } => {
+                let clip = *clips.last().expect("root clip is always present");
+                let effective = effective_color(shadow.color, opacities, filters);
+                // Evaluate the shadow SDF in the box's local space so the
+                // shadow follows rotations/skews like the other primitives.
+                let local_area = if shadow.inset { *rect } else { shadow.outer_area(*rect) };
+                let (bounds, mapping) =
+                    mapped_rect(local_area, *transforms.last().expect("root transform"));
+                let current = &mut groups.last_mut().expect("group stack").0;
+                paint_box_shadow(
+                    current,
+                    *rect,
+                    *shadow,
+                    bounds,
+                    clip,
+                    effective,
+                    mapping,
+                    clip_mappings.last().copied().unwrap_or(None),
+                );
+            }
+            PaintItem::Text { glyphs, color, decoration, shadows } => {
+                let clip = *clips.last().expect("root clip is always present");
+                let transform = *transforms.last().expect("root transform");
+                let moved: Vec<_> = glyphs
+                    .iter()
+                    .map(|glyph| {
+                        let (x, y) = transform.point(glyph.x, glyph.y);
+                        crate::PositionedGlyph { coverage: glyph.coverage.clone(), x, y }
+                    })
+                    .collect();
+
+                // Paint text shadows first, behind the glyphs.
+                for shadow in shadows {
+                    let shadow_color = effective_color(shadow.color, opacities, filters);
+                    let alpha_scale = if shadow.blur > 0.0 {
+                        (0.75_f32 - shadow.blur * 0.05).clamp(0.15, 0.75)
+                    } else {
+                        1.0
+                    };
+                    let soft = Color::rgba(
+                        shadow_color.red,
+                        shadow_color.green,
+                        shadow_color.blue,
+                        (f32::from(shadow_color.alpha) * alpha_scale).round() as u8,
                     );
-                }
-                PaintItem::BorderRect { rect, widths, color, .. } => {
-                    let clip = *clips.last().expect("root clip is always present");
-                    let (bounds, mapping) =
-                        mapped_rect(*rect, *transforms.last().expect("root transform"));
-                    paint_border(
-                        framebuffer,
-                        bounds,
-                        *widths,
-                        clip,
-                        *clip_radii.last().expect("root radius"),
-                        effective_color(*color, &opacities, &filters),
-                        mapping,
-                    );
-                }
-                PaintItem::LinearGradient { rect, gradient } => {
-                    let clip = *clips.last().expect("root clip is always present");
-                    let (bounds, mapping) =
-                        mapped_rect(*rect, *transforms.last().expect("root transform"));
-                    paint_linear_gradient(
-                        framebuffer,
-                        bounds,
-                        gradient,
-                        clip,
-                        *clip_radii.last().expect("root radius"),
-                        *opacities.last().expect("root opacity"),
-                        mapping,
-                    );
-                }
-                PaintItem::BoxShadow { rect, shadow } => {
-                    let clip = *clips.last().expect("root clip is always present");
-                    let effective = effective_color(shadow.color, &opacities, &filters);
-                    paint_box_shadow(framebuffer, *rect, *shadow, clip, effective);
-                }
-                PaintItem::Text { glyphs, color, decoration, shadows } => {
-                    let clip = *clips.last().expect("root clip is always present");
-                    let transform = *transforms.last().expect("root transform");
-                    let moved: Vec<_> = glyphs
+                    let dx = shadow.offset_x;
+                    let dy = shadow.offset_y;
+                    let shifted: Vec<_> = moved
                         .iter()
-                        .map(|glyph| {
-                            let (x, y) = transform.point(glyph.x, glyph.y);
-                            crate::PositionedGlyph { coverage: glyph.coverage.clone(), x, y }
+                        .map(|glyph| crate::PositionedGlyph {
+                            coverage: glyph.coverage.clone(),
+                            x: glyph.x + dx,
+                            y: glyph.y + dy,
                         })
                         .collect();
-
-                    // Paint text shadows first, behind the glyphs.
-                    for shadow in shadows {
-                        let shadow_color = effective_color(shadow.color, &opacities, &filters);
-                        let alpha_scale = if shadow.blur > 0.0 {
-                            (0.75_f32 - shadow.blur * 0.05).clamp(0.15, 0.75)
-                        } else {
-                            1.0
-                        };
-                        let soft = Color::rgba(
-                            shadow_color.red,
-                            shadow_color.green,
-                            shadow_color.blue,
-                            (f32::from(shadow_color.alpha) * alpha_scale).round() as u8,
-                        );
-                        let dx = shadow.offset_x;
-                        let dy = shadow.offset_y;
-                        let shifted: Vec<_> = moved
-                            .iter()
-                            .map(|glyph| crate::PositionedGlyph {
-                                coverage: glyph.coverage.clone(),
-                                x: glyph.x + dx,
-                                y: glyph.y + dy,
-                            })
-                            .collect();
-                        blit_glyphs(
-                            framebuffer,
-                            &shifted,
-                            clip,
-                            *clip_radii.last().expect("root radius"),
-                            soft,
-                        );
-                    }
-
-                    let text_color = effective_color(*color, &opacities, &filters);
+                    let shadow_target = &mut groups.last_mut().expect("group stack").0;
                     blit_glyphs(
-                        framebuffer,
-                        &moved,
+                        shadow_target,
+                        &shifted,
                         clip,
                         *clip_radii.last().expect("root radius"),
-                        text_color,
+                        soft,
+                        clip_mappings.last().copied().unwrap_or(None),
                     );
-                    if *decoration != crate::TextDecoration::None {
-                        let height = moved
-                            .iter()
-                            .filter_map(|glyph| {
-                                (glyph.coverage.height > 0).then_some(glyph.coverage.height)
-                            })
-                            .max()
-                            .unwrap_or(0);
-                        if height > 0 {
-                            let thickness = (height as f32 * 0.08).max(1.0);
-                            for glyph in &moved {
-                                let line_y = if *decoration == crate::TextDecoration::Underline {
-                                    glyph.y + height as f32 + 1.0
-                                } else {
-                                    glyph.y + height as f32 * 0.5
-                                };
-                                let rect = Rect {
-                                    x: glyph.x,
-                                    y: line_y,
-                                    width: glyph.coverage.width as f32,
-                                    height: thickness,
-                                };
-                                paint_rect(
-                                    framebuffer,
-                                    rect,
-                                    clip,
-                                    *clip_radii.last().expect("root radius"),
-                                    effective_color(*color, &opacities, &filters),
-                                    None,
-                                );
-                            }
+                }
+
+                let text_color = effective_color(*color, opacities, filters);
+                let current = &mut groups.last_mut().expect("group stack").0;
+                blit_glyphs(
+                    current,
+                    &moved,
+                    clip,
+                    *clip_radii.last().expect("root radius"),
+                    text_color,
+                    clip_mappings.last().copied().unwrap_or(None),
+                );
+                if *decoration != crate::TextDecoration::None {
+                    let height = moved
+                        .iter()
+                        .filter_map(|glyph| {
+                            (glyph.coverage.height > 0).then_some(glyph.coverage.height)
+                        })
+                        .max()
+                        .unwrap_or(0);
+                    if height > 0 {
+                        let thickness = (height as f32 * 0.08).max(1.0);
+                        for glyph in &moved {
+                            let line_y = if *decoration == crate::TextDecoration::Underline {
+                                glyph.y + height as f32 + 1.0
+                            } else {
+                                glyph.y + height as f32 * 0.5
+                            };
+                            let rect = Rect {
+                                x: glyph.x,
+                                y: line_y,
+                                width: glyph.coverage.width as f32,
+                                height: thickness,
+                            };
+                            let line_target = &mut groups.last_mut().expect("group stack").0;
+                            paint_rect(
+                                line_target,
+                                rect,
+                                clip,
+                                *clip_radii.last().expect("root radius"),
+                                effective_color(*color, opacities, filters),
+                                None,
+                                clip_mappings.last().copied().unwrap_or(None),
+                            );
                         }
                     }
                 }
-                PaintItem::Image { rect, image } => {
-                    let clip = *clips.last().expect("root clip is always present");
-                    let (bounds, mapping) =
-                        mapped_rect(*rect, *transforms.last().expect("root transform"));
-                    paint_image(
-                        framebuffer,
-                        image,
-                        bounds,
-                        clip,
-                        *clip_radii.last().expect("root radius"),
-                        *opacities.last().expect("root opacity"),
-                        mapping,
-                    );
+            }
+            PaintItem::Image { rect, image } => {
+                let clip = *clips.last().expect("root clip is always present");
+                let (bounds, mapping) =
+                    mapped_rect(*rect, *transforms.last().expect("root transform"));
+                let current = &mut groups.last_mut().expect("group stack").0;
+                paint_image(
+                    current,
+                    image,
+                    bounds,
+                    clip,
+                    *clip_radii.last().expect("root radius"),
+                    *opacities.last().expect("root opacity"),
+                    mapping,
+                    clip_mappings.last().copied().unwrap_or(None),
+                );
+            }
+            PaintItem::PushSticky { .. } | PaintItem::PopSticky => {
+                // Interpreted by the shell's scroll translation pass.
+            }
+            PaintItem::PushFilter { filter } => {
+                let parent = *filters.last().expect("root filter");
+                filters.push(parent.compose(*filter));
+            }
+            PaintItem::PopFilter => {
+                if filters.len() > 1 {
+                    filters.pop();
                 }
-                PaintItem::PushSticky { .. } | PaintItem::PopSticky => {
-                    // Interpreted by the shell's scroll translation pass.
+            }
+            PaintItem::PushOpacity { alpha } => {
+                // Start a transparent group; the group's alpha is applied
+                // once when it is composited, so overlapping children do
+                // not accumulate extra opacity (unlike per-primitive alpha).
+                let (width, height) = {
+                    let root = &groups[0].0;
+                    (root.width(), root.height())
+                };
+                let group = Framebuffer::new(width, height).unwrap_or_default();
+                groups.push((group, alpha.clamp(0.0, 1.0)));
+                // Primitives inside the group keep their own alpha; the
+                // group's alpha is applied at composite time.
+                opacities.push(1.0);
+            }
+            PaintItem::PopOpacity => {
+                if groups.len() > 1 {
+                    let (group, group_alpha) = groups.pop().expect("group stack");
+                    let parent = &mut groups.last_mut().expect("parent group").0;
+                    composite_group(parent, &group, group_alpha);
+                    opacities.pop();
                 }
-                PaintItem::PushFilter { filter } => {
-                    let parent = *filters.last().expect("root filter");
-                    filters.push(parent.compose(*filter));
+            }
+            PaintItem::PushTransform { transform } => {
+                let parent = *transforms.last().expect("root transform");
+                transforms.push(parent.compose(*transform));
+            }
+            PaintItem::PopTransform => {
+                if transforms.len() > 1 {
+                    transforms.pop();
                 }
-                PaintItem::PopFilter => {
-                    if filters.len() > 1 {
-                        filters.pop();
-                    }
-                }
-                PaintItem::PushOpacity { alpha } => {
-                    let parent = *opacities.last().expect("root opacity");
-                    opacities.push(parent * alpha.clamp(0.0, 1.0));
-                }
-                PaintItem::PopOpacity => {
-                    if opacities.len() > 1 {
-                        opacities.pop();
-                    }
-                }
-                PaintItem::PushTransform { transform } => {
-                    let parent = *transforms.last().expect("root transform");
-                    transforms.push(parent.compose(*transform));
-                }
-                PaintItem::PopTransform => {
-                    if transforms.len() > 1 {
-                        transforms.pop();
-                    }
-                }
-                PaintItem::PushClip { rect } => {
-                    let parent = *clips.last().expect("root clip is always present");
-                    let transformed = transforms.last().expect("root transform").rect(*rect);
-                    clips.push(intersect(parent, transformed).unwrap_or_default());
-                    clip_radii.push(0.0);
-                }
-                PaintItem::PushRoundClip { rect, radius } => {
-                    let parent = *clips.last().expect("root clip is always present");
-                    let transformed = transforms.last().expect("root transform").rect(*rect);
-                    clips.push(intersect(parent, transformed).unwrap_or_default());
-                    clip_radii.push(radius.max(0.0));
-                }
-                PaintItem::PopClip => {
-                    if clips.len() > 1 {
-                        clips.pop();
-                        clip_radii.pop();
-                    }
+            }
+            PaintItem::PushClip { rect } => {
+                let parent = *clips.last().expect("root clip is always present");
+                let transform = *transforms.last().expect("root transform");
+                let transformed = transform.rect(*rect);
+                clips.push(intersect(parent, transformed).unwrap_or_default());
+                clip_radii.push(0.0);
+                // Under a non-axis-aligned transform, keep the inverse so
+                // the clip can be tested in its own local space.
+                clip_mappings.push(
+                    (!transform.is_axis_aligned())
+                        .then(|| {
+                            transform
+                                .inverse()
+                                .map(|inverse| Mapping { inverse, local_rect: *rect })
+                        })
+                        .flatten(),
+                );
+            }
+            PaintItem::PushRoundClip { rect, radius } => {
+                let parent = *clips.last().expect("root clip is always present");
+                let transform = *transforms.last().expect("root transform");
+                let transformed = transform.rect(*rect);
+                clips.push(intersect(parent, transformed).unwrap_or_default());
+                clip_radii.push(radius.max(0.0));
+                clip_mappings.push(
+                    (!transform.is_axis_aligned())
+                        .then(|| {
+                            transform
+                                .inverse()
+                                .map(|inverse| Mapping { inverse, local_rect: *rect })
+                        })
+                        .flatten(),
+                );
+            }
+            PaintItem::PopClip => {
+                if clips.len() > 1 {
+                    clips.pop();
+                    clip_radii.pop();
+                    clip_mappings.pop();
                 }
             }
         }
@@ -260,12 +386,16 @@ impl Rasterizer {
 
 /// Rasterizes a box shadow using a signed-distance field for anti-aliased
 /// rounded corners and a smooth blur falloff.
+#[allow(clippy::too_many_arguments)]
 fn paint_box_shadow(
     framebuffer: &mut Framebuffer,
     box_rect: Rect,
     shadow: crate::BoxShadow,
+    bounds: Rect,
     clip: Rect,
     color: Color,
+    mapping: Option<Mapping>,
+    clip_mapping: Option<Mapping>,
 ) {
     use crate::shadow::{rounded_rect_distance, shadow_coverage};
 
@@ -273,13 +403,7 @@ fn paint_box_shadow(
         return;
     }
     let shape = shadow.shape(box_rect);
-    let area = if shadow.inset {
-        // Inset shadows are painted inside the box only.
-        intersect(box_rect, clip)
-    } else {
-        intersect(shadow.outer_area(box_rect), clip)
-    };
-    let Some(area) = area else { return };
+    let Some(area) = intersect(bounds, clip) else { return };
     if !valid_rect(area) {
         return;
     }
@@ -290,8 +414,22 @@ fn paint_box_shadow(
     let bottom = (area.y + area.height).min(framebuffer.height() as f32).ceil().max(0.0) as u32;
     for y in top..bottom.min(framebuffer.height()) {
         for x in left..right.min(framebuffer.width()) {
-            let px = x as f32 + 0.5;
-            let py = y as f32 + 0.5;
+            let screen_x = x as f32 + 0.5;
+            let screen_y = y as f32 + 0.5;
+            let (px, py) = match mapping {
+                Some(mapping) => mapping.inverse.point(screen_x, screen_y),
+                None => (screen_x, screen_y),
+            };
+            if let Some(clip) = clip_mapping {
+                let (cx, cy) = clip.inverse.point(screen_x, screen_y);
+                if cx < clip.local_rect.x
+                    || cx >= clip.local_rect.x + clip.local_rect.width
+                    || cy < clip.local_rect.y
+                    || cy >= clip.local_rect.y + clip.local_rect.height
+                {
+                    continue;
+                }
+            }
             let distance = rounded_rect_distance(shape, shadow.radius, px, py);
             let coverage = if shadow.inset {
                 // Inside the shape: coverage grows from the inner edge.
@@ -317,12 +455,14 @@ fn paint_box_shadow(
 
 /// Blits pre-rasterized glyph masks. Bearings are intentionally ignored:
 /// producers must supply final bitmap top-left positions in physical pixels.
+#[allow(clippy::too_many_arguments)]
 fn blit_glyphs(
     framebuffer: &mut Framebuffer,
     glyphs: &[crate::PositionedGlyph],
     clip: Rect,
     clip_radius: f32,
     color: Color,
+    clip_mapping: Option<Mapping>,
 ) {
     if !valid_rect(clip) || color.alpha == 0 {
         return;
@@ -378,6 +518,16 @@ fn blit_glyphs(
             {
                 continue;
             }
+            if let Some(clip) = clip_mapping {
+                let (cx, cy) = clip.inverse.point(pixel_center_x, pixel_center_y);
+                if cx < clip.local_rect.x
+                    || cx >= clip.local_rect.x + clip.local_rect.width
+                    || cy < clip.local_rect.y
+                    || cy >= clip.local_rect.y + clip.local_rect.height
+                {
+                    continue;
+                }
+            }
 
             let alpha = ((u16::from(mask_alpha) * u16::from(color.alpha) + 127) / 255) as u8;
             if alpha == 0 {
@@ -389,6 +539,7 @@ fn blit_glyphs(
 }
 
 /// Nearest-neighbor image blit with source-over alpha and clipping.
+#[allow(clippy::too_many_arguments)]
 fn paint_image(
     framebuffer: &mut Framebuffer,
     image: &crate::Image,
@@ -397,6 +548,7 @@ fn paint_image(
     clip_radius: f32,
     opacity: f32,
     mapping: Option<Mapping>,
+    clip_mapping: Option<Mapping>,
 ) {
     let Some(area) = intersect(rect, clip) else {
         return;
@@ -404,24 +556,32 @@ fn paint_image(
     let source_width = image.width();
     let source_height = image.height();
     let pixels = image.pixels();
-    for_each_pixel(framebuffer, area, clip_radius, mapping, |target, x, y, local_x, local_y| {
-        let source_x = (f64::from(local_x) - f64::from(rect.x)) * f64::from(source_width)
-            / f64::from(rect.width);
-        let source_y = (f64::from(local_y) - f64::from(rect.y)) * f64::from(source_height)
-            / f64::from(rect.height);
-        let source_x = (source_x as usize).min(source_width as usize - 1);
-        let source_y = (source_y as usize).min(source_height as usize - 1);
-        let offset = (source_y * source_width as usize + source_x) * 4;
-        if let Some(pixel) = pixels.get(offset..offset + 4) {
-            let alpha = (f32::from(pixel[3]) * opacity).round() as u8;
-            let rgba = [pixel[0], pixel[1], pixel[2], alpha];
-            target.set_pixel(x, y, rgba);
-        }
-    });
+    for_each_pixel(
+        framebuffer,
+        area,
+        clip_radius,
+        mapping,
+        clip_mapping,
+        |target, x, y, local_x, local_y| {
+            let source_x = (f64::from(local_x) - f64::from(rect.x)) * f64::from(source_width)
+                / f64::from(rect.width);
+            let source_y = (f64::from(local_y) - f64::from(rect.y)) * f64::from(source_height)
+                / f64::from(rect.height);
+            let source_x = (source_x as usize).min(source_width as usize - 1);
+            let source_y = (source_y as usize).min(source_height as usize - 1);
+            let offset = (source_y * source_width as usize + source_x) * 4;
+            if let Some(pixel) = pixels.get(offset..offset + 4) {
+                let alpha = (f32::from(pixel[3]) * opacity).round() as u8;
+                let rgba = [pixel[0], pixel[1], pixel[2], alpha];
+                target.set_pixel(x, y, rgba);
+            }
+        },
+    );
 }
 
 /// Paints a linear gradient across a rectangle. Stop positions are resolved
 /// against the gradient line, then sampled at every pixel center.
+#[allow(clippy::too_many_arguments)]
 fn paint_linear_gradient(
     framebuffer: &mut Framebuffer,
     rect: Rect,
@@ -430,6 +590,7 @@ fn paint_linear_gradient(
     clip_radius: f32,
     opacity: f32,
     mapping: Option<Mapping>,
+    clip_mapping: Option<Mapping>,
 ) {
     let Some(area) = intersect(rect, clip) else {
         return;
@@ -445,15 +606,26 @@ fn paint_linear_gradient(
     let center_y = rect.y + rect.height / 2.0;
     let positions = resolve_stop_positions(&gradient.stops, line_length);
 
-    for_each_pixel(framebuffer, area, clip_radius, mapping, |target, x, y, local_x, local_y| {
-        let pixel_x = local_x;
-        let pixel_y = local_y;
-        let projection =
-            ((pixel_x - center_x) * sine - (pixel_y - center_y) * cosine) / line_length + 0.5;
-        let color = interpolate_stops(&gradient.stops, &positions, projection);
-        let alpha = (f32::from(color.alpha) * opacity).round() as u8;
-        target.set_pixel(x, y, Color::rgba(color.red, color.green, color.blue, alpha).to_rgba8());
-    });
+    for_each_pixel(
+        framebuffer,
+        area,
+        clip_radius,
+        mapping,
+        clip_mapping,
+        |target, x, y, local_x, local_y| {
+            let pixel_x = local_x;
+            let pixel_y = local_y;
+            let projection =
+                ((pixel_x - center_x) * sine - (pixel_y - center_y) * cosine) / line_length + 0.5;
+            let color = interpolate_stops(&gradient.stops, &positions, projection);
+            let alpha = (f32::from(color.alpha) * opacity).round() as u8;
+            target.set_pixel(
+                x,
+                y,
+                Color::rgba(color.red, color.green, color.blue, alpha).to_rgba8(),
+            );
+        },
+    );
 }
 
 /// Resolves implicit stop positions (first 0, last 1, evenly spaced between
@@ -526,6 +698,7 @@ fn mix_colors(from: Color, to: Color, fraction: f32) -> Color {
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn paint_rect(
     framebuffer: &mut Framebuffer,
     rect: Rect,
@@ -533,15 +706,24 @@ fn paint_rect(
     clip_radius: f32,
     color: Color,
     mapping: Option<Mapping>,
+    clip_mapping: Option<Mapping>,
 ) {
     let Some(area) = intersect(rect, clip) else {
         return;
     };
-    for_each_pixel(framebuffer, area, clip_radius, mapping, |target, x, y, _local_x, _local_y| {
-        target.set_pixel(x, y, color.to_rgba8());
-    });
+    for_each_pixel(
+        framebuffer,
+        area,
+        clip_radius,
+        mapping,
+        clip_mapping,
+        |target, x, y, _local_x, _local_y| {
+            target.set_pixel(x, y, color.to_rgba8());
+        },
+    );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn paint_border(
     framebuffer: &mut Framebuffer,
     rect: Rect,
@@ -550,6 +732,7 @@ fn paint_border(
     clip_radius: f32,
     color: Color,
     mapping: Option<Mapping>,
+    clip_mapping: Option<Mapping>,
 ) {
     if !valid_rect(rect) || !valid_rect(clip) {
         return;
@@ -567,17 +750,24 @@ fn paint_border(
         return;
     };
 
-    for_each_pixel(framebuffer, area, clip_radius, mapping, |target, x, y, local_x, local_y| {
-        let px = local_x;
-        let py = local_y;
-        let on_left = widths.left > 0.0 && px < rect.x + widths.left;
-        let on_right = widths.right > 0.0 && px >= rect.x + rect.width - widths.right;
-        let on_top = widths.top > 0.0 && py < rect.y + widths.top;
-        let on_bottom = widths.bottom > 0.0 && py >= rect.y + rect.height - widths.bottom;
-        if on_left || on_right || on_top || on_bottom {
-            target.set_pixel(x, y, color.to_rgba8());
-        }
-    });
+    for_each_pixel(
+        framebuffer,
+        area,
+        clip_radius,
+        mapping,
+        clip_mapping,
+        |target, x, y, local_x, local_y| {
+            let px = local_x;
+            let py = local_y;
+            let on_left = widths.left > 0.0 && px < rect.x + widths.left;
+            let on_right = widths.right > 0.0 && px >= rect.x + rect.width - widths.right;
+            let on_top = widths.top > 0.0 && py < rect.y + widths.top;
+            let on_bottom = widths.bottom > 0.0 && py >= rect.y + rect.height - widths.bottom;
+            if on_left || on_right || on_top || on_bottom {
+                target.set_pixel(x, y, color.to_rgba8());
+            }
+        },
+    );
 }
 
 /// True when a pixel center lies inside a rounded rectangle.
@@ -609,20 +799,13 @@ fn inside_rounded(rect: Rect, radius: f32, px: f32, py: f32) -> bool {
     dx * dx + dy * dy <= r * r
 }
 
-/// Describes an inverse mapping from destination (screen) pixels to a rectangle
-/// in local space. When present, only pixels whose pre-image lies inside
-/// `local_rect` are painted, and the callback receives local coordinates.
-#[derive(Clone, Copy)]
-struct Mapping {
-    inverse: Transform,
-    local_rect: Rect,
-}
-
+#[allow(clippy::too_many_arguments)]
 fn for_each_pixel(
     framebuffer: &mut Framebuffer,
     area: Rect,
     clip_radius: f32,
     mapping: Option<Mapping>,
+    clip_mapping: Option<Mapping>,
     mut paint: impl FnMut(&mut Framebuffer, u32, u32, f32, f32),
 ) {
     if !valid_rect(area) || framebuffer.width() == 0 || framebuffer.height() == 0 {
@@ -645,6 +828,18 @@ fn for_each_pixel(
                 || !inside_rounded(area, clip_radius, center_x, center_y)
             {
                 continue;
+            }
+            // When the clip was applied under a transform, test the pixel in
+            // the clip's local space so a rotated clip cuts a rotated shape.
+            if let Some(clip) = clip_mapping {
+                let (cx, cy) = clip.inverse.point(center_x, center_y);
+                if cx < clip.local_rect.x
+                    || cx >= clip.local_rect.x + clip.local_rect.width
+                    || cy < clip.local_rect.y
+                    || cy >= clip.local_rect.y + clip.local_rect.height
+                {
+                    continue;
+                }
             }
             let (sample_x, sample_y) = match mapping {
                 Some(mapping) => {
@@ -961,6 +1156,29 @@ mod tests {
     }
 
     #[test]
+    fn opacity_composes_overlaps_as_a_group() {
+        // Two overlapping rectangles inside one opacity:0.5 group. The
+        // intersection must have the same alpha as any other point of the
+        // group (0.5), not a darker double-composited value.
+        let mut list = DisplayList::default();
+        list.push(PaintItem::PushClip { rect: rect(0.0, 0.0, 3.0, 1.0) });
+        list.push(PaintItem::PushOpacity { alpha: 0.5 });
+        fill(&mut list, rect(0.0, 0.0, 2.0, 1.0), RED);
+        fill(&mut list, rect(1.0, 0.0, 2.0, 1.0), RED);
+        list.push(PaintItem::PopOpacity);
+        list.push(PaintItem::PopClip);
+        let mut framebuffer = Framebuffer::new(3, 1).expect("framebuffer");
+
+        Rasterizer.rasterize(&list, &mut framebuffer);
+
+        let alpha_at = |x: usize| framebuffer.pixels()[x * 4 + 3];
+        // The overlap (x=1) must match the non-overlap pixels (x=0 and x=2).
+        assert_eq!(alpha_at(0), alpha_at(1), "group alpha must be uniform across overlaps");
+        assert_eq!(alpha_at(1), alpha_at(2));
+        assert!(alpha_at(1) > 0 && alpha_at(1) < 255);
+    }
+
+    #[test]
     fn text_shadow_paints_behind_glyphs() {
         use crate::TextShadow;
         let glyph = crate::PositionedGlyph {
@@ -998,6 +1216,50 @@ mod tests {
         assert_eq!(at(6, 6), vec![0, 0, 255, 255]);
         // Offset shadow position is red.
         assert_eq!(at(9, 9), vec![255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn box_shadow_follows_the_transform() {
+        use crate::BoxShadow;
+        // A box rotated 90° about (15,15): its top edge maps to the right.
+        // A shadow with offset (0,+2) in local space should therefore appear
+        // shifted horizontally after the rotation.
+        let transform = crate::parse_transform(Some("rotate(90deg)"), 10.0, 10.0, None)
+            .unwrap()
+            .around_origin(15.0, 15.0);
+        let shadow = BoxShadow {
+            offset_x: 0.0,
+            offset_y: 3.0,
+            blur: 0.0,
+            spread: 0.0,
+            color: Color::rgba(0, 0, 0, 255),
+            inset: false,
+            radius: 0.0,
+        };
+        let mut list = DisplayList::default();
+        list.push(PaintItem::PushClip { rect: rect(0.0, 0.0, 32.0, 32.0) });
+        list.push(PaintItem::PushTransform { transform });
+        list.push(PaintItem::BoxShadow { rect: rect(10.0, 10.0, 10.0, 10.0), shadow });
+        list.push(PaintItem::PopTransform);
+        list.push(PaintItem::PopClip);
+        let mut framebuffer = Framebuffer::new(32, 32).expect("framebuffer");
+
+        Rasterizer.rasterize(&list, &mut framebuffer);
+
+        let shadow_pixels: Vec<(usize, usize)> = (0..32)
+            .flat_map(|y| (0..32).map(move |x| (x, y)))
+            .filter(|(x, y)| {
+                let o = (y * 32 + x) * 4;
+                framebuffer.pixels()[o..o + 4] == [0, 0, 0, 255]
+            })
+            .collect();
+        assert!(!shadow_pixels.is_empty(), "rotated shadow must be painted");
+        // Without the transform, a +Y offset would keep the shadow below the
+        // box (y > 20). After a 90° rotation it must extend horizontally.
+        let max_y = shadow_pixels.iter().map(|(_, y)| *y).max().unwrap();
+        let span_x = shadow_pixels.iter().map(|(x, _)| *x).max().unwrap()
+            - shadow_pixels.iter().map(|(x, _)| *x).min().unwrap();
+        assert!(max_y <= 22 || span_x >= 13, "shadow should follow rotation: {:?}", shadow_pixels);
     }
 
     #[test]
@@ -1072,6 +1334,36 @@ mod tests {
 
         assert_eq!(&framebuffer.pixels()[0..4], &[0, 0, 0, 0]);
         assert_eq!(&framebuffer.pixels()[8..12], &[255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn transformed_clip_cuts_in_local_space() {
+        // A clip applied under a 90° rotation must cut the rotated shape, not
+        // an axis-aligned bounding box of it.
+        let transform = crate::parse_transform(Some("rotate(90deg)"), 10.0, 10.0, None)
+            .unwrap()
+            .around_origin(15.0, 15.0);
+        let mut list = DisplayList::default();
+        list.push(PaintItem::PushTransform { transform });
+        list.push(PaintItem::PushClip { rect: rect(10.0, 10.0, 10.0, 10.0) });
+        fill(&mut list, rect(5.0, 10.0, 20.0, 10.0), RED);
+        list.push(PaintItem::PopClip);
+        list.push(PaintItem::PopTransform);
+        let mut framebuffer = Framebuffer::new(32, 32).expect("framebuffer");
+
+        Rasterizer.rasterize(&list, &mut framebuffer);
+
+        let painted: Vec<(usize, usize)> = (0..32)
+            .flat_map(|y| (0..32).map(move |x| (x, y)))
+            .filter(|(x, y)| framebuffer.pixel(*x as u32, *y as u32)[3] > 0)
+            .collect();
+        assert!(!painted.is_empty(), "something must be painted");
+        // The clip is a 10x10 region rotated around (15,15): still 10x10 in
+        // screen space (rotation preserves size). Without local-space testing,
+        // the bounding box would be ~14x14 and paint extra pixels.
+        let span_x = painted.iter().map(|(x, _)| *x).max().unwrap()
+            - painted.iter().map(|(x, _)| *x).min().unwrap();
+        assert!(span_x <= 11, "clip must stay 10px wide after rotation, got span {span_x}");
     }
 
     #[test]

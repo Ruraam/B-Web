@@ -34,15 +34,16 @@ impl BoxShadow {
     }
 
     /// The shadow-casting shape: the box grown by spread and offset, before
-    /// blur. For inset shadows the shape is shrunk by spread instead.
+    /// blur. For inset shadows the shape is the box shifted by the offsets and
+    /// shrunk by the spread (CSS inset offsets move the inner shadow inward).
     #[must_use]
     pub fn shape(self, box_rect: Rect) -> Rect {
         if self.inset {
             Rect {
-                x: box_rect.x + self.spread,
-                y: box_rect.y + self.spread,
-                width: (box_rect.width - self.spread * 2.0).max(0.0),
-                height: (box_rect.height - self.spread * 2.0).max(0.0),
+                x: box_rect.x + self.offset_x + self.spread,
+                y: box_rect.y + self.offset_y + self.spread,
+                width: (box_rect.width - self.offset_x.abs() - self.spread * 2.0).max(0.0),
+                height: (box_rect.height - self.offset_y.abs() - self.spread * 2.0).max(0.0),
             }
         } else {
             Rect {
@@ -238,6 +239,25 @@ mod tests {
     #[test]
     fn rejects_single_length() {
         assert!(parse_box_shadow("2px", 0.0, len).is_none());
+    }
+
+    #[test]
+    fn inset_shape_uses_offsets() {
+        let rect = crate::Rect { x: 0.0, y: 0.0, width: 40.0, height: 40.0 };
+        let shadow = BoxShadow {
+            offset_x: 2.0,
+            offset_y: 3.0,
+            blur: 0.0,
+            spread: 0.0,
+            color: Color::rgba(0, 0, 0, 255),
+            inset: true,
+            radius: 0.0,
+        };
+        let shape = shadow.shape(rect);
+        assert_eq!(shape.x, 2.0);
+        assert_eq!(shape.y, 3.0);
+        assert_eq!(shape.width, 38.0);
+        assert_eq!(shape.height, 37.0);
     }
 
     #[test]
