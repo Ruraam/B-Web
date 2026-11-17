@@ -963,6 +963,7 @@ impl ComputedStyle {
         style.set("grid-area".into(), "auto".into());
         style.set("opacity".into(), "1".into());
         style.set("filter".into(), "none".into());
+        style.set("transform-origin".into(), "50% 50%".into());
         style.set("float".into(), "none".into());
         style.set("clear".into(), "none".into());
         style

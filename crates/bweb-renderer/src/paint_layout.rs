@@ -44,6 +44,8 @@ pub struct PaintNode {
     pub background_repeat: Option<String>,
     /// CSS `transform` value for this node.
     pub transform: Option<String>,
+    /// CSS `transform-origin` value (keywords, percentages or lengths).
+    pub transform_origin: Option<String>,
     /// CSS `opacity` for this node and its subtree.
     pub opacity: Option<String>,
     /// CSS `filter` value for this node and its subtree.

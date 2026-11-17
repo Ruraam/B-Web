@@ -72,7 +72,7 @@ layout tree, text and image rasterization, network transport and privacy filteri
 - Linear-gradient backgrounds rasterized from CSS angles/`to <side>` directions
   and percentage/length color stops.
 - Composable `transform` translate/scale/rotate/skew with inverse pixel mapping
-  and center transform-origin; subtree `opacity`, `text-decoration` lines,
+  and explicit `transform-origin`; subtree `opacity`, `text-decoration` lines,
   rounded-corner clipping from `border-radius` and composable color filters.
 - Multi-line flexbox: direction, wrapping, grow/shrink, justification, alignment,
   gaps and the `flex`/`gap` shorthands.
@@ -96,8 +96,7 @@ layout tree, text and image rasterization, network transport and privacy filteri
 - Additional CSS layout: subgrid, orthogonal writing modes and intrinsic sizing
   edge cases.
 - CSS property coverage: background-origin/clip, blur/advanced filters,
-  perspective transforms, explicit `transform-origin` and remaining shorthand
-  variants.
+  perspective transforms and remaining shorthand variants.
 
 ## Planned
 

@@ -30,7 +30,7 @@ pub use gradient::{
 pub use paint_layout::{PaintLayout, PaintNode, PaintStyle};
 pub use painter::{Painter, PainterError};
 pub use rasterizer::Rasterizer;
-pub use transform::{Transform, parse_transform};
+pub use transform::{Transform, parse_transform, parse_transform_origin};
 
 /// A rectangle in physical pixel coordinates for rendering commands.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]

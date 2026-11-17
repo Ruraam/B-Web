@@ -232,9 +232,57 @@ pub fn parse_transform(
     (result != Transform::IDENTITY).then_some(result)
 }
 
+/// Resolves a `transform-origin` value to a point inside `rect`. Supports
+/// keywords (`left`/`center`/`right`, `top`/`center`/`bottom`), percentages and
+/// absolute lengths. Defaults to the box center.
+#[must_use]
+pub fn parse_transform_origin(value: Option<&str>, rect: Rect) -> (f32, f32) {
+    let fallback = (rect.x + rect.width * 0.5, rect.y + rect.height * 0.5);
+    let Some(value) = value else { return fallback };
+    let mut parts = value.split_ascii_whitespace();
+    let x_token = parts.next().unwrap_or("center");
+    let y_token = parts.next().unwrap_or("center");
+
+    let x = match x_token.to_ascii_lowercase().as_str() {
+        "left" => Some(0.0),
+        "center" => Some(0.5),
+        "right" => Some(1.0),
+        other => parse_origin_component(other, rect.width),
+    };
+    let y = match y_token.to_ascii_lowercase().as_str() {
+        "top" => Some(0.0),
+        "center" => Some(0.5),
+        "bottom" => Some(1.0),
+        other => parse_origin_component(other, rect.height),
+    };
+    (
+        x.map(|f| rect.x + rect.width * f).unwrap_or(fallback.0),
+        y.map(|f| rect.y + rect.height * f).unwrap_or(fallback.1),
+    )
+}
+
+fn parse_origin_component(value: &str, size: f32) -> Option<f32> {
+    if let Some(percent) = value.trim().strip_suffix('%') {
+        let fraction = percent.trim().parse::<f32>().ok()? / 100.0;
+        return fraction.is_finite().then_some(fraction);
+    }
+    let px = value.trim().strip_suffix("px").unwrap_or(value.trim());
+    let length = px.trim().parse::<f32>().ok()?;
+    (size > 0.0).then_some(length / size)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transform_origin_keywords_and_percentages() {
+        let rect = crate::Rect { x: 20.0, y: 10.0, width: 100.0, height: 40.0 };
+        assert_eq!(parse_transform_origin(Some("left top"), rect), (20.0, 10.0));
+        assert_eq!(parse_transform_origin(Some("right bottom"), rect), (120.0, 50.0));
+        assert_eq!(parse_transform_origin(Some("25% 75%"), rect), (45.0, 40.0));
+        assert_eq!(parse_transform_origin(None, rect), (70.0, 30.0));
+    }
 
     #[test]
     fn translate_resolves_percentages() {

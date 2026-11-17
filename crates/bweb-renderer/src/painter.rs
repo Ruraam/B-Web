@@ -87,11 +87,12 @@ impl<'a, L: PaintLayout> Painter<'a, L> {
                 }
             }
 
+            let origin = crate::parse_transform_origin(node.transform_origin.as_deref(), node.rect);
             if let Some(transform) = crate::parse_transform(
                 node.transform.as_deref(),
                 node.rect.width,
                 node.rect.height,
-                Some((node.rect.x + node.rect.width * 0.5, node.rect.y + node.rect.height * 0.5)),
+                Some(origin),
             ) {
                 list.push(PaintItem::PushTransform { transform });
                 transform_depths.push(node.depth);
@@ -268,6 +269,26 @@ mod tests {
             |item| matches!(item, PaintItem::PushOpacity { alpha } if (*alpha - 0.5).abs() < 0.001)
         ));
         assert!(list.items.iter().any(|item| matches!(item, PaintItem::PopOpacity)));
+    }
+
+    #[test]
+    fn transform_origin_changes_the_transform_matrix() {
+        let rect = Rect { x: 0.0, y: 0.0, width: 100.0, height: 20.0 };
+        let transform_of = |origin: Option<&str>| {
+            let mut node = node(0, rect, PaintStyle::default());
+            node.transform = Some("rotate(45deg)".to_owned());
+            node.transform_origin = origin.map(str::to_owned);
+            let layout = MockLayout { viewport: viewport(), nodes: vec![node] };
+            let list = Painter::new(&layout, 1.0).expect("valid scale").paint();
+            list.items.iter().find_map(|item| match item {
+                PaintItem::PushTransform { transform } => Some(*transform),
+                _ => None,
+            })
+        };
+        let center = transform_of(None).expect("transform");
+        let top_left = transform_of(Some("left top")).expect("transform");
+        // Rotating around the center vs the top-left yields different matrices.
+        assert_ne!(center, top_left);
     }
 
     #[test]
