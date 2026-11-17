@@ -484,7 +484,9 @@ fn layout_node(
     let inline_height: f32 = line_boxes.iter().map(|line| line.rect.height).sum();
     content_height = content_height.max(inline_height);
 
-    let explicit_height = style.and_then(|style| style.get("height")).and_then(parse_length);
+    let explicit_height = style.and_then(|style| style.get("height")).and_then(|value| {
+        resolve_length(value, font_size, Some(available_width), context.viewport, false)
+    });
     let vertical_insets = padding.top + padding.bottom + border.top + border.bottom;
     let used_content_height =
         explicit_height.unwrap_or(content_height.max(if is_text { 19.2 } else { 0.0 }));
