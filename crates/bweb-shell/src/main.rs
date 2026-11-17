@@ -1007,11 +1007,118 @@ fn filter_list_cache_directory() -> Result<PathBuf, io::Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::{content_viewport, copy_scaled_pixels};
+    use super::{content_viewport, copy_scaled_pixels, load_page};
     use crate::scripting::{DomHost, EventRegistry};
     use bweb_html::{HtmlDocument, NodeKind};
     use bweb_js::{Runtime, Value};
-    use std::{cell::RefCell, rc::Rc};
+    use std::{
+        cell::RefCell,
+        io::{Read, Write},
+        net::TcpListener,
+        rc::Rc,
+        thread,
+    };
+
+    /// Serves one HTTP response on an ephemeral local port and returns its URL.
+    fn serve_once(body: String, content_type: &str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local server");
+        let address = listener.local_addr().expect("local address");
+        let content_type = content_type.to_owned();
+        thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut request = [0u8; 2048];
+                let _ = stream.read(&mut request);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        format!("http://{address}/")
+    }
+
+    /// Serves a fixed set of byte routes on one local port and returns its URL.
+    fn serve_bytes_routes(routes: Vec<(&'static str, Vec<u8>, &'static str)>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local server");
+        let address = listener.local_addr().expect("local address");
+        thread::spawn(move || {
+            for _ in 0..routes.len() {
+                if let Ok((mut stream, _)) = listener.accept() {
+                    let mut request = [0u8; 2048];
+                    let read = stream.read(&mut request).unwrap_or(0);
+                    let request_line = String::from_utf8_lossy(&request[..read]);
+                    let path = request_line
+                        .split_whitespace()
+                        .nth(1)
+                        .unwrap_or("/")
+                        .split('?')
+                        .next()
+                        .unwrap_or("/");
+                    let (_, body, content_type) = routes
+                        .iter()
+                        .find(|(route_path, _, _)| *route_path == path)
+                        .expect("requested path must be served");
+                    let header = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(header.as_bytes());
+                    let _ = stream.write_all(body);
+                }
+            }
+        });
+        format!("http://{address}/")
+    }
+
+    #[test]
+    fn load_page_exercises_the_real_navigation_path() {
+        let html = "<!DOCTYPE html><html><head><title>Smoke</title>\
+            <style>body { color: red }</style>\
+            <script>document.title = 'Loaded';</script>\
+            </head><body><p>hello</p></body></html>";
+        let url = serve_once(html.to_owned(), "text/html; charset=utf-8");
+        let page = load_page(&url, false).expect("load local page");
+
+        // DocumentLoader fetched through the real transport; inline CSS and
+        // scripts were extracted in document order.
+        assert_eq!(page.loaded.document.title().as_deref(), Some("Smoke"));
+        assert!(!page.stylesheets.is_empty(), "inline stylesheet parsed");
+        assert_eq!(page.scripts.len(), 1, "inline script extracted");
+        assert!(page.loaded.resources.is_empty(), "no subresources in this page");
+        assert!(
+            page.loaded.document.iter().any(|(_, node)| {
+                matches!(node.kind(), NodeKind::Text(text) if text == "hello")
+            }),
+            "body text parsed"
+        );
+    }
+
+    #[test]
+    fn load_page_fetches_and_decodes_subresources() {
+        // A 1x1 red PNG, encoded with the same `image` crate the shell uses.
+        let mut png_bytes = Vec::new();
+        {
+            use image::{ImageEncoder, RgbaImage};
+            let pixel = RgbaImage::from_pixel(1, 1, image::Rgba([255, 0, 0, 255]));
+            image::codecs::png::PngEncoder::new(&mut png_bytes)
+                .write_image(pixel.as_raw(), 1, 1, image::ColorType::Rgba8.into())
+                .expect("encode PNG");
+        }
+        let url = serve_bytes_routes(vec![
+            (
+                "/",
+                "<html><head><title>Img</title></head><body><img src='/pixel.png'></body></html>"
+                    .as_bytes()
+                    .to_vec(),
+                "text/html",
+            ),
+            ("/pixel.png", png_bytes, "image/png"),
+        ]);
+        let page = load_page(&url, false).expect("load page with image");
+        assert_eq!(page.loaded.resources.len(), 1, "one image subresource loaded");
+        assert_eq!(page.images.len(), 1, "<img> decoded to a painting image");
+    }
 
     #[test]
     fn scales_rgba_frame_to_surface_with_nearest_neighbor_sampling() {
