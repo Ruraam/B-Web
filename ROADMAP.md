@@ -18,7 +18,8 @@ layout tree, text and image rasterization, network transport and privacy filteri
 - `Sec-GPC: 1` and `DNT: 1` on all outgoing requests.
 - EasyList/EasyPrivacy downloader with HTTPS-only redirects, finite timeouts and
   bounded, atomic cache updates.
-- CSS `url()` backgrounds discovered, fetched through Shield and painted.
+- CSS `url()` backgrounds discovered, fetched through Shield and painted, with
+  size (`cover`/`contain`/lengths), position and repeat tiling.
 
 ### HTML and DOM
 - Arena-backed DOM with stable `NodeId`s.
@@ -89,8 +90,8 @@ layout tree, text and image rasterization, network transport and privacy filteri
   and the full tokenizer state tables.
 - Additional CSS layout: `minmax()` grid tracks, subgrid and orthogonal writing
   modes.
-- CSS property coverage: background tiling/positioning/sizing, filters,
-  transforms, `minmax()` grid tracks and remaining shorthand variants.
+- CSS property coverage: background-origin/clip, filters, transforms,
+  `minmax()` grid tracks and remaining shorthand variants.
 
 ## Planned
 

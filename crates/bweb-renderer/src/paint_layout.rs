@@ -35,6 +35,11 @@ pub struct PaintNode {
     pub background_image: Option<Arc<BackgroundImage>>,
     /// Decoded bitmap for a `url()` background, matched by resolved URL.
     pub background_image_bitmap: Option<Arc<Image>>,
+    /// Computed `background-size`, `background-position` and `background-repeat`
+    /// (first layer) for the image background.
+    pub background_size: Option<String>,
+    pub background_position: Option<String>,
+    pub background_repeat: Option<String>,
     /// Scroll-dependent sticky shift: `(active, threshold, dx, dy)`.
     pub sticky: Option<(bool, f32, f32, f32)>,
 }

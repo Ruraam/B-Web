@@ -87,8 +87,27 @@ impl<'a, L: PaintLayout> Painter<'a, L> {
                 }
             }
             if let Some(image) = node.background_image_bitmap {
-                // CSS background images stretch to fill the padding box for now.
-                list.push(PaintItem::Image { rect, image });
+                let size = crate::parse_background_size(node.background_size.as_deref());
+                let position =
+                    crate::parse_background_position(node.background_position.as_deref());
+                let repeat = crate::parse_background_repeat(node.background_repeat.as_deref());
+                let rects = crate::background_rects(
+                    rect,
+                    (image.width() as f32, image.height() as f32),
+                    &size,
+                    &position,
+                    repeat,
+                );
+                let clips = rects.len() > 1;
+                if clips {
+                    list.push(PaintItem::PushClip { rect });
+                }
+                for tile in rects {
+                    list.push(PaintItem::Image { rect: tile, image: Arc::clone(&image) });
+                }
+                if clips {
+                    list.push(PaintItem::PopClip);
+                }
             }
 
             let widths = scale_edges(node.style.border_widths, self.scale_factor);

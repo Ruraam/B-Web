@@ -2,6 +2,7 @@
 //!
 //! This crate deliberately has no dependency on the DOM, CSS, or layout engine.
 
+mod background;
 mod color;
 mod display_list;
 mod framebuffer;
@@ -10,6 +11,10 @@ mod paint_layout;
 mod painter;
 mod rasterizer;
 
+pub use background::{
+    BackgroundPosition, BackgroundRepeat, BackgroundSize, Length, background_rects,
+    parse_background_position, parse_background_repeat, parse_background_size,
+};
 pub use color::parse_color;
 pub use display_list::{
     Color, DisplayList, Image, ImageError, PaintItem, PositionedGlyph, TextRun,

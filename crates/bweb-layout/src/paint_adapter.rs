@@ -107,6 +107,15 @@ impl PaintLayout for PaintAdapter<'_> {
                 image: images.and_then(|items| items.get(&layout.node).cloned()),
                 background_image,
                 background_image_bitmap,
+                background_size: computed
+                    .and_then(|style| style.get("background-size"))
+                    .map(str::to_owned),
+                background_position: computed
+                    .and_then(|style| style.get("background-position"))
+                    .map(str::to_owned),
+                background_repeat: computed
+                    .and_then(|style| style.get("background-repeat"))
+                    .map(str::to_owned),
                 sticky: layout.sticky.active.then_some((
                     layout.sticky.active,
                     layout.sticky.threshold,
@@ -224,6 +233,47 @@ mod tests {
                 .with_background_images(&backgrounds);
         let list = Painter::new(&adapter, 1.0).expect("valid scale").paint();
         assert!(list.items.iter().any(|item| matches!(item, PaintItem::Image { .. })));
+
+        let mut framebuffer = Framebuffer::new(320, 200).expect("framebuffer");
+        Rasterizer.rasterize(&list, &mut framebuffer);
+        assert_eq!(framebuffer.pixels()[0..4], [255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn background_size_and_repeat_shape_the_painted_tiles() {
+        let document = HtmlDocument::parse(
+            "<html><head><style>div { display:block; width:40px; height:20px; \
+             background-image:url('https://example.test/bg.png'); \
+             background-size:20px 10px; background-repeat:repeat; \
+             background-position:0 0 }</style></head><body><div>x</div></body></html>",
+        );
+        let sheets: Vec<_> = document
+            .inline_stylesheets()
+            .iter()
+            .map(|source| Stylesheet::parse(source).expect("inline stylesheet"))
+            .collect();
+        let mut styles = StyleEngine::new().compute(&document, &sheets);
+        styles.resolve_urls("https://example.test/");
+        let tree = LayoutTree::build(&document, &styles, 320.0);
+        let background = Arc::new(Image::new(2, 2, [255, 0, 0, 255].repeat(4)).expect("image"));
+        let backgrounds =
+            HashMap::from([("https://example.test/bg.png".to_owned(), Arc::clone(&background))]);
+        let adapter =
+            PaintAdapter::new(&tree, &styles, Rect { x: 0.0, y: 0.0, width: 320.0, height: 200.0 })
+                .with_background_images(&backgrounds);
+        let list = Painter::new(&adapter, 1.0).expect("valid scale").paint();
+
+        let tiles: Vec<_> = list
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                PaintItem::Image { rect, .. } => Some(*rect),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tiles.len(), 4, "a 40x20 box tiled at 20x10 needs 4 tiles");
+        assert!(tiles.iter().any(|tile| tile.x == 0.0 && tile.y == 0.0));
+        assert!(tiles.iter().any(|tile| tile.x == 20.0 && tile.y == 10.0));
 
         let mut framebuffer = Framebuffer::new(320, 200).expect("framebuffer");
         Rasterizer.rasterize(&list, &mut framebuffer);
