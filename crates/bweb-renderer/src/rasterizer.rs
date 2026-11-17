@@ -105,7 +105,7 @@ impl Rasterizer {
                     let effective = effective_color(shadow.color, &opacities, &filters);
                     paint_box_shadow(framebuffer, *rect, *shadow, clip, effective);
                 }
-                PaintItem::Text { glyphs, color, decoration } => {
+                PaintItem::Text { glyphs, color, decoration, shadows } => {
                     let clip = *clips.last().expect("root clip is always present");
                     let transform = *transforms.last().expect("root transform");
                     let moved: Vec<_> = glyphs
@@ -115,6 +115,40 @@ impl Rasterizer {
                             crate::PositionedGlyph { coverage: glyph.coverage.clone(), x, y }
                         })
                         .collect();
+
+                    // Paint text shadows first, behind the glyphs.
+                    for shadow in shadows {
+                        let shadow_color = effective_color(shadow.color, &opacities, &filters);
+                        let alpha_scale = if shadow.blur > 0.0 {
+                            (0.75_f32 - shadow.blur * 0.05).clamp(0.15, 0.75)
+                        } else {
+                            1.0
+                        };
+                        let soft = Color::rgba(
+                            shadow_color.red,
+                            shadow_color.green,
+                            shadow_color.blue,
+                            (f32::from(shadow_color.alpha) * alpha_scale).round() as u8,
+                        );
+                        let dx = shadow.offset_x;
+                        let dy = shadow.offset_y;
+                        let shifted: Vec<_> = moved
+                            .iter()
+                            .map(|glyph| crate::PositionedGlyph {
+                                coverage: glyph.coverage.clone(),
+                                x: glyph.x + dx,
+                                y: glyph.y + dy,
+                            })
+                            .collect();
+                        blit_glyphs(
+                            framebuffer,
+                            &shifted,
+                            clip,
+                            *clip_radii.last().expect("root radius"),
+                            soft,
+                        );
+                    }
+
                     let text_color = effective_color(*color, &opacities, &filters);
                     blit_glyphs(
                         framebuffer,
@@ -716,6 +750,7 @@ mod tests {
             }],
             color: Color::rgba(200, 100, 50, 128),
             decoration: crate::TextDecoration::None,
+            shadows: vec![],
         });
         let mut framebuffer = Framebuffer::new(3, 1).expect("framebuffer");
 
@@ -744,6 +779,7 @@ mod tests {
             }],
             color: RED,
             decoration: crate::TextDecoration::None,
+            shadows: vec![],
         });
         list.push(PaintItem::PopClip);
         let mut framebuffer = Framebuffer::new(3, 1).expect("framebuffer");
@@ -783,6 +819,7 @@ mod tests {
             ],
             color: RED,
             decoration: crate::TextDecoration::None,
+            shadows: vec![],
         });
         let mut framebuffer = Framebuffer::new(2, 2).expect("framebuffer");
 
@@ -873,6 +910,7 @@ mod tests {
             glyphs: vec![glyph],
             color: RED,
             decoration: crate::TextDecoration::Underline,
+            shadows: vec![],
         });
         let mut framebuffer = Framebuffer::new(6, 10).expect("framebuffer");
         Rasterizer.rasterize(&list, &mut framebuffer);
@@ -920,6 +958,46 @@ mod tests {
         assert_eq!(opaque, &[255, 0, 0, 255]);
         assert_eq!(faded[0], 255);
         assert!(faded[1] > 0 && faded[1] < 255, "red should be blended: {faded:?}");
+    }
+
+    #[test]
+    fn text_shadow_paints_behind_glyphs() {
+        use crate::TextShadow;
+        let glyph = crate::PositionedGlyph {
+            coverage: bweb_text::Coverage {
+                width: 4,
+                height: 4,
+                left: 0,
+                top: 0,
+                data: vec![255; 16],
+            },
+            x: 5.0,
+            y: 5.0,
+        };
+        let shadow = TextShadow {
+            offset_x: 3.0,
+            offset_y: 3.0,
+            blur: 0.0,
+            color: Color::rgba(255, 0, 0, 255),
+        };
+        let mut list = DisplayList::default();
+        list.push(PaintItem::PushClip { rect: rect(0.0, 0.0, 20.0, 20.0) });
+        list.push(PaintItem::Text {
+            glyphs: vec![glyph],
+            color: Color::rgba(0, 0, 255, 255),
+            decoration: crate::TextDecoration::None,
+            shadows: vec![shadow],
+        });
+        list.push(PaintItem::PopClip);
+        let mut framebuffer = Framebuffer::new(20, 20).expect("framebuffer");
+
+        Rasterizer.rasterize(&list, &mut framebuffer);
+
+        let at = |x: usize, y: usize| framebuffer.pixels()[(y * 20 + x) * 4..][..4].to_vec();
+        // Original glyph position is blue.
+        assert_eq!(at(6, 6), vec![0, 0, 255, 255]);
+        // Offset shadow position is red.
+        assert_eq!(at(9, 9), vec![255, 0, 0, 255]);
     }
 
     #[test]

@@ -189,6 +189,7 @@ impl<'a, L: PaintLayout> Painter<'a, L> {
                     glyphs: run.glyphs.clone(),
                     color: run.color,
                     decoration: run.decoration,
+                    shadows: run.shadows.clone(),
                 });
             }
 

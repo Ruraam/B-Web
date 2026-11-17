@@ -31,7 +31,10 @@ pub use gradient::{
 pub use paint_layout::{PaintLayout, PaintNode, PaintStyle};
 pub use painter::{Painter, PainterError};
 pub use rasterizer::Rasterizer;
-pub use shadow::{BoxShadow, parse_box_shadow};
+pub use shadow::{
+    BoxShadow, TextShadow, parse_box_shadow, parse_text_shadow, shadow_coverage,
+    split_shadow_layers,
+};
 pub use transform::{Transform, parse_transform, parse_transform_origin};
 
 /// A rectangle in physical pixel coordinates for rendering commands.

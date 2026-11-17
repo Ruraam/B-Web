@@ -982,6 +982,8 @@ impl ComputedStyle {
             "white-space",
             "text-align",
             "text-indent",
+            "text-decoration",
+            "text-shadow",
             "letter-spacing",
             "word-spacing",
             "direction",

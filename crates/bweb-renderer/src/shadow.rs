@@ -123,6 +123,68 @@ pub fn parse_box_shadow(
     Some(BoxShadow { offset_x, offset_y, blur, spread, color, inset, radius })
 }
 
+/// A parsed CSS `text-shadow` layer (no inset/spread).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TextShadow {
+    pub offset_x: f32,
+    pub offset_y: f32,
+    pub blur: f32,
+    pub color: Color,
+}
+
+/// Parses one `text-shadow` layer. Same grammar as box-shadow minus `inset`
+/// and spread. Multi-layer splitting is done by the caller.
+#[must_use]
+pub fn parse_text_shadow(
+    value: &str,
+    parse_len: impl Fn(&str) -> Option<f32>,
+) -> Option<TextShadow> {
+    let mut offset_x = 0.0;
+    let mut offset_y = 0.0;
+    let mut blur = 0.0;
+    let mut color = Color::rgba(0, 0, 0, 255);
+    let mut lengths_seen = 0;
+    for token in split_tokens(value) {
+        if let Some(parsed) = crate::parse_color(token) {
+            color = parsed;
+        } else {
+            let length = parse_len(token)?;
+            match lengths_seen {
+                0 => offset_x = length,
+                1 => offset_y = length,
+                2 => blur = length.max(0.0),
+                _ => return None,
+            }
+            lengths_seen += 1;
+        }
+    }
+    if lengths_seen < 2 {
+        return None;
+    }
+    Some(TextShadow { offset_x, offset_y, blur, color })
+}
+
+/// Splits a comma-separated shadow value into layers, respecting parentheses.
+#[must_use]
+pub fn split_shadow_layers(value: &str) -> Vec<&str> {
+    let mut result = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0;
+    for (index, byte) in value.as_bytes().iter().enumerate() {
+        match byte {
+            b'(' => depth += 1,
+            b')' => depth -= 1,
+            b',' if depth == 0 => {
+                result.push(&value[start..index]);
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    result.push(&value[start..]);
+    result
+}
+
 /// Splits a shadow value into tokens, keeping `rgb(...)`/`hsl(...)` intact.
 fn split_tokens(value: &str) -> Vec<&str> {
     let mut result = Vec::new();
@@ -176,6 +238,18 @@ mod tests {
     #[test]
     fn rejects_single_length() {
         assert!(parse_box_shadow("2px", 0.0, len).is_none());
+    }
+
+    #[test]
+    fn parses_text_shadow() {
+        let shadow = parse_text_shadow("1px 2px 3px rgba(0,0,0,128)", len).unwrap();
+        assert_eq!(shadow.offset_x, 1.0);
+        assert_eq!(shadow.offset_y, 2.0);
+        assert_eq!(shadow.blur, 3.0);
+        assert_eq!(shadow.color.alpha, 128);
+        assert!(parse_text_shadow("inset 1px 1px", len).is_none());
+        let layers = split_shadow_layers("1px 1px red, 2px 2px blue");
+        assert_eq!(layers.len(), 2);
     }
 
     #[test]

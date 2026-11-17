@@ -121,6 +121,8 @@ pub struct TextRun {
     pub glyphs: Vec<PositionedGlyph>,
     pub color: Color,
     pub decoration: TextDecoration,
+    /// Parsed `text-shadow` layers, painted before the glyphs.
+    pub shadows: Vec<crate::TextShadow>,
 }
 
 /// One ordered drawing or clipping command.
@@ -139,7 +141,12 @@ pub enum PaintItem {
     /// Glyph coordinates are snapped to the nearest pixel by the rasterizer.
     /// TODO(renderer-4): add quarter-pixel subpixel positioning and a matching
     /// glyph coverage cache without changing `PositionedGlyph`.
-    Text { glyphs: Vec<PositionedGlyph>, color: Color, decoration: TextDecoration },
+    Text {
+        glyphs: Vec<PositionedGlyph>,
+        color: Color,
+        decoration: TextDecoration,
+        shadows: Vec<crate::TextShadow>,
+    },
     /// Scales and blits a decoded RGBA image into a physical-pixel rectangle.
     Image { rect: Rect, image: Arc<Image> },
     /// Marks the start of a sticky subtree. The shell caps scroll translation
@@ -240,6 +247,7 @@ mod tests {
             glyphs: vec![glyph.clone()],
             color: Color::rgba(10, 20, 30, 255),
             decoration: crate::TextDecoration::None,
+            shadows: vec![],
         });
 
         assert!(matches!(&list.items[0], PaintItem::Text { glyphs, .. } if glyphs == &[glyph]));

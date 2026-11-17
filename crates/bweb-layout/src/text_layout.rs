@@ -188,6 +188,26 @@ pub fn prepare_text_runs(
             Some("line-through") => bweb_renderer::TextDecoration::LineThrough,
             _ => bweb_renderer::TextDecoration::None,
         };
+        let shadows: Vec<bweb_renderer::TextShadow> = style
+            .get("text-shadow")
+            .filter(|value| *value != "none")
+            .map(|value| {
+                bweb_renderer::split_shadow_layers(value)
+                    .into_iter()
+                    .filter_map(|layer| {
+                        bweb_renderer::parse_text_shadow(layer.trim(), |token| {
+                            token
+                                .trim()
+                                .trim_end_matches("px")
+                                .trim()
+                                .parse::<f32>()
+                                .ok()
+                                .map(|value| value * scale_factor)
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         let layout = layout_text(
             font,
             &fragment.text,
@@ -204,6 +224,7 @@ pub fn prepare_text_runs(
             glyphs: Vec::new(),
             color,
             decoration,
+            shadows,
         });
         run.glyphs.extend(layout.glyphs);
     }

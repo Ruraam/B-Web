@@ -407,6 +407,7 @@ mod tests {
                 glyphs: vec![glyph],
                 color: Color::rgba(0, 0, 0, 255),
                 decoration: bweb_renderer::TextDecoration::None,
+                shadows: vec![],
             },
             PaintItem::PopClip,
         ];
