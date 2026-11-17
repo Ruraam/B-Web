@@ -644,10 +644,7 @@ mod tests {
             "<html><head><style>body { color: red; }</style><style>p { margin: 0; }</style></head></html>",
         );
 
-        assert_eq!(
-            document.inline_stylesheets(),
-            vec!["body { color: red; }", "p { margin: 0; }"]
-        );
+        assert_eq!(document.inline_stylesheets(), vec!["body { color: red; }", "p { margin: 0; }"]);
     }
 
     #[test]
