@@ -341,6 +341,93 @@ impl HtmlDocument {
         })
     }
 
+    /// Returns every element matching a simple tag, `#id` or `.class` selector
+    /// in document order.
+    #[must_use]
+    pub fn query_selector_all(&self, selector: &str) -> Vec<NodeId> {
+        let selector = selector.trim();
+        if selector.is_empty() {
+            return Vec::new();
+        }
+        self.iter()
+            .filter(|(id, node)| {
+                if self.is_in_template(*id) {
+                    return false;
+                }
+                let NodeKind::Element { tag_name, attributes } = node.kind() else {
+                    return false;
+                };
+                if let Some(name) = selector.strip_prefix('#') {
+                    attributes
+                        .iter()
+                        .any(|attribute| attribute.name == "id" && attribute.value == name)
+                } else if let Some(name) = selector.strip_prefix('.') {
+                    attributes.iter().any(|attribute| {
+                        attribute.name == "class"
+                            && attribute.value.split_ascii_whitespace().any(|part| part == name)
+                    })
+                } else {
+                    tag_name.eq_ignore_ascii_case(selector)
+                }
+            })
+            .map(|(id, _)| id)
+            .collect()
+    }
+
+    /// Creates a detached element node with no attributes.
+    #[must_use]
+    pub fn create_element(&mut self, tag_name: &str) -> NodeId {
+        let id = NodeId(self.nodes.len());
+        self.nodes.push(Node {
+            kind: NodeKind::Element {
+                tag_name: tag_name.trim().to_ascii_lowercase(),
+                attributes: Vec::new(),
+            },
+            parent: None,
+            children: Vec::new(),
+        });
+        id
+    }
+
+    /// Appends a node as the last child of a parent. Returns false when either
+    /// node is missing or the child already has a parent.
+    pub fn append_child(&mut self, parent: NodeId, child: NodeId) -> bool {
+        if self.nodes.get(parent.index()).is_none() || self.nodes.get(child.index()).is_none() {
+            return false;
+        }
+        if self.nodes[child.0].parent.is_some() {
+            return false;
+        }
+        self.nodes[child.0].parent = Some(parent);
+        self.nodes[parent.0].children.push(child);
+        true
+    }
+
+    /// Returns whether an element's `class` attribute contains a class token.
+    #[must_use]
+    pub fn has_class(&self, id: NodeId, name: &str) -> bool {
+        self.attribute(id, "class")
+            .is_some_and(|value| value.split_ascii_whitespace().any(|part| part == name))
+    }
+
+    /// Adds or removes a class token from an element's `class` attribute.
+    pub fn set_class(&mut self, id: NodeId, name: &str, present: bool) {
+        let mut classes: Vec<String> = self
+            .attribute(id, "class")
+            .unwrap_or("")
+            .split_ascii_whitespace()
+            .map(str::to_owned)
+            .collect();
+        if present {
+            if !classes.iter().any(|class| class == name) {
+                classes.push(name.to_owned());
+            }
+        } else {
+            classes.retain(|class| class != name);
+        }
+        self.set_attribute(id, "class", &classes.join(" "));
+    }
+
     /// Returns the contents of inline `<script>` elements in document order.
     #[must_use]
     pub fn script_sources(&self) -> Vec<String> {

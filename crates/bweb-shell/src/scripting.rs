@@ -7,7 +7,7 @@ use std::{
 };
 
 use bweb_html::HtmlDocument;
-use bweb_js::{Host, JsError, Value};
+use bweb_js::{Host, JsError, Object, Value};
 
 #[derive(Default)]
 pub struct EventRegistry {
@@ -59,6 +59,13 @@ impl DomHost {
 
 fn handle_index(handle: &str, prefix: &str) -> Option<usize> {
     handle.strip_prefix(prefix)?.parse().ok()
+}
+
+fn host_handle(value: &Value) -> Option<String> {
+    match value {
+        Value::Host(name) => Some(name.clone()),
+        _ => None,
+    }
 }
 
 fn style_value(style: &str, property: &str) -> Option<String> {
@@ -115,6 +122,7 @@ impl Host for DomHost {
             return match property {
                 "style" => Value::Host(format!("style:{index}")),
                 "textContent" => Value::String(document.text_content(id)),
+                "classList" => Value::Host(format!("classlist:{index}")),
                 "id" | "class" | "href" | "src" => {
                     Value::String(document.attribute(id, property).unwrap_or("").to_owned())
                 }
@@ -125,6 +133,20 @@ impl Host for DomHost {
             if let Some(id) = document.node_at(index) {
                 let style = document.attribute(id, "style").unwrap_or("");
                 return style_value(style, property).map_or(Value::Undefined, Value::String);
+            }
+        }
+        if let Some(index) = handle_index(object, "classlist:") {
+            if let Some(id) = document.node_at(index) {
+                return match property {
+                    "length" => Value::Number(
+                        document
+                            .attribute(id, "class")
+                            .unwrap_or("")
+                            .split_ascii_whitespace()
+                            .count() as f64,
+                    ),
+                    _ => Value::Bool(document.has_class(id, property)),
+                };
             }
         }
         Value::Undefined
@@ -155,6 +177,29 @@ impl Host for DomHost {
     }
 
     fn call(&mut self, object: &str, method: &str, args: &[Value]) -> Result<Value, JsError> {
+        if let Some(index) = handle_index(object, "classlist:") {
+            let class = args.first().map_or(String::new(), Value::display);
+            let Some(document) = self.document.upgrade() else { return Ok(Value::Undefined) };
+            let mut document = document.borrow_mut();
+            let Some(id) = document.node_at(index) else { return Ok(Value::Undefined) };
+            return match method {
+                "add" => {
+                    document.set_class(id, &class, true);
+                    Ok(Value::Undefined)
+                }
+                "remove" => {
+                    document.set_class(id, &class, false);
+                    Ok(Value::Undefined)
+                }
+                "contains" => Ok(Value::Bool(document.has_class(id, &class))),
+                "toggle" => {
+                    let present = document.has_class(id, &class);
+                    document.set_class(id, &class, !present);
+                    Ok(Value::Bool(!present))
+                }
+                _ => Ok(Value::Undefined),
+            };
+        }
         if method == "addEventListener" {
             let event = args.first().map_or(String::new(), Value::display);
             if let Some(callback) = args.get(1).cloned() {
@@ -166,8 +211,76 @@ impl Host for DomHost {
             self.events.borrow_mut().prevent_default();
             return Ok(Value::Undefined);
         }
+        if let Some(index) = handle_index(object, "element:") {
+            let Some(document) = self.document.upgrade() else { return Ok(Value::Undefined) };
+            let mut document = document.borrow_mut();
+            let Some(id) = document.node_at(index) else { return Ok(Value::Undefined) };
+            return match method {
+                "setAttribute" => {
+                    if let Some(name) = args.first() {
+                        let value = args.get(1).map_or(String::new(), Value::display);
+                        document.set_attribute(id, &name.display(), &value);
+                    }
+                    Ok(Value::Undefined)
+                }
+                "getAttribute" => {
+                    let name = args.first().map_or(String::new(), Value::display);
+                    Ok(document
+                        .attribute(id, &name)
+                        .map_or(Value::Null, |v| Value::String(v.to_owned())))
+                }
+                "appendChild" => {
+                    let Some(child) = args.first() else { return Ok(Value::Null) };
+                    let Some(handle) = host_handle(child) else { return Ok(Value::Null) };
+                    let Some(child_index) = handle_index(&handle, "element:") else {
+                        return Ok(Value::Null);
+                    };
+                    let Some(child_id) = document.node_at(child_index) else {
+                        return Ok(Value::Null);
+                    };
+                    Ok(if document.append_child(id, child_id) {
+                        child.clone()
+                    } else {
+                        Value::Null
+                    })
+                }
+                _ => Ok(Value::Undefined),
+            };
+        }
         if object == "document" {
             match method {
+                "querySelectorAll" => {
+                    let Some(selector) = args.first().map(Value::display) else {
+                        return Ok(Value::Object(Rc::new(RefCell::new(Object {
+                            properties: HashMap::from([("length".into(), Value::Number(0.0))]),
+                            is_array: true,
+                        }))));
+                    };
+                    let document = self.document.upgrade().expect("document during script");
+                    let document = document.borrow();
+                    let nodes = document.query_selector_all(&selector);
+                    let mut properties = HashMap::new();
+                    for (index, node) in nodes.iter().enumerate() {
+                        properties.insert(
+                            index.to_string(),
+                            Value::Host(format!("element:{}", node.index())),
+                        );
+                    }
+                    properties.insert("length".into(), Value::Number(nodes.len() as f64));
+                    return Ok(Value::Object(Rc::new(RefCell::new(Object {
+                        properties,
+                        is_array: true,
+                    }))));
+                }
+                "createElement" => {
+                    let Some(tag) = args.first().map(Value::display) else {
+                        return Ok(Value::Null);
+                    };
+                    let document = self.document.upgrade().expect("document during script");
+                    let mut document = document.borrow_mut();
+                    let node = document.create_element(&tag);
+                    return Ok(Value::Host(format!("element:{}", node.index())));
+                }
                 "getElementById" | "querySelector" => {
                     let Some(selector) = args.first().map(Value::display) else {
                         return Ok(Value::Null);
@@ -226,6 +339,60 @@ mod tests {
         let target = borrowed.element_by_id("target").expect("target");
         assert_eq!(borrowed.text_content(target), "after");
         assert_eq!(borrowed.attribute(target, "style"), Some("color: red"));
+    }
+
+    #[test]
+    fn query_selector_all_and_class_list_work() {
+        let document = Rc::new(RefCell::new(HtmlDocument::parse(
+            "<main><p class='a first'>1</p><p class='a'>2</p><span>3</span></main>",
+        )));
+        let events = Rc::new(RefCell::new(EventRegistry::default()));
+        let mut runtime = Runtime::new();
+        runtime.set_host(Box::new(DomHost::new(&document, events.clone())));
+        runtime.define_global("document", Value::Host("document".into()));
+        let value = runtime
+            .eval("document.querySelectorAll('p').length + ':' + document.querySelector('p').classList.contains('first')")
+            .expect("script");
+        assert_eq!(value.display(), "2:true");
+
+        runtime
+            .eval("let p = document.querySelector('span'); p.classList.add('a'); p.classList.toggle('hot'); p.setAttribute('id', 'x');")
+            .expect("script");
+        let dom = document.borrow();
+        let span = dom
+            .iter()
+            .find_map(|(id, node)| {
+                matches!(node.kind(), bweb_html::NodeKind::Element { tag_name, .. } if tag_name == "span")
+                    .then_some(id)
+            })
+            .expect("span");
+        assert!(dom.has_class(span, "a"));
+        assert!(dom.has_class(span, "hot"));
+        assert_eq!(dom.attribute(span, "id"), Some("x"));
+    }
+
+    #[test]
+    fn create_element_and_append_child_mutate_the_dom() {
+        let document = Rc::new(RefCell::new(HtmlDocument::parse("<main>hi</main>")));
+        let events = Rc::new(RefCell::new(EventRegistry::default()));
+        let mut runtime = Runtime::new();
+        runtime.set_host(Box::new(DomHost::new(&document, events.clone())));
+        runtime.define_global("document", Value::Host("document".into()));
+        runtime
+            .eval("let el = document.createElement('em'); el.textContent = 'new'; document.querySelector('main').appendChild(el);")
+            .expect("script");
+        let dom = document.borrow();
+        let em = dom
+            .iter()
+            .find_map(|(id, node)| {
+                matches!(node.kind(), bweb_html::NodeKind::Element { tag_name, .. } if tag_name == "em")
+                    .then_some(id)
+            })
+            .expect("em");
+        assert_eq!(dom.text_content(em), "new");
+        assert!(dom.ancestor_elements(em).iter().any(|id| {
+            matches!(dom.node(*id).map(|node| node.kind()), Some(bweb_html::NodeKind::Element { tag_name, .. }) if tag_name == "main")
+        }));
     }
 
     #[test]

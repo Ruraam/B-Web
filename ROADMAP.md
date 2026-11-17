@@ -54,7 +54,8 @@ layout tree, text and image rasterization, network transport and privacy filteri
 - Variables, functions/closures/arrows, template literals, control flow,
   arrays, objects and operators.
 - Built-ins: `Math`, number parsing helpers, string methods, array methods.
-- Host bridge for `document.title`, `getElementById`, `querySelector`,
+- Host bridge for `document.title`, `getElementById`, `querySelector(All)`,
+  `createElement`/`appendChild`, `setAttribute`/`getAttribute`, `classList`,
   `textContent`, inline styles and `document.write`; scripts run on load and can
   change the rendered page.
 - `addEventListener('click', …)` with bubbling dispatch on real clicks and
