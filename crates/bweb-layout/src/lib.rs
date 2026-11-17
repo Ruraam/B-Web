@@ -42,6 +42,8 @@ pub struct Edges {
 pub enum Display {
     Block,
     Inline,
+    /// Block-level box that flows inline with siblings (line boxes inside).
+    InlineBlock,
     Flex,
     Grid,
 }
@@ -354,6 +356,8 @@ fn layout_node(
     let is_grid = matches!(display_value, Some("grid" | "inline-grid"));
     let display = if is_text || display_value == Some("inline") {
         Display::Inline
+    } else if display_value == Some("inline-block") {
+        Display::InlineBlock
     } else if is_flex {
         Display::Flex
     } else if is_grid {
@@ -459,23 +463,24 @@ fn layout_node(
     };
     let mut content_height = image_size.map_or(0.0, |size| size.height).max(flow_height);
 
-    let mut line_boxes =
-        if display == Display::Block && matches!(node.kind(), NodeKind::Element { .. }) {
-            build_line_boxes(
-                context,
-                id,
-                &children,
-                LineGeometry {
-                    origin_x: content_x,
-                    origin_y: content_y,
-                    available_width: content_width,
-                    style,
-                    pseudo: context.pseudo.and_then(|pseudo| pseudo.get(&id)),
-                },
-            )
-        } else {
-            Vec::new()
-        };
+    let mut line_boxes = if (display == Display::Block || display == Display::InlineBlock)
+        && matches!(node.kind(), NodeKind::Element { .. })
+    {
+        build_line_boxes(
+            context,
+            id,
+            &children,
+            LineGeometry {
+                origin_x: content_x,
+                origin_y: content_y,
+                available_width: content_width,
+                style,
+                pseudo: context.pseudo.and_then(|pseudo| pseudo.get(&id)),
+            },
+        )
+    } else {
+        Vec::new()
+    };
     let inline_height: f32 = line_boxes.iter().map(|line| line.rect.height).sum();
     content_height = content_height.max(inline_height);
 
@@ -650,7 +655,9 @@ fn layout_flow_children(
             continue;
         }
 
-        let child_is_inline = child_is_text || child_display == Some("inline");
+        let child_is_inline = child_is_text
+            || child_display == Some("inline")
+            || child_display == Some("inline-block");
         if child_is_inline {
             let font_size = child_style
                 .and_then(|computed| computed.get("font-size"))
@@ -666,6 +673,19 @@ fn layout_flow_children(
                 NodeKind::Text(text) => measurer.text(text, font_size),
                 NodeKind::Element { tag_name, .. } if tag_name == "img" => {
                     child_image.map_or(content_width, |size| size.width)
+                }
+                NodeKind::Element { tag_name, attributes } if tag_name == "input" => {
+                    let size = attributes
+                        .iter()
+                        .find(|attribute| attribute.name == "size")
+                        .and_then(|attribute| attribute.value.parse::<f32>().ok())
+                        .unwrap_or(20.0);
+                    let char_width = measurer.char_advance('0', font_size).max(1.0);
+                    (size * char_width + 12.0).min(content_width)
+                }
+                NodeKind::Element { tag_name, .. } if tag_name == "button" => {
+                    let label = context.document.text_content(*child_id);
+                    (measurer.text(&label, font_size) + 16.0).max(40.0).min(content_width)
                 }
                 _ => content_width.min(80.0),
             };
@@ -1561,8 +1581,18 @@ fn build_line_boxes(
     if let Some(before) = pseudo.and_then(|content| content.before.as_ref()) {
         items.push(InlineItem::Text {
             node: owner,
-            text: &before.text,
+            text: std::borrow::Cow::Borrowed(&before.text),
             style: Some(Arc::clone(&before.style)),
+        });
+    }
+    // Form controls carry their displayed value in an attribute (or, for
+    // textarea/button, in child text nodes). Inject a synthetic inline item so
+    // the value participates in line layout with the control's computed style.
+    if let Some(control_text) = form_control_text(context, owner) {
+        items.push(InlineItem::Text {
+            node: owner,
+            text: std::borrow::Cow::Owned(control_text),
+            style: None,
         });
     }
     for child in children {
@@ -1571,7 +1601,7 @@ fn build_line_boxes(
     if let Some(after) = pseudo.and_then(|content| content.after.as_ref()) {
         items.push(InlineItem::Text {
             node: owner,
-            text: &after.text,
+            text: std::borrow::Cow::Borrowed(&after.text),
             style: Some(Arc::clone(&after.style)),
         });
     }
@@ -1689,8 +1719,40 @@ fn build_line_boxes(
     lines
 }
 
+/// Returns the text displayed inside a form control, or `None` for other
+/// elements. `<input>` uses its `value`/`placeholder` attribute; `<button>`
+/// and `<textarea>` use their child text content when they have none of their
+/// own. Passwords are masked with bullets.
+fn form_control_text(context: &LayoutContext, id: NodeId) -> Option<String> {
+    let node = context.document.node(id)?;
+    let NodeKind::Element { tag_name, attributes } = node.kind() else {
+        return None;
+    };
+    let attr = |name: &str| {
+        attributes.iter().find(|item| item.name == name).map(|item| item.value.as_str())
+    };
+    // Only <input> needs a synthetic text: it is a void element whose value
+    // lives in an attribute. button/textarea/select already have child text
+    // nodes that flow normally.
+    if tag_name != "input" {
+        return None;
+    }
+    let text = attr("value")
+        .filter(|value| !value.is_empty())
+        .or_else(|| attr("placeholder"))
+        .unwrap_or("")
+        .to_owned();
+    if text.is_empty() {
+        return None;
+    }
+    if tag_name == "input" && attr("type") == Some("password") {
+        return Some("\u{2022}".repeat(text.chars().count()));
+    }
+    Some(text)
+}
+
 enum InlineItem<'a> {
-    Text { node: NodeId, text: &'a str, style: Option<Arc<ComputedStyle>> },
+    Text { node: NodeId, text: std::borrow::Cow<'a, str>, style: Option<Arc<ComputedStyle>> },
     Image { width: f32, height: f32 },
 }
 
@@ -1704,9 +1766,24 @@ fn collect_inline_items<'a>(
     };
     match node.kind() {
         NodeKind::Text(value) if !value.is_empty() => {
-            output.push(InlineItem::Text { node: layout.node, text: value, style: None });
+            output.push(InlineItem::Text {
+                node: layout.node,
+                text: std::borrow::Cow::Borrowed(value),
+                style: None,
+            });
         }
         NodeKind::Element { tag_name, .. } => {
+            // InlineBlock controls keep their text in their own line boxes;
+            // only plain inline controls need it injected into the parent flow.
+            if layout.display != Display::InlineBlock {
+                if let Some(control_text) = form_control_text(context, layout.node) {
+                    output.push(InlineItem::Text {
+                        node: layout.node,
+                        text: std::borrow::Cow::Owned(control_text),
+                        style: None,
+                    });
+                }
+            }
             if tag_name == "img"
                 && context.images.is_some_and(|images| images.contains_key(&layout.node))
             {
@@ -2014,7 +2091,7 @@ fn finite_non_negative(value: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{Display, GeneratedText, ImageSize, LayoutTree, PseudoContent};
+    use super::{Display, GeneratedText, ImageSize, LayoutBox, LayoutTree, PseudoContent};
     use bweb_css::{PseudoElement, StyleEngine, Stylesheet};
     use bweb_html::{HtmlDocument, NodeKind};
     use bweb_text::Font;
@@ -2205,6 +2282,29 @@ mod tests {
         assert_eq!(child.rect.width, 360.0, "calc(100% - 40px) of 400 = 360");
         assert_eq!(child.margin.left, 15.0, "calc(10px + 5px) = 15");
         assert_eq!(child.rect.x, 15.0);
+    }
+
+    #[test]
+    fn form_controls_display_their_value() {
+        let (_document, tree) = layout(
+            "<main><input value='Hello'><button>Click</button><textarea>Notes</textarea></main>",
+            "main { display:block }",
+        );
+        fn collect(box_: &LayoutBox, output: &mut Vec<String>) {
+            for line in &box_.line_boxes {
+                for fragment in &line.fragments {
+                    output.push(fragment.text.clone());
+                }
+            }
+            for child in &box_.children {
+                collect(child, output);
+            }
+        }
+        let mut fragments = Vec::new();
+        collect(&tree.root, &mut fragments);
+        assert!(fragments.iter().any(|text| text == "Hello"), "input value must render");
+        assert!(fragments.iter().any(|text| text == "Click"), "button label must render");
+        assert!(fragments.iter().any(|text| text == "Notes"), "textarea text must render");
     }
 
     #[test]

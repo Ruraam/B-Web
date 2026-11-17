@@ -36,6 +36,8 @@ layout tree, text and image rasterization, network transport and privacy filteri
   elements; foster parenting of misplaced table content.
 - Hyperlink lookup for hit-testing and navigation, `<base href>` resolution for
   subresources and clicked links.
+- Form controls rendered with a UA stylesheet and inline-block sizing: input
+  values/placeholder/size, password masking, button labels, textarea content.
 
 ### CSS
 - Lexer, rule/declaration parser and selector engine.
@@ -104,7 +106,8 @@ layout tree, text and image rasterization, network transport and privacy filteri
 - Broader JavaScript language and DOM API coverage inside `bweb-js`.
 - Bidirectional text and full OpenType feature configuration.
 - GPU-accelerated painting behind the renderer port.
-- Horizontal scrolling, selection, forms and richer browser chrome.
+- Horizontal scrolling, selection, focus/keyboard interaction for form controls
+  and richer browser chrome.
 - Standards conformance test suites and compatibility reporting.
 
 ## Design constraints

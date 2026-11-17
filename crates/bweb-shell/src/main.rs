@@ -157,7 +157,9 @@ fn load_page(url: &str, verbose: bool) -> Result<Page, Box<dyn Error>> {
 
     let mut stylesheets = Vec::new();
     let user_agent = Stylesheet::parse(
-        "html, body, main, header, footer, nav, section, article, aside, div, p, h1, h2, h3, ul, ol, li, form, table, blockquote { display: block; }",
+        "html, body, main, header, footer, nav, section, article, aside, div, p, h1, h2, h3, ul, ol, li, form, table, blockquote { display: block; } \
+         input, button, select { display: inline-block; border: 2px solid #aaa; padding: 2px 4px; background: white; color: black; } \
+         textarea { display: block; border: 2px solid #aaa; padding: 4px; background: white; color: black; height: 60px; }",
     )
     .expect("built-in user-agent stylesheet");
     stylesheets.push(user_agent);
