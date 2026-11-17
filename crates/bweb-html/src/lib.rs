@@ -144,6 +144,27 @@ impl HtmlDocument {
         (!title.is_empty()).then_some(title)
     }
 
+    /// Returns the text contents of inline <style> elements in document order.
+    #[must_use]
+    pub fn inline_stylesheets(&self) -> Vec<String> {
+        self.nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, node)| {
+                matches!(
+                    &node.kind,
+                    NodeKind::Element { tag_name, .. } if tag_name == "style"
+                )
+                .then(|| {
+                    let mut source = String::new();
+                    self.collect_text(NodeId(index), &mut source);
+                    source
+                })
+            })
+            .filter(|source| !source.trim().is_empty())
+            .collect()
+    }
+
     /// Lists external stylesheets, images, and scripts in document order.
     #[must_use]
     pub fn resource_references(&self) -> Vec<ResourceReference> {
@@ -615,6 +636,18 @@ mod tests {
         let html = document.node(root.children()[0]).expect("html node");
         assert!(matches!(html.kind(), NodeKind::Element { tag_name, .. } if tag_name == "html"));
         assert_eq!(html.parent(), Some(document.root()));
+    }
+
+    #[test]
+    fn extracts_inline_stylesheets_in_document_order() {
+        let document = HtmlDocument::parse(
+            "<html><head><style>body { color: red; }</style><style>p { margin: 0; }</style></head></html>",
+        );
+
+        assert_eq!(
+            document.inline_stylesheets(),
+            vec!["body { color: red; }", "p { margin: 0; }"]
+        );
     }
 
     #[test]
