@@ -9,6 +9,18 @@ use crate::{
     Transform,
 };
 
+fn effective_color(color: Color, opacities: &[f32], filters: &[crate::ColorFilter]) -> Color {
+    let alpha = *opacities.last().expect("root opacity");
+    let filter = *filters.last().expect("root filter");
+    let filtered = filter.apply(color);
+    Color::rgba(
+        filtered.red,
+        filtered.green,
+        filtered.blue,
+        (f32::from(color.alpha) * alpha).round() as u8,
+    )
+}
+
 /// CPU rasterizer for the backend-independent display list.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Rasterizer;
@@ -30,7 +42,7 @@ impl Rasterizer {
         let mut clip_radii: Vec<f32> = vec![0.0];
         let mut transforms = vec![Transform::IDENTITY];
         let mut opacities: Vec<f32> = vec![1.0];
-
+        let mut filters: Vec<crate::ColorFilter> = vec![crate::ColorFilter::default()];
         for item in &list.items {
             match item {
                 PaintItem::FillRect { rect, color } => {
@@ -40,15 +52,7 @@ impl Rasterizer {
                         transforms.last().expect("root transform").rect(*rect),
                         clip,
                         *clip_radii.last().expect("root radius"),
-                        {
-                            let alpha = *opacities.last().expect("root opacity");
-                            Color::rgba(
-                                color.red,
-                                color.green,
-                                color.blue,
-                                (f32::from(color.alpha) * alpha).round() as u8,
-                            )
-                        },
+                        effective_color(*color, &opacities, &filters),
                     );
                 }
                 PaintItem::BorderRect { rect, widths, color, .. } => {
@@ -59,15 +63,7 @@ impl Rasterizer {
                         *widths,
                         clip,
                         *clip_radii.last().expect("root radius"),
-                        {
-                            let alpha = *opacities.last().expect("root opacity");
-                            Color::rgba(
-                                color.red,
-                                color.green,
-                                color.blue,
-                                (f32::from(color.alpha) * alpha).round() as u8,
-                            )
-                        },
+                        effective_color(*color, &opacities, &filters),
                     );
                 }
                 PaintItem::LinearGradient { rect, gradient } => {
@@ -91,19 +87,13 @@ impl Rasterizer {
                             crate::PositionedGlyph { coverage: glyph.coverage.clone(), x, y }
                         })
                         .collect();
-                    let alpha = *opacities.last().expect("root opacity");
-                    let effective = Color::rgba(
-                        color.red,
-                        color.green,
-                        color.blue,
-                        (f32::from(color.alpha) * alpha).round() as u8,
-                    );
+                    let text_color = effective_color(*color, &opacities, &filters);
                     blit_glyphs(
                         framebuffer,
                         &moved,
                         clip,
                         *clip_radii.last().expect("root radius"),
-                        effective,
+                        text_color,
                     );
                     if *decoration != crate::TextDecoration::None {
                         let height = moved
@@ -132,7 +122,7 @@ impl Rasterizer {
                                     rect,
                                     clip,
                                     *clip_radii.last().expect("root radius"),
-                                    effective,
+                                    effective_color(*color, &opacities, &filters),
                                 );
                             }
                         }
@@ -151,6 +141,15 @@ impl Rasterizer {
                 }
                 PaintItem::PushSticky { .. } | PaintItem::PopSticky => {
                     // Interpreted by the shell's scroll translation pass.
+                }
+                PaintItem::PushFilter { filter } => {
+                    let parent = *filters.last().expect("root filter");
+                    filters.push(parent.compose(*filter));
+                }
+                PaintItem::PopFilter => {
+                    if filters.len() > 1 {
+                        filters.pop();
+                    }
                 }
                 PaintItem::PushOpacity { alpha } => {
                     let parent = *opacities.last().expect("root opacity");
@@ -762,6 +761,25 @@ mod tests {
         // Row 8 (below the glyph) should contain the underline pixels.
         let row: Vec<u8> = framebuffer.pixels()[8 * 6 * 4..9 * 6 * 4].to_vec();
         assert!(row.chunks_exact(4).any(|pixel| pixel == [255, 0, 0, 255]));
+    }
+
+    #[test]
+    fn color_filter_applies_to_subtree_drawing() {
+        let mut list = DisplayList::default();
+        list.push(PaintItem::PushClip { rect: rect(0.0, 0.0, 2.0, 1.0) });
+        list.push(PaintItem::PushFilter {
+            filter: crate::parse_filter(Some("brightness(0.5)")).unwrap(),
+        });
+        fill(&mut list, rect(0.0, 0.0, 1.0, 1.0), RED);
+        list.push(PaintItem::PopFilter);
+        list.push(PaintItem::FillRect { rect: rect(1.0, 0.0, 1.0, 1.0), color: RED });
+        list.push(PaintItem::PopClip);
+        let mut framebuffer = Framebuffer::new(2, 1).expect("framebuffer");
+
+        Rasterizer.rasterize(&list, &mut framebuffer);
+
+        assert_eq!(&framebuffer.pixels()[0..4], &[128, 0, 0, 255]);
+        assert_eq!(&framebuffer.pixels()[4..8], &[255, 0, 0, 255]);
     }
 
     #[test]

@@ -148,6 +148,10 @@ pub enum PaintItem {
     PushSticky { threshold: f32, dx: f32, dy: f32 },
     /// Ends a sticky subtree opened by `PushSticky`.
     PopSticky,
+    /// Applies a color filter to subsequent drawing, inherited by descendants.
+    PushFilter { filter: crate::ColorFilter },
+    /// Restores the filter in effect before `PushFilter`.
+    PopFilter,
     /// Multiplies the alpha of subsequent drawing, inherited by descendants.
     PushOpacity { alpha: f32 },
     /// Restores the opacity in effect before `PushOpacity`.

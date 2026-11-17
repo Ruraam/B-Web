@@ -53,8 +53,13 @@ impl<'a, L: PaintLayout> Painter<'a, L> {
         let mut sticky_depths: Vec<u32> = Vec::new();
         let mut transform_depths: Vec<u32> = Vec::new();
         let mut opacity_depths: Vec<u32> = Vec::new();
+        let mut filter_depths: Vec<u32> = Vec::new();
 
         self.layout.visit(&mut |node: PaintNode| {
+            while filter_depths.last().is_some_and(|depth| *depth >= node.depth) {
+                filter_depths.pop();
+                list.push(PaintItem::PopFilter);
+            }
             while opacity_depths.last().is_some_and(|depth| *depth >= node.depth) {
                 opacity_depths.pop();
                 list.push(PaintItem::PopOpacity);
@@ -170,6 +175,9 @@ impl<'a, L: PaintLayout> Painter<'a, L> {
         }
         while opacity_depths.pop().is_some() {
             list.push(PaintItem::PopOpacity);
+        }
+        while filter_depths.pop().is_some() {
+            list.push(PaintItem::PopFilter);
         }
         list.push(PaintItem::PopClip);
         list

@@ -4,6 +4,7 @@
 
 mod background;
 mod color;
+mod color_filter;
 mod display_list;
 mod framebuffer;
 mod gradient;
@@ -17,6 +18,7 @@ pub use background::{
     parse_background_position, parse_background_repeat, parse_background_size,
 };
 pub use color::parse_color;
+pub use color_filter::{ColorFilter, parse_filter};
 pub use display_list::{
     Color, DisplayList, Image, ImageError, PaintItem, PositionedGlyph, TextDecoration, TextRun,
 };

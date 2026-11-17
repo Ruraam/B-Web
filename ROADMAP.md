@@ -73,7 +73,7 @@ layout tree, text and image rasterization, network transport and privacy filteri
   and percentage/length color stops.
 - Composable `transform` translate/scale with rasterizer application to rects,
   glyphs and clips; subtree `opacity`, `text-decoration` lines and rounded-corner
-  clipping from `border-radius`.
+  clipping from `border-radius` and composable color filters.
 - Single-line flexbox: direction, grow/shrink, justification, alignment, gaps
   and the `flex`/`gap` shorthands.
 - `position: relative/absolute/fixed` with offsets and positioned containing
@@ -95,8 +95,8 @@ layout tree, text and image rasterization, network transport and privacy filteri
   and the full tokenizer state tables.
 - Additional CSS layout: `minmax()` grid tracks, subgrid and orthogonal writing
   modes.
-- CSS property coverage: background-origin/clip, filters, rotate/skew/perspective
-  transforms and remaining shorthand variants.
+- CSS property coverage: background-origin/clip, blur/advanced filters,
+  rotate/skew/perspective transforms and remaining shorthand variants.
 
 ## Planned
 

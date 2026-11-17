@@ -203,7 +203,9 @@ fn translate_y(item: &mut PaintItem, offset: f32) {
                 glyph.y += offset;
             }
         }
-        PaintItem::PushSticky { .. }
+        PaintItem::PushFilter { .. }
+        | PaintItem::PopFilter
+        | PaintItem::PushSticky { .. }
         | PaintItem::PopSticky
         | PaintItem::PushOpacity { .. }
         | PaintItem::PopOpacity

@@ -46,6 +46,8 @@ pub struct PaintNode {
     pub transform: Option<String>,
     /// CSS `opacity` for this node and its subtree.
     pub opacity: Option<String>,
+    /// CSS `filter` value for this node and its subtree.
+    pub filter: Option<String>,
     /// Scroll-dependent sticky shift: `(active, threshold, dx, dy)`.
     pub sticky: Option<(bool, f32, f32, f32)>,
 }
