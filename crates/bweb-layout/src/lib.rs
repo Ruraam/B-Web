@@ -1510,14 +1510,14 @@ fn build_line_boxes(
     let text_align = style.and_then(|s| s.get("text-align")).unwrap_or("start");
     let letter_spacing = style
         .and_then(|s| s.get("letter-spacing"))
-        .and_then(|value| if value == "normal" { Some(0.0) } else { parse_length(value) })
+        .and_then(|value| if value == "normal" { Some(0.0) } else { parse_signed_length(value) })
         .unwrap_or(0.0);
     let word_spacing = style
         .and_then(|s| s.get("word-spacing"))
-        .and_then(|value| if value == "normal" { Some(0.0) } else { parse_length(value) })
+        .and_then(|value| if value == "normal" { Some(0.0) } else { parse_signed_length(value) })
         .unwrap_or(0.0);
     let text_indent =
-        style.and_then(|s| s.get("text-indent")).and_then(parse_length).unwrap_or(0.0);
+        style.and_then(|s| s.get("text-indent")).and_then(parse_signed_length).unwrap_or(0.0);
     let space_advance = context.measurer.char_advance(' ', font_size) + word_spacing;
     let mut items = Vec::new();
     if let Some(before) = pseudo.and_then(|content| content.before.as_ref()) {
@@ -1848,6 +1848,19 @@ fn parse_length(value: &str) -> Option<f32> {
     parse_css_length(value, 16.0)
 }
 
+/// Parses a length that may be negative (letter/word spacing, text-indent).
+fn parse_signed_length(value: &str) -> Option<f32> {
+    let value = value.trim();
+    let (numeric, scale) = if let Some(number) = value.strip_suffix("px") {
+        (number, 1.0)
+    } else if let Some(number) = value.strip_suffix("em") {
+        (number, 16.0)
+    } else {
+        (value, 1.0)
+    };
+    numeric.trim().parse::<f32>().ok().map(|n| n * scale).filter(|n| n.is_finite())
+}
+
 /// Resolves a length, with percentages resolved against `basis` (the width of
 /// the containing block for `width`/`max-width`).
 fn parse_length_basis(value: &str, font_size: f32, basis: f32) -> Option<f32> {
@@ -2036,6 +2049,17 @@ mod tests {
         assert_eq!(box_node.rect.height, 50.0);
         assert_eq!(box_node.padding.left, 5.0);
         assert_eq!(box_node.border.left, 0.0);
+    }
+
+    #[test]
+    fn negative_letter_spacing_narrows_advances() {
+        let (plain, plain_tree) = layout("<main>abc</main>", "main { display:block; width:200px }");
+        let (tight, tight_tree) =
+            layout("<main>abc</main>", "main { display:block; width:200px; letter-spacing:-3px }");
+        let width = |tree: &LayoutTree, doc: &HtmlDocument| {
+            find(&tree.root, element(doc, "main")).expect("main").line_boxes[0].rect.width
+        };
+        assert!(width(&tight_tree, &tight) < width(&plain_tree, &plain));
     }
 
     #[test]
