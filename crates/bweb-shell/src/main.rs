@@ -658,7 +658,7 @@ impl<D: raw_window_handle::HasDisplayHandle> WindowApp<D> {
             let object = format!("element:{}", target.index());
             let callbacks = self.events.borrow().callbacks(&object, "click");
             for callback in callbacks {
-                if let Err(error) = self.runtime.call(callback, vec![event.clone()]) {
+                if let Err(error) = self.runtime.call_event(callback, vec![event.clone()]) {
                     eprintln!("B-Web: click handler error: {error}");
                 }
             }
@@ -1187,6 +1187,59 @@ mod tests {
             runtime.call(callback, vec![Value::Host("event".into())]).expect("handler");
         }
         assert!(events.borrow().prevented());
+    }
+
+    #[test]
+    fn over_budget_click_handler_is_reported_and_dispatch_continues() {
+        let document = Rc::new(RefCell::new(HtmlDocument::parse(
+            "<html><body><p id='slow'>a</p><p id='fast'>b</p></body></html>",
+        )));
+        let events = Rc::new(RefCell::new(EventRegistry::default()));
+        let mut runtime = Runtime::new();
+        runtime.set_host(Box::new(DomHost::new(&document, events.clone())));
+        runtime.define_global("document", Value::Host("document".into()));
+        runtime
+            .eval(
+                "document.getElementById('slow').addEventListener('click', function() { \
+                   document.title = 'partial'; \
+                   while (true) { } \
+                 }); \
+                 document.getElementById('fast').addEventListener('click', function() { \
+                   document.title = 'recovered'; \
+                 });",
+            )
+            .expect("scripts");
+
+        // Dispatch in document order, mirroring WindowApp::dispatch_click.
+        let (slow, fast) = {
+            let dom = document.borrow();
+            (
+                dom.element_by_id("slow").expect("slow paragraph"),
+                dom.element_by_id("fast").expect("fast paragraph"),
+            )
+        };
+        events.borrow_mut().reset();
+        let mut failures = Vec::new();
+        for target in [slow, fast] {
+            let callbacks =
+                events.borrow().callbacks(&format!("element:{}", target.index()), "click");
+            for callback in callbacks {
+                if let Err(error) = runtime.call_event(callback, vec![Value::Host("event".into())])
+                {
+                    failures.push(error.message);
+                }
+            }
+        }
+
+        assert_eq!(failures.len(), 1, "only the spinning handler should fail");
+        assert!(failures[0].contains("budget"), "unexpected error: {}", failures[0]);
+        assert_eq!(
+            document.borrow().title().as_deref(),
+            Some("recovered"),
+            "the DOM remains usable and the next handler still runs"
+        );
+        // A later page script also works: the runtime was not left poisoned.
+        assert_eq!(runtime.eval("2 + 2").expect("later script").display(), "4");
     }
 
     #[test]
