@@ -92,6 +92,28 @@ layout tree, text and image rasterization, network transport and privacy filteri
 - Address bar, clickable links, history (`Alt+←`/`Alt+→`) and vertical scroll.
 - Navigation on a background thread with stale-result rejection.
 
+### Testing and robustness
+- End-to-end integration tests covering HTML → CSS → layout → text → paint →
+  rasterize, plus tests that drive the real navigation path through a local HTTP
+  server (document fetch, script extraction, subresource fetching and decoding).
+- Compatibility suite for representative real-web patterns: flex cards and
+  navbars, `fr` grid galleries, selector specificity, shorthands, custom
+  properties, `@layer`/`@media` cascade, and common DOM/JS list, iteration and
+  event-handler patterns.
+- Bounded text-shadow blur (radius clamped to 64px, restricted to the glyph
+  bounding box) composited source-over in premultiplied alpha, with clip
+  propagation and linear sliding-window box blur.
+- Image decode limits applied before allocation, a global per-page pixel budget,
+  shared decoded bitmaps and support for panoramic images within that budget.
+
+### Performance
+- `cargo run --release -p bweb-renderer --example shadow_bench [blur] [iterations]`
+  measures blurred text-shadow rasterization. The blur uses a sliding-window box
+  filter (O(pixels) per pass rather than O(pixels × radius)) and reuses three
+  scratch buffers across passes. On a reference 800×600 frame with 40 shadowed
+  text runs this cut frame time from ~164 ms to ~49 ms at blur 8, and from
+  ~622 ms to ~100 ms at blur 16.
+
 ## In progress
 
 - Remaining HTML5 tree construction: the complete adoption-agency inner loop
@@ -108,7 +130,7 @@ layout tree, text and image rasterization, network transport and privacy filteri
 - GPU-accelerated painting behind the renderer port.
 - Horizontal scrolling, selection, focus/keyboard interaction for form controls
   and richer browser chrome.
-- Standards conformance test suites and compatibility reporting.
+- Growing the compatibility suite into standards conformance reporting.
 
 ## Design constraints
 
