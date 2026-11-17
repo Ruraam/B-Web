@@ -337,8 +337,6 @@ fn layout_node(
     let mut margin = parse_edges(style, "margin");
     let padding = parse_edges(style, "padding");
     let border = parse_border_widths(style);
-    let content_x = x + margin.left + border.left + padding.left;
-    let content_y = y + margin.top + border.top + padding.top;
     let available_outer_width = (available_width - margin.left - margin.right).max(0.0);
     let horizontal_insets = padding.left + padding.right + border.left + border.right;
     let box_sizing = style.and_then(|style| style.get("box-sizing")).unwrap_or("content-box");
@@ -372,6 +370,9 @@ fn layout_node(
         (false, true) => margin.right += remaining,
         (false, false) => {}
     }
+    // Content origin must be computed after auto margins are resolved above.
+    let content_x = x + margin.left + border.left + padding.left;
+    let content_y = y + margin.top + border.top + padding.top;
     let image_size = context
         .images
         .and_then(|images| images.get(&id))
@@ -2023,6 +2024,27 @@ mod tests {
         assert_eq!(box_node.rect.height, 50.0);
         assert_eq!(box_node.padding.left, 5.0);
         assert_eq!(box_node.border.left, 0.0);
+    }
+
+    #[test]
+    fn auto_margins_position_children_at_the_absolute_content_origin() {
+        let (document, tree) = layout(
+            "<main><section><div>x</div></section></main>",
+            "main { display:block } \
+             section { display:grid; width:100px; margin:auto; grid-template-columns:1fr 1fr } \
+             div { display:block; height:10px }",
+        );
+        let main = find(&tree.root, element(&document, "main")).expect("main");
+        let section = main
+            .children
+            .iter()
+            .find(|c| c.node == element(&document, "section"))
+            .expect("section");
+        let div = section.children.first().expect("div");
+        // The section is centered at x=(800-100)/2=350; its first grid cell
+        // must start there, not at the section's margin edge.
+        assert_eq!(section.rect.x, 350.0);
+        assert_eq!(div.rect.x, 350.0, "child must use the absolute content origin");
     }
 
     #[test]
