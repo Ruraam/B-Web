@@ -97,6 +97,16 @@ impl<'a, L: PaintLayout> Painter<'a, L> {
                 list.push(PaintItem::PushFilter { filter });
                 filter_depths.push(node.depth);
             }
+            if let Some(alpha) = node
+                .opacity
+                .as_deref()
+                .and_then(|value| value.trim().parse::<f32>().ok())
+                .map(|value| value.clamp(0.0, 1.0))
+                .filter(|value| *value < 1.0)
+            {
+                list.push(PaintItem::PushOpacity { alpha });
+                opacity_depths.push(node.depth);
+            }
 
             let rect = scale_rect(node.rect, self.scale_factor);
             let radius = node.style.border_radius * self.scale_factor;
@@ -242,6 +252,17 @@ mod tests {
 
     fn viewport() -> Rect {
         Rect { x: 0.0, y: 0.0, width: 10_000.0, height: 10_000.0 }
+    }
+
+    #[test]
+    fn emits_opacity_marker_for_a_translucent_node() {
+        let mut node =
+            node(0, Rect { x: 0.0, y: 0.0, width: 10.0, height: 10.0 }, PaintStyle::default());
+        node.opacity = Some("0.5".to_owned());
+        let layout = MockLayout { viewport: viewport(), nodes: vec![node] };
+        let list = Painter::new(&layout, 1.0).expect("valid scale").paint();
+        assert!(list.items.iter().any(|item| matches!(item, PaintItem::PushOpacity { alpha } if (*alpha - 0.5).abs() < 0.001)));
+        assert!(list.items.iter().any(|item| matches!(item, PaintItem::PopOpacity)));
     }
 
     #[test]
