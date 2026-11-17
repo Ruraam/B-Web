@@ -1923,6 +1923,43 @@ mod tests {
     }
 
     #[test]
+    fn adversarial_markup_never_panics() {
+        let cases = [
+            "<",
+            ">",
+            "<>",
+            "</>",
+            "<<<>>>",
+            "<script>",
+            "<style>",
+            "<!--",
+            "-->",
+            "&",
+            "&#",
+            "&#x",
+            "&notit;",
+            "<table><td>x",
+            "<template><div>",
+            "<b><p>x</b>y</p>",
+            "<img src='&#0;'>",
+            "<a href='javascript:alert(1)'>x</a>",
+            "\u{0}\u{1}\u{2}",
+            "<div title='é😀'>x</div>",
+            "<div style=\"background:url('é😀.png')\">x</div>",
+            "<p><b>one<p>two</b>three</p>",
+            "<html lang=en><body class=x><p>y",
+        ];
+        for case in cases {
+            let document = HtmlDocument::parse(case);
+            // Parsing must produce a usable document without panicking.
+            let _ = document.title();
+            let _ = document.resource_references();
+            let _ = document.inline_stylesheets();
+            let _ = document.node_count();
+        }
+    }
+
+    #[test]
     fn template_content_is_stored_in_an_inert_subtree() {
         let document = HtmlDocument::parse(
             "<main><template><p>hidden</p><script>x()</script></template><p>visible</p></main>",
@@ -2308,6 +2345,77 @@ mod tests {
                 })
                 .expect("text node");
             assert_eq!(document.hyperlink_href(id), None);
+        }
+    }
+    #[test]
+    fn fuzz_markup_never_panics() {
+        let cases = [
+            "<",
+            ">",
+            "<>",
+            "</>",
+            "<<<>>>",
+            "<script>",
+            "<style>",
+            "<!--",
+            "-->",
+            "&",
+            "&#",
+            "&#x",
+            "&notit;",
+            "<table><td>x",
+            "<template><div>",
+            "<b><p>x</b>y</p>",
+            "<img src='&#0;'>",
+            "<a href='javascript:alert(1)'>x</a>",
+            "\u{0}\u{1}\u{2}",
+            "<div title='é😀'>x</div>",
+            "url(data:image/png;base64,AAAA)",
+            "odJFCrnl/edlBD)dz>C&Jau/RJtBRnlWmTSHf;pW",
+            "LUyif",
+            "DLkDmWJ;UuVTAIjvFu#WICPhDeOZIiBOB(Y;sHrFH/",
+            "ZUCré(lgotu/iXW#GboIRoL\"u;aH)w)nM)ztVuaP coUNEhEkk iqq-vH",
+            "/BzNZV'😀&pFCiRcDCajhDieQjéEJ Bq-F",
+            "-<ymm\"T/<#gmhZRnFyy&r/xJ#Fj'mgblEv< =BZhvWaXH;K/ t",
+            "LBhhOhg=)uhé",
+            "xiiEZ",
+            "Ffk>😀OH",
+            "OEHYqM;Ojb;mj",
+            "B)HqSiFVKu'MbMnrHontIKARAH) Ggl/Jf",
+            "",
+            "qHu'/bojteVs\"qfNUfTAF",
+            "nT<tEuw<dwQ<FIunWe-Cz;SNDCdyZQJiJSéZQdoHwH",
+            "n\"",
+            "O\"éoXyGf\"a😀zU\"iQOpM)N<",
+            "ZLqy>WwMZaMKA\"P#''Bé",
+            "vkKéQlENCzsdfF-j;>yX(ZFsan/Cw😀",
+            "gFp;r#O')/&u-&HFJ😀 EJ'jKEIQOk",
+            "tDXtBi><",
+            "#>hA>XcW=aTMX>C CI\" d",
+            "RZv#qdYdk/r#xgHWPB;PRWJ>",
+            "k-cgSCifdFzctEq-",
+            "oB#GVvouNndNWYzjFnMpfS/Vi)Rb> n\"U;t\"w😀I=#\"",
+            "IPFlJ&F#WRd(Px BTHRJJb😀ykE< E- &clLCZFNV-S/QT;INGDpy",
+            "pxyB=JKmyLDUwMbqJfgL",
+            "q nbK-='RxgG=oiZ jgttMkFp>C😀W&'M/NhmABHkuEwj",
+            "a<&-LeDKK;",
+            "DHz/",
+            "CtIsjhv",
+            "NK'p#MZI)('kf\"PGdlDcIfw-😀'Jx\" l-S<QPnuQ<(KZe;lOGPo",
+            "Zéa#<gy😀U('gAIqK' pdEuNb<lCo#pt(LéI>=-F;sXyériJ>R",
+            ")IaKM t&=SQW;PyEXD<fO-WXt(eq)Qm'm;bs<tj-HRYkQWO eiEKDl\"mm'v",
+            "MdfPhLTV\"sF<xvwkWE(sD#G;Gb#Kuj'SM/G;MzX=nEWT",
+            "LLcYJbg(KDTCyGrmfN'eUqlLP>wzqU)IvG=L",
+            "Ro#jsCYUlYbHp;VHWVnD-dPCi#M<orfeM(omErX;V>t>m <",
+            "JeVB''EUmVThYJyp;lBcgQFqAiABDQsaJsqGwodqbTEPcwHgq>oi-&Uén&)C",
+            "f😀M;dh=Z/n 'jkPsiqJPWL;)\"moB\"&D<R;Z>mO/OGVt-ilkl\"mVqhQp<T/gK",
+            "NTn)Bt=CnSVoJC/dIdxINRSaxsZisdlBW>;RuV",
+            "PkgtugkI'/ '>IBéoS\"",
+        ];
+        for case in cases {
+            let d = HtmlDocument::parse(case);
+            let _ = d.node_count();
+            let _ = d.resource_references();
         }
     }
 }
