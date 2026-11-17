@@ -174,6 +174,10 @@ enum Flow {
 
 /// Global instruction budget per top-level evaluation or event callback.
 const INSTRUCTION_BUDGET: u64 = 10_000_000;
+/// Smaller budget for interactive event handlers, which run directly on the
+/// window's event loop. Measured at roughly 5 ms in release builds (10M ticks
+/// take ~0.5 s), it keeps a handler within a frame's time slice.
+pub const EVENT_HANDLER_INSTRUCTION_BUDGET: u64 = 100_000;
 /// Maximum nested function calls before aborting (prevents stack overflow).
 const MAX_CALL_DEPTH: usize = 64;
 
@@ -538,10 +542,27 @@ impl Runtime {
         }
     }
 
-    /// Calls a runtime value as a function, used by embedding event dispatch.
+    /// Calls a runtime value as a function with the full script budget.
     /// Each dispatch gets a fresh budget so one handler cannot starve another.
     pub fn call(&mut self, callee: Value, args: Vec<Value>) -> Result<Value, JsError> {
-        self.budget = INSTRUCTION_BUDGET;
+        self.call_with_budget(callee, args, INSTRUCTION_BUDGET)
+    }
+
+    /// Calls an interactive event handler with the smaller per-frame budget.
+    pub fn call_event(&mut self, callee: Value, args: Vec<Value>) -> Result<Value, JsError> {
+        self.call_with_budget(callee, args, EVENT_HANDLER_INSTRUCTION_BUDGET)
+    }
+
+    /// Calls a function with an explicit instruction budget. Both the budget
+    /// and the call depth are reset, so a failed call cannot affect the next
+    /// evaluation.
+    pub fn call_with_budget(
+        &mut self,
+        callee: Value,
+        args: Vec<Value>,
+        budget: u64,
+    ) -> Result<Value, JsError> {
+        self.budget = budget;
         self.call_depth = 0;
         self.call_value(callee, args)
     }

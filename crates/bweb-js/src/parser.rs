@@ -4,6 +4,12 @@ use crate::{
     ast::{BinaryOp, Expr, LogicalOp, Stmt, UnaryOp, VarKind},
     lexer::{Token, TokenKind, tokenize},
 };
+use std::{cell::Cell, rc::Rc};
+
+/// Maximum nesting depth of the recursive-descent parser. Resource size limits
+/// do not bound nesting, so this guard prevents stack exhaustion on deeply
+/// nested source produced by a remote script.
+const MAX_PARSE_DEPTH: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseError {
@@ -18,15 +24,36 @@ impl std::fmt::Display for ParseError {
 
 impl std::error::Error for ParseError {}
 
+/// Decrements the shared nesting counter when a recursive parse frame exits.
+struct DepthGuard(Rc<Cell<usize>>);
+
+impl Drop for DepthGuard {
+    fn drop(&mut self) {
+        self.0.set(self.0.get() - 1);
+    }
+}
+
 struct Parser {
     tokens: Vec<Token>,
     position: usize,
+    depth: Rc<Cell<usize>>,
 }
 
 /// Parses a source string into a list of statements.
 pub fn parse(source: &str) -> Result<Vec<Stmt>, ParseError> {
+    parse_with_depth(source, 0)
+}
+
+/// Internal entry point that carries the nesting depth across template
+/// interpolations, which are parsed as nested sources.
+pub(crate) fn parse_with_depth(source: &str, depth: usize) -> Result<Vec<Stmt>, ParseError> {
+    if depth >= MAX_PARSE_DEPTH {
+        return Err(ParseError {
+            message: format!("maximum parser nesting depth ({MAX_PARSE_DEPTH}) exceeded"),
+        });
+    }
     let tokens = tokenize(source).map_err(|error| ParseError { message: error.message })?;
-    let mut parser = Parser { tokens, position: 0 };
+    let mut parser = Parser { tokens, position: 0, depth: Rc::new(Cell::new(depth)) };
     let mut statements = Vec::new();
     while parser.peek().kind != TokenKind::Eof {
         statements.push(parser.parse_statement()?);
@@ -35,6 +62,19 @@ pub fn parse(source: &str) -> Result<Vec<Stmt>, ParseError> {
 }
 
 impl Parser {
+    /// Enters one recursive parse frame, rejecting nesting beyond the limit
+    /// before any further recursive call is made.
+    fn enter(&self) -> Result<DepthGuard, ParseError> {
+        let next = self.depth.get().saturating_add(1);
+        if next > MAX_PARSE_DEPTH {
+            return Err(ParseError {
+                message: format!("maximum parser nesting depth ({MAX_PARSE_DEPTH}) exceeded"),
+            });
+        }
+        self.depth.set(next);
+        Ok(DepthGuard(self.depth.clone()))
+    }
+
     fn peek(&self) -> &Token {
         &self.tokens[self.position]
     }
@@ -83,6 +123,7 @@ impl Parser {
     }
 
     fn parse_statement(&mut self) -> Result<Stmt, ParseError> {
+        let _depth = self.enter()?;
         if self.consume(";") {
             return Ok(Stmt::Empty);
         }
@@ -160,6 +201,7 @@ impl Parser {
     }
 
     fn parse_block(&mut self) -> Result<Vec<Stmt>, ParseError> {
+        let _depth = self.enter()?;
         self.expect("{")?;
         let mut statements = Vec::new();
         while !self.check("}") && self.peek().kind != TokenKind::Eof {
@@ -213,10 +255,12 @@ impl Parser {
     }
 
     fn parse_expression(&mut self) -> Result<Expr, ParseError> {
+        let _depth = self.enter()?;
         self.parse_assignment()
     }
 
     fn parse_assignment(&mut self) -> Result<Expr, ParseError> {
+        let _depth = self.enter()?;
         let target = self.parse_conditional()?;
         if self.consume("=") {
             let value = self.parse_assignment()?;
@@ -330,6 +374,7 @@ impl Parser {
     }
 
     fn parse_unary(&mut self) -> Result<Expr, ParseError> {
+        let _depth = self.enter()?;
         let op = match self.operator() {
             "-" => Some(UnaryOp::Negate),
             "!" => Some(UnaryOp::Not),
@@ -409,6 +454,7 @@ impl Parser {
     }
 
     fn parse_primary(&mut self) -> Result<Expr, ParseError> {
+        let _depth = self.enter()?;
         if self.peek().kind == TokenKind::Identifier
             && self.tokens.get(self.position + 1).is_some_and(|token| token.text == "=>")
         {
@@ -445,7 +491,7 @@ impl Parser {
             }
             TokenKind::Template => {
                 self.position += 1;
-                parse_template(&token.text)
+                parse_template(&token.text, self.depth.get())
             }
             TokenKind::Identifier => {
                 self.position += 1;
@@ -530,7 +576,7 @@ impl Parser {
     }
 }
 
-fn parse_template(source: &str) -> Result<Expr, ParseError> {
+fn parse_template(source: &str, depth: usize) -> Result<Expr, ParseError> {
     let mut parts = Vec::new();
     let mut rest = source;
     while let Some(start) = rest.find("${") {
@@ -538,7 +584,7 @@ fn parse_template(source: &str) -> Result<Expr, ParseError> {
             parts.push(Expr::String(rest[..start].to_owned()));
         }
         let after = &rest[start + 2..];
-        let mut depth = 1usize;
+        let mut brace_depth = 1usize;
         let mut end = None;
         let mut quote = None;
         for (index, character) in after.char_indices() {
@@ -550,10 +596,10 @@ fn parse_template(source: &str) -> Result<Expr, ParseError> {
             }
             match character {
                 '\'' | '"' | '`' => quote = Some(character),
-                '{' => depth += 1,
+                '{' => brace_depth += 1,
                 '}' => {
-                    depth -= 1;
-                    if depth == 0 {
+                    brace_depth -= 1;
+                    if brace_depth == 0 {
                         end = Some(index);
                         break;
                     }
@@ -564,7 +610,7 @@ fn parse_template(source: &str) -> Result<Expr, ParseError> {
         let Some(end) = end else {
             return Err(ParseError { message: "unterminated template interpolation".into() });
         };
-        let expression = crate::parse(&after[..end])?;
+        let expression = parse_with_depth(&after[..end], depth + 1)?;
         let expression = match expression.first() {
             Some(Stmt::Expression(expression)) => expression.clone(),
             None => Expr::Undefined,
@@ -582,6 +628,24 @@ fn parse_template(source: &str) -> Result<Expr, ParseError> {
 #[cfg(test)]
 mod tests {
     use super::parse;
+
+    #[test]
+    fn deeply_nested_source_is_rejected_with_a_clean_error() {
+        let cases: Vec<(&str, String)> = vec![
+            ("parentheses", format!("{}1{}", "(".repeat(5_000), ")".repeat(5_000))),
+            ("unary chain", format!("{}1", "!".repeat(5_000))),
+            ("assignment chain", format!("{}=1", "a=".repeat(5_000))),
+            ("nested blocks", format!("{}{}{}", "{".repeat(5_000), ";", "}".repeat(5_000))),
+        ];
+        for (name, source) in cases {
+            let error = parse(&source).expect_err(name);
+            assert!(
+                error.message.contains("nesting depth"),
+                "{name} was not rejected by the depth guard: {}",
+                error.message
+            );
+        }
+    }
 
     #[test]
     fn parses_expressions_and_control_flow() {

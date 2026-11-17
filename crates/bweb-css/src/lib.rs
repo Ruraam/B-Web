@@ -11,6 +11,12 @@ use std::{
     fmt,
 };
 
+/// Maximum nesting depth for recursive CSS parsing (nested `@media`/`@layer`
+/// blocks and nested `:not()` selectors). Resource size limits alone do not
+/// bound recursion depth, so this guard prevents stack exhaustion on hostile
+/// stylesheets.
+const MAX_PARSE_DEPTH: usize = 64;
+
 /// A token emitted by the CSS lexer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Token {
@@ -221,6 +227,10 @@ impl Stylesheet {
 }
 
 fn parse_tokens(tokens: &[Token]) -> Result<Stylesheet, CssError> {
+    parse_tokens_at_depth(tokens, 0)
+}
+
+fn parse_tokens_at_depth(tokens: &[Token], depth: usize) -> Result<Stylesheet, CssError> {
     let mut rules = Vec::new();
     let mut index = 0;
     while index < tokens.len() {
@@ -251,15 +261,24 @@ fn parse_tokens(tokens: &[Token]) -> Result<Stylesheet, CssError> {
                 .collect::<String>();
             let block_start = index + 1;
             let block_end = skip_block(tokens, index)?;
+            let nests = name == "media" || (name == "layer" && !condition.trim().is_empty());
+            // Check before recursing: the token slice may be large even when
+            // the remaining stack is not.
+            if nests && depth >= MAX_PARSE_DEPTH {
+                return Err(CssError::new(
+                    tokens[index].offset,
+                    "maximum CSS nesting depth exceeded",
+                ));
+            }
             if name == "media" {
-                let nested = parse_tokens(&tokens[block_start..block_end - 1])?;
+                let nested = parse_tokens_at_depth(&tokens[block_start..block_end - 1], depth + 1)?;
                 for mut rule in nested.rules {
                     rule.media = Some(condition.trim().to_owned());
                     rule.source_order = rules.len();
                     rules.push(rule);
                 }
             } else if name == "layer" && !condition.trim().is_empty() {
-                let nested = parse_tokens(&tokens[block_start..block_end - 1])?;
+                let nested = parse_tokens_at_depth(&tokens[block_start..block_end - 1], depth + 1)?;
                 let layer_name = condition.trim().to_owned();
                 for mut rule in nested.rules {
                     rule.layer = Some(layer_name.clone());
@@ -644,7 +663,7 @@ fn parse_complex_selector(source: &str) -> Result<ComplexSelector, CssError> {
             if index >= chars.len() {
                 return Err(CssError::new(0, "selector cannot end with a combinator"));
             }
-            let compound = parse_compound(&chars, &mut index, &mut specificity)?;
+            let compound = parse_compound(&chars, &mut index, &mut specificity, 0)?;
             combinators.push(combinator);
             compounds.push(compound);
             continue;
@@ -656,7 +675,7 @@ fn parse_complex_selector(source: &str) -> Result<ComplexSelector, CssError> {
                 return Err(CssError::new(0, "expected whitespace or child combinator"));
             }
         }
-        let compound = parse_compound(&chars, &mut index, &mut specificity)?;
+        let compound = parse_compound(&chars, &mut index, &mut specificity, 0)?;
         compounds.push(compound);
     }
     if compounds.is_empty() || combinators.len() + 1 != compounds.len() {
@@ -673,6 +692,7 @@ fn parse_compound(
     chars: &[char],
     index: &mut usize,
     specificity: &mut Specificity,
+    depth: usize,
 ) -> Result<CompoundSelector, CssError> {
     let mut compound = CompoundSelector::default();
     let mut consumed = false;
@@ -825,13 +845,20 @@ fn parse_compound(
                             .ok_or_else(|| CssError::new(0, "invalid :nth-last-child argument"))?,
                     ),
                     "not" => {
+                        if depth >= MAX_PARSE_DEPTH {
+                            return Err(CssError::new(0, "maximum CSS nesting depth exceeded"));
+                        }
                         let source = argument
                             .ok_or_else(|| CssError::new(0, ":not requires a selector argument"))?;
                         let inner_chars: Vec<char> = source.chars().collect();
                         let mut inner_index = 0;
                         let mut inner_specificity = Specificity::default();
-                        let inner =
-                            parse_compound(&inner_chars, &mut inner_index, &mut inner_specificity)?;
+                        let inner = parse_compound(
+                            &inner_chars,
+                            &mut inner_index,
+                            &mut inner_specificity,
+                            depth + 1,
+                        )?;
                         if inner_index != inner_chars.len() {
                             return Err(CssError::new(0, "unsupported :not argument"));
                         }
@@ -2379,6 +2406,44 @@ mod tests {
         assert_eq!(span.get("flex-grow"), Some("1"));
         assert_eq!(span.get("flex-shrink"), Some("1"));
         assert_eq!(span.get("flex-basis"), Some("0"));
+    }
+
+    #[test]
+    fn deeply_nested_at_rules_are_rejected_without_stack_overflow() {
+        // Thousands of nested @media blocks must be rejected by the explicit
+        // depth guard, long before the native stack is exhausted.
+        let mut media = String::new();
+        for _ in 0..5_000 {
+            media.push_str("@media screen { ");
+        }
+        media.push_str("p { color: red }");
+        for _ in 0..5_000 {
+            media.push_str(" }");
+        }
+        let error = Stylesheet::parse(&media).expect_err("deep @media must fail");
+        assert!(error.message.contains("nesting depth"), "unexpected error: {}", error.message);
+
+        let mut layers = String::new();
+        for index in 0..5_000 {
+            layers.push_str(&format!("@layer L{index} {{ "));
+        }
+        layers.push_str("p { color: red }");
+        for _ in 0..5_000 {
+            layers.push_str(" }");
+        }
+        let error = Stylesheet::parse(&layers).expect_err("deep @layer must fail");
+        assert!(error.message.contains("nesting depth"), "unexpected error: {}", error.message);
+    }
+
+    #[test]
+    fn deeply_nested_negation_selectors_are_rejected() {
+        let mut selector = String::from("p");
+        for _ in 0..1_000 {
+            selector = format!(":not({selector})");
+        }
+        let source = format!("{selector} {{ color: red }}");
+        let error = Stylesheet::parse(&source).expect_err("deep :not must fail");
+        assert!(error.message.contains("nesting depth"), "unexpected error: {}", error.message);
     }
 
     #[test]

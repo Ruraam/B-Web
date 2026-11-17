@@ -120,6 +120,54 @@ mod tests {
     }
 
     #[test]
+    fn event_budget_stops_a_long_handler_and_the_runtime_recovers() {
+        let mut runtime = Runtime::new();
+        runtime
+            .eval("function spin() { while (true) { } } function ok() { return 7; }")
+            .expect("define functions");
+        let spin = runtime.eval("spin").expect("spin function");
+        let error = runtime.call_event(spin, vec![]).expect_err("handler must be stopped");
+        assert!(error.message.contains("budget"), "unexpected error: {}", error.message);
+
+        // A failed handler leaves the runtime usable: fresh eval and a second
+        // handler both still work.
+        assert_eq!(runtime.eval("1 + 1").expect("eval after failure").display(), "2");
+        let ok = runtime.eval("ok").expect("ok function");
+        assert_eq!(runtime.call_event(ok, vec![]).expect("second handler").display(), "7");
+    }
+
+    #[test]
+    fn event_budget_keeps_the_call_depth_limit_and_restores_it() {
+        let mut runtime = Runtime::new();
+        runtime
+            .eval("function recurse() { return recurse(); } function down(n) { if (n == 0) { return 0; } return down(n - 1); }")
+            .expect("define functions");
+        let recurse = runtime.eval("recurse").expect("recurse function");
+        let error = runtime.call_event(recurse, vec![]).expect_err("recursion must be stopped");
+        assert!(error.message.contains("call depth"), "unexpected error: {}", error.message);
+
+        // The depth counter was unwound by the error, so a bounded recursion
+        // can still run to completion.
+        let down = runtime.eval("down").expect("down function");
+        let value = runtime.call_event(down, vec![Value::Number(5.0)]).expect("bounded recursion");
+        assert_eq!(value.display(), "0");
+    }
+
+    #[test]
+    fn event_handlers_use_a_smaller_budget_than_page_scripts() {
+        let mut runtime = Runtime::new();
+        runtime
+            .eval("function work() { let s = 0; for (let i = 0; i < 50000; i = i + 1) { s = s + 1; } return s; }")
+            .expect("define work");
+        let work = runtime.eval("work").expect("work function");
+        assert!(
+            runtime.call_event(work.clone(), vec![]).is_err(),
+            "work exceeds the interactive budget"
+        );
+        assert_eq!(runtime.call(work, vec![]).expect("full budget").display(), "50000");
+    }
+
+    #[test]
     fn budget_is_reset_between_evaluations() {
         let mut runtime = Runtime::new();
         // A moderately long but bounded loop should succeed.
