@@ -30,8 +30,26 @@ impl fmt::Display for DecodeError {
 impl Error for DecodeError {}
 
 /// Decodes PNG, JPEG or GIF bytes into an RGBA8 painting image.
+///
+/// Decoding limits are applied *before* the decoder allocates, so a crafted
+/// image header cannot force a huge allocation. A post-decode check remains as
+/// a safety net for decoders that ignore limits.
 pub fn decode(bytes: &[u8]) -> Result<Image, DecodeError> {
-    let decoded = image::load_from_memory(bytes).map_err(|_| DecodeError::UnsupportedOrCorrupt)?;
+    let mut limits = image::Limits::default();
+    // Bound both the decoded surface and the temporary allocation. RGBA8 uses
+    // 4 bytes per pixel, which is the largest intermediate we expect.
+    limits.max_alloc = Some((MAX_IMAGE_PIXELS as u64) * 4);
+    let max_dimension = (MAX_IMAGE_PIXELS as u32).isqrt().max(1);
+    limits.max_image_width = Some(max_dimension);
+    limits.max_image_height = Some(max_dimension);
+
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|_| DecodeError::UnsupportedOrCorrupt)?;
+    // Limits are set before decode, so the decoder bound allocations up front.
+    reader.limits(limits);
+    let decoded = reader.decode().map_err(|_| DecodeError::UnsupportedOrCorrupt)?;
+
     let width = decoded.width() as usize;
     let height = decoded.height() as usize;
     let pixels = width.checked_mul(height).ok_or(DecodeError::TooLarge)?;
@@ -101,7 +119,7 @@ pub fn image_sizes(images: &HashMap<NodeId, Arc<Image>>) -> HashMap<NodeId, Imag
 
 #[cfg(test)]
 mod tests {
-    use super::{decode, image_sizes};
+    use super::{DecodeError, decode, image_sizes};
     use bweb_html::{HtmlDocument, NodeKind};
     use bweb_renderer::Image;
     use image::{ImageEncoder, RgbaImage};
@@ -127,6 +145,19 @@ mod tests {
     #[test]
     fn rejects_corrupt_image_data() {
         assert!(decode(b"not an image").is_err());
+    }
+
+    #[test]
+    fn rejects_images_with_huge_declared_dimensions() {
+        // A PNG header claiming 100000x100000 pixels. A naive decoder would try
+        // to allocate ~40 GB; the pre-decode limits must reject it.
+        let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+        bytes.extend_from_slice(&13u32.to_be_bytes()); // IHDR length
+        bytes.extend_from_slice(b"IHDR");
+        bytes.extend_from_slice(&100_000u32.to_be_bytes()); // width
+        bytes.extend_from_slice(&100_000u32.to_be_bytes()); // height
+        bytes.extend_from_slice(&[8, 6, 0, 0, 0]); // bit depth, color type, etc.
+        assert_eq!(decode(&bytes), Err(DecodeError::UnsupportedOrCorrupt));
     }
 
     #[test]
