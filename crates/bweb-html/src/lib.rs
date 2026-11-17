@@ -429,6 +429,31 @@ impl HtmlDocument {
         self.set_attribute(id, "class", &classes.join(" "));
     }
 
+    /// Returns `<script>` elements in document order, preserving the relative
+    /// order of inline and external scripts.
+    #[must_use]
+    pub fn script_references(&self) -> Vec<ScriptRef> {
+        self.nodes
+            .iter()
+            .enumerate()
+            .filter(|(index, node)| {
+                !self.is_in_template(NodeId(*index))
+                    && matches!(node.kind(), NodeKind::Element { tag_name, .. } if tag_name == "script")
+            })
+            .filter_map(|(index, node)| {
+                let NodeKind::Element { attributes, .. } = node.kind() else { return None };
+                if let Some(src) = attributes.iter().find(|a| a.name == "src").map(|a| a.value.as_str()) {
+                    if !src.trim().is_empty() {
+                        return Some(ScriptRef::External(src.to_owned()));
+                    }
+                }
+                let mut source = String::new();
+                self.collect_text(NodeId(index), &mut source);
+                (!source.trim().is_empty()).then_some(ScriptRef::Inline(source))
+            })
+            .collect()
+    }
+
     /// Returns the contents of inline `<script>` elements in document order.
     #[must_use]
     pub fn script_sources(&self) -> Vec<String> {
@@ -1607,6 +1632,14 @@ impl ResourceKind {
     }
 }
 
+/// A `<script>` element in document order: either inline source or an external
+/// URL to resolve against the loaded resources.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScriptRef {
+    Inline(String),
+    External(String),
+}
+
 /// A URL reference extracted from the DOM.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResourceReference {
@@ -2011,6 +2044,26 @@ mod tests {
         );
         assert_eq!(document.base_href(), Some("/assets/"));
         assert_eq!(HtmlDocument::parse("<p>x</p>").base_href(), None);
+    }
+
+    #[test]
+    fn script_references_preserve_document_order() {
+        use super::ScriptRef;
+        let document = HtmlDocument::parse(
+            "<html><head>\
+             <script>window.A = 1;</script>\
+             <script src='/lib.js'></script>\
+             <script>window.C = 3;</script>\
+             </head><body></body></html>",
+        );
+        assert_eq!(
+            document.script_references(),
+            vec![
+                ScriptRef::Inline("window.A = 1;".to_owned()),
+                ScriptRef::External("/lib.js".to_owned()),
+                ScriptRef::Inline("window.C = 3;".to_owned()),
+            ]
+        );
     }
 
     #[test]

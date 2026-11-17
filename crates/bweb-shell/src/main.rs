@@ -10,7 +10,7 @@ mod shell;
 use address_bar::AddressBar;
 use bweb_css::{ComputedStyle, ComputedStyleMap, PseudoElement, StyleEngine, Stylesheet};
 use bweb_filterlists::FilterListDownloader;
-use bweb_html::{DocumentLoader, HtmlDocument, LoadedDocument, NodeId, ResourceKind};
+use bweb_html::{DocumentLoader, HtmlDocument, LoadedDocument, NodeId, ResourceKind, ScriptRef};
 use bweb_js::{Runtime, Value};
 use bweb_layout::{ImageSize, LayoutTree, PaintAdapter, Rect as LayoutRect, View, Viewport};
 use bweb_net::{HttpTransport, NetworkPolicy};
@@ -190,15 +190,35 @@ fn load_page(url: &str, verbose: bool) -> Result<Page, Box<dyn Error>> {
         }
     }
 
-    let mut scripts = loaded.document.script_sources();
-    for resource in loaded.resources.iter().filter(|resource| resource.kind == ResourceKind::Script)
-    {
-        match std::str::from_utf8(&resource.bytes) {
-            Ok(source) => scripts.push(source.to_owned()),
-            Err(_) if verbose => eprintln!("  invalid UTF-8 script: {}", resource.url),
-            Err(_) => {}
-        }
-    }
+    let resource_base = loaded
+        .document
+        .base_href()
+        .and_then(|href| loaded.url.join(href.trim()).ok())
+        .filter(|base| matches!(base.scheme(), "http" | "https"))
+        .unwrap_or_else(|| loaded.url.clone());
+    let scripts: Vec<String> = loaded
+        .document
+        .script_references()
+        .into_iter()
+        .filter_map(|reference| match reference {
+            ScriptRef::Inline(source) => Some(source),
+            ScriptRef::External(url) => {
+                let resolved = resource_base.join(&url).ok()?;
+                let resource = loaded
+                    .resources
+                    .iter()
+                    .find(|item| item.kind == ResourceKind::Script && item.url == resolved)?;
+                match std::str::from_utf8(&resource.bytes) {
+                    Ok(source) => Some(source.to_owned()),
+                    Err(_) if verbose => {
+                        eprintln!("  invalid UTF-8 script: {}", resource.url);
+                        None
+                    }
+                    Err(_) => None,
+                }
+            }
+        })
+        .collect();
     let images = collect_images(&loaded.document, &loaded.url, &loaded.resources);
     let mut background_images = HashMap::new();
     for resource in loaded.resources.iter().filter(|item| item.kind == ResourceKind::Image) {
