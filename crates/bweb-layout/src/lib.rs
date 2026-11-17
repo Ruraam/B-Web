@@ -1515,6 +1515,8 @@ fn build_line_boxes(
         .and_then(|s| s.get("word-spacing"))
         .and_then(|value| if value == "normal" { Some(0.0) } else { parse_length(value) })
         .unwrap_or(0.0);
+    let text_indent =
+        style.and_then(|s| s.get("text-indent")).and_then(parse_length).unwrap_or(0.0);
     let space_advance = context.measurer.char_advance(' ', font_size) + word_spacing;
     let mut items = Vec::new();
     if let Some(before) = pseudo.and_then(|content| content.before.as_ref()) {
@@ -1539,7 +1541,8 @@ fn build_line_boxes(
     // centered vertically against it.
     let close_line =
         |lines: &mut Vec<LineBox>, fragments: &mut Vec<TextFragment>, y: f32, height: f32| {
-            finish_line(lines, fragments, origin_x, y, height);
+            let line_start = fragments.first().map_or(origin_x, |f| f.rect.x);
+            finish_line(lines, fragments, line_start, y, height);
             if let Some(line) = lines.last_mut() {
                 let offset = (height - base_line_height) * 0.5;
                 let alignment = match text_align {
@@ -1557,7 +1560,7 @@ fn build_line_boxes(
 
     let mut lines = Vec::new();
     let mut fragments: Vec<TextFragment> = Vec::new();
-    let mut x = origin_x;
+    let mut x = origin_x + text_indent;
     let mut y = origin_y;
     let mut current_line_height = base_line_height;
     let mut pending_space = false;
@@ -2612,6 +2615,20 @@ mod tests {
 
         let sibling = find(&tree.root, element(&document, "span")).expect("sibling box");
         assert_eq!(sibling.rect.y, 0.0, "absolute items must not consume flow space");
+    }
+
+    #[test]
+    fn text_indent_shifts_only_the_first_line() {
+        let (document, tree) = layout(
+            "<main>hello world again and more words to wrap</main>",
+            "main { display:block; width:60px; text-indent:15px }",
+        );
+        let main = find(&tree.root, element(&document, "main")).expect("main box");
+        assert!(main.line_boxes.len() > 1);
+        let first_x = main.line_boxes[0].fragments.first().expect("fragment").rect.x;
+        let second_x = main.line_boxes[1].fragments.first().expect("fragment").rect.x;
+        assert_eq!(first_x, 15.0);
+        assert_eq!(second_x, 0.0);
     }
 
     #[test]
