@@ -1506,6 +1506,7 @@ fn build_line_boxes(
     let preserve_newlines = matches!(white_space, "pre" | "pre-wrap" | "pre-line");
     let wrap = !matches!(white_space, "nowrap" | "pre");
     let base_line_height = line_height;
+    let text_align = style.and_then(|s| s.get("text-align")).unwrap_or("start");
     let space_advance = context.measurer.char_advance(' ', font_size);
     let mut items = Vec::new();
     if let Some(before) = pseudo.and_then(|content| content.before.as_ref()) {
@@ -1531,13 +1532,18 @@ fn build_line_boxes(
     let close_line =
         |lines: &mut Vec<LineBox>, fragments: &mut Vec<TextFragment>, y: f32, height: f32| {
             finish_line(lines, fragments, origin_x, y, height);
-            let offset = (height - base_line_height) * 0.5;
-            if offset > 0.0 {
-                if let Some(line) = lines.last_mut() {
-                    for fragment in &mut line.fragments {
-                        fragment.rect.y += offset;
-                    }
+            if let Some(line) = lines.last_mut() {
+                let offset = (height - base_line_height) * 0.5;
+                let alignment = match text_align {
+                    "center" => (available_width - line.rect.width) * 0.5,
+                    "right" | "end" => available_width - line.rect.width,
+                    _ => 0.0,
+                };
+                for fragment in &mut line.fragments {
+                    fragment.rect.y += offset;
+                    fragment.rect.x += alignment;
                 }
+                line.rect.x += alignment;
             }
         };
 
@@ -2598,6 +2604,23 @@ mod tests {
 
         let sibling = find(&tree.root, element(&document, "span")).expect("sibling box");
         assert_eq!(sibling.rect.y, 0.0, "absolute items must not consume flow space");
+    }
+
+    #[test]
+    fn text_align_shifts_line_fragments() {
+        let (document, tree) =
+            layout("<main>hi</main>", "main { display:block; width:100px; text-align:center }");
+        let main = find(&tree.root, element(&document, "main")).expect("main box");
+        let text = document
+            .iter()
+            .find_map(|(id, node)| matches!(node.kind(), NodeKind::Text(_)).then_some(id))
+            .expect("text");
+        let fragment = main.line_boxes[0]
+            .fragments
+            .iter()
+            .find(|fragment| fragment.node == text)
+            .expect("fragment");
+        assert!(fragment.rect.x > 0.0, "centered text should shift right: {:?}", fragment.rect);
     }
 
     #[test]
