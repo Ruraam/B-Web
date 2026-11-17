@@ -1507,7 +1507,15 @@ fn build_line_boxes(
     let wrap = !matches!(white_space, "nowrap" | "pre");
     let base_line_height = line_height;
     let text_align = style.and_then(|s| s.get("text-align")).unwrap_or("start");
-    let space_advance = context.measurer.char_advance(' ', font_size);
+    let letter_spacing = style
+        .and_then(|s| s.get("letter-spacing"))
+        .and_then(|value| if value == "normal" { Some(0.0) } else { parse_length(value) })
+        .unwrap_or(0.0);
+    let word_spacing = style
+        .and_then(|s| s.get("word-spacing"))
+        .and_then(|value| if value == "normal" { Some(0.0) } else { parse_length(value) })
+        .unwrap_or(0.0);
+    let space_advance = context.measurer.char_advance(' ', font_size) + word_spacing;
     let mut items = Vec::new();
     if let Some(before) = pseudo.and_then(|content| content.before.as_ref()) {
         items.push(InlineItem::Text {
@@ -1572,7 +1580,7 @@ fn build_line_boxes(
                         continue;
                     }
 
-                    let advance = context.measurer.char_advance(ch, font_size);
+                    let advance = context.measurer.char_advance(ch, font_size) + letter_spacing;
                     if pending_space && x > origin_x {
                         if wrap && x + space_advance + advance > origin_x + available_width {
                             close_line(&mut lines, &mut fragments, y, current_line_height);
@@ -2604,6 +2612,25 @@ mod tests {
 
         let sibling = find(&tree.root, element(&document, "span")).expect("sibling box");
         assert_eq!(sibling.rect.y, 0.0, "absolute items must not consume flow space");
+    }
+
+    #[test]
+    fn letter_spacing_widens_advances() {
+        let (plain, plain_tree) = layout("<main>abc</main>", "main { display:block; width:200px }");
+        let (spaced, spaced_tree) = layout(
+            "<main>abc</main>",
+            "main { display:block; width:200px; letter-spacing:5px; word-spacing:8px }",
+        );
+        let width = |tree: &LayoutTree, doc: &HtmlDocument| {
+            let main = find(&tree.root, element(doc, "main")).expect("main box");
+            main.line_boxes[0].rect.width
+        };
+        let plain_width = width(&plain_tree, &plain);
+        let spaced_width = width(&spaced_tree, &spaced);
+        assert!(
+            spaced_width > plain_width + 10.0,
+            "letter-spacing should widen the run: {plain_width} -> {spaced_width}"
+        );
     }
 
     #[test]
