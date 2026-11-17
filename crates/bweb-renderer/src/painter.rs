@@ -51,8 +51,13 @@ impl<'a, L: PaintLayout> Painter<'a, L> {
         // active across all descendants and is popped before the next sibling.
         let mut clip_depths: Vec<u32> = Vec::new();
         let mut sticky_depths: Vec<u32> = Vec::new();
+        let mut transform_depths: Vec<u32> = Vec::new();
 
         self.layout.visit(&mut |node: PaintNode| {
+            while transform_depths.last().is_some_and(|depth| *depth >= node.depth) {
+                transform_depths.pop();
+                list.push(PaintItem::PopTransform);
+            }
             while clip_depths.last().is_some_and(|depth| *depth >= node.depth) {
                 clip_depths.pop();
                 list.push(PaintItem::PopClip);
@@ -70,6 +75,13 @@ impl<'a, L: PaintLayout> Painter<'a, L> {
                     });
                     sticky_depths.push(node.depth);
                 }
+            }
+
+            if let Some(transform) =
+                crate::parse_transform(node.transform.as_deref(), node.rect.width, node.rect.height)
+            {
+                list.push(PaintItem::PushTransform { transform });
+                transform_depths.push(node.depth);
             }
 
             let rect = scale_rect(node.rect, self.scale_factor);
@@ -137,6 +149,9 @@ impl<'a, L: PaintLayout> Painter<'a, L> {
         }
         while sticky_depths.pop().is_some() {
             list.push(PaintItem::PopSticky);
+        }
+        while transform_depths.pop().is_some() {
+            list.push(PaintItem::PopTransform);
         }
         list.push(PaintItem::PopClip);
         list

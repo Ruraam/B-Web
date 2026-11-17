@@ -10,6 +10,7 @@ mod gradient;
 mod paint_layout;
 mod painter;
 mod rasterizer;
+mod transform;
 
 pub use background::{
     BackgroundPosition, BackgroundRepeat, BackgroundSize, Length, background_rects,
@@ -27,6 +28,7 @@ pub use gradient::{
 pub use paint_layout::{PaintLayout, PaintNode, PaintStyle};
 pub use painter::{Painter, PainterError};
 pub use rasterizer::Rasterizer;
+pub use transform::{Transform, parse_transform};
 
 /// A rectangle in physical pixel coordinates for rendering commands.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]

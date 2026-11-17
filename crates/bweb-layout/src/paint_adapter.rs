@@ -116,6 +116,7 @@ impl PaintLayout for PaintAdapter<'_> {
                 background_repeat: computed
                     .and_then(|style| style.get("background-repeat"))
                     .map(str::to_owned),
+                transform: computed.and_then(|style| style.get("transform")).map(str::to_owned),
                 sticky: layout.sticky.active.then_some((
                     layout.sticky.active,
                     layout.sticky.threshold,

@@ -6,6 +6,7 @@
 
 use crate::{
     Color, DisplayList, Edges, Framebuffer, GradientStopPosition, LinearGradient, PaintItem, Rect,
+    Transform,
 };
 
 /// CPU rasterizer for the backend-independent display list.
@@ -26,35 +27,75 @@ impl Rasterizer {
             height: framebuffer.height() as f32,
         };
         let mut clips = vec![root];
+        let mut transforms = vec![Transform::IDENTITY];
 
         for item in &list.items {
             match item {
                 PaintItem::FillRect { rect, color } => {
                     let clip = *clips.last().expect("root clip is always present");
-                    paint_rect(framebuffer, *rect, clip, *color);
+                    paint_rect(
+                        framebuffer,
+                        transforms.last().expect("root transform").rect(*rect),
+                        clip,
+                        *color,
+                    );
                 }
                 PaintItem::BorderRect { rect, widths, color, .. } => {
                     let clip = *clips.last().expect("root clip is always present");
-                    paint_border(framebuffer, *rect, *widths, clip, *color);
+                    paint_border(
+                        framebuffer,
+                        transforms.last().expect("root transform").rect(*rect),
+                        *widths,
+                        clip,
+                        *color,
+                    );
                 }
                 PaintItem::LinearGradient { rect, gradient } => {
                     let clip = *clips.last().expect("root clip is always present");
-                    paint_linear_gradient(framebuffer, *rect, gradient, clip);
+                    paint_linear_gradient(
+                        framebuffer,
+                        transforms.last().expect("root transform").rect(*rect),
+                        gradient,
+                        clip,
+                    );
                 }
                 PaintItem::Text { glyphs, color } => {
                     let clip = *clips.last().expect("root clip is always present");
-                    blit_glyphs(framebuffer, glyphs, clip, *color);
+                    let transform = *transforms.last().expect("root transform");
+                    let moved: Vec<_> = glyphs
+                        .iter()
+                        .map(|glyph| {
+                            let (x, y) = transform.point(glyph.x, glyph.y);
+                            crate::PositionedGlyph { coverage: glyph.coverage.clone(), x, y }
+                        })
+                        .collect();
+                    blit_glyphs(framebuffer, &moved, clip, *color);
                 }
                 PaintItem::Image { rect, image } => {
                     let clip = *clips.last().expect("root clip is always present");
-                    paint_image(framebuffer, image, *rect, clip);
+                    paint_image(
+                        framebuffer,
+                        image,
+                        transforms.last().expect("root transform").rect(*rect),
+                        clip,
+                    );
                 }
                 PaintItem::PushSticky { .. } | PaintItem::PopSticky => {
                     // Interpreted by the shell's scroll translation pass.
                 }
+                PaintItem::PushTransform { transform } => {
+                    let parent = *transforms.last().expect("root transform");
+                    transforms.push(parent.compose(*transform));
+                }
+                PaintItem::PopTransform => {
+                    if transforms.len() > 1 {
+                        transforms.pop();
+                    }
+                }
                 PaintItem::PushClip { rect } => {
                     let parent = *clips.last().expect("root clip is always present");
-                    clips.push(intersect(parent, *rect).unwrap_or_default());
+                    let transformed = transforms.last().expect("root transform").rect(*rect);
+                    clips.push(intersect(parent, transformed).unwrap_or_default());
                 }
                 PaintItem::PopClip => {
                     if clips.len() > 1 {
@@ -554,6 +595,24 @@ mod tests {
         assert_eq!(&framebuffer.pixels()[0..4], &[0, 0, 0, 0]);
         assert_eq!(&framebuffer.pixels()[4..8], &[255, 0, 0, 255]);
         assert_eq!(&framebuffer.pixels()[8..12], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn translate_transform_moves_drawing_and_descendants() {
+        let mut list = DisplayList::default();
+        list.push(PaintItem::PushClip { rect: rect(0.0, 0.0, 6.0, 2.0) });
+        list.push(PaintItem::PushTransform {
+            transform: crate::parse_transform(Some("translate(2px, 0)"), 1.0, 1.0).unwrap(),
+        });
+        fill(&mut list, rect(0.0, 0.0, 2.0, 2.0), RED);
+        list.push(PaintItem::PopTransform);
+        list.push(PaintItem::PopClip);
+        let mut framebuffer = Framebuffer::new(6, 2).expect("framebuffer");
+
+        Rasterizer.rasterize(&list, &mut framebuffer);
+
+        assert_eq!(&framebuffer.pixels()[0..4], &[0, 0, 0, 0]);
+        assert_eq!(&framebuffer.pixels()[8..12], &[255, 0, 0, 255]);
     }
 
     #[test]

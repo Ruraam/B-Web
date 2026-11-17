@@ -202,7 +202,11 @@ fn translate_y(item: &mut PaintItem, offset: f32) {
                 glyph.y += offset;
             }
         }
-        PaintItem::PushSticky { .. } | PaintItem::PopSticky | PaintItem::PopClip => {}
+        PaintItem::PushSticky { .. }
+        | PaintItem::PopSticky
+        | PaintItem::PushTransform { .. }
+        | PaintItem::PopTransform
+        | PaintItem::PopClip => {}
     }
 }
 

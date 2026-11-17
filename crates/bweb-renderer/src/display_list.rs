@@ -139,6 +139,10 @@ pub enum PaintItem {
     PushSticky { threshold: f32, dx: f32, dy: f32 },
     /// Ends a sticky subtree opened by `PushSticky`.
     PopSticky,
+    /// Applies a transform to subsequent drawing, inherited by descendants.
+    PushTransform { transform: crate::Transform },
+    /// Restores the transform in effect before `PushTransform`.
+    PopTransform,
     /// Intersects subsequent drawing with this physical-pixel rectangle.
     PushClip { rect: Rect },
     /// Restores the previous clipping rectangle.

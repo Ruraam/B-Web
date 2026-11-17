@@ -40,6 +40,8 @@ pub struct PaintNode {
     pub background_size: Option<String>,
     pub background_position: Option<String>,
     pub background_repeat: Option<String>,
+    /// CSS `transform` value for this node.
+    pub transform: Option<String>,
     /// Scroll-dependent sticky shift: `(active, threshold, dx, dy)`.
     pub sticky: Option<(bool, f32, f32, f32)>,
 }
