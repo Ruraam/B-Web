@@ -90,6 +90,12 @@ impl<'a, L: PaintLayout> Painter<'a, L> {
             }
 
             let rect = scale_rect(node.rect, self.scale_factor);
+            let radius = node.style.border_radius * self.scale_factor;
+            // A rounded box clips its own background, border and descendants.
+            if radius > 0.0 {
+                list.push(PaintItem::PushRoundClip { rect, radius });
+                clip_depths.push(node.depth);
+            }
             if let Some(color) = node.style.background {
                 list.push(PaintItem::FillRect { rect, color });
             }
@@ -130,7 +136,7 @@ impl<'a, L: PaintLayout> Painter<'a, L> {
             let widths = scale_edges(node.style.border_widths, self.scale_factor);
             if has_visible_width(widths) {
                 if let Some(color) = node.style.border_color {
-                    list.push(PaintItem::BorderRect { rect, widths, radius: 0.0, color });
+                    list.push(PaintItem::BorderRect { rect, widths, radius, color });
                 }
             }
 
@@ -260,6 +266,7 @@ mod tests {
                         border_color: Some(BLACK),
                         border_widths: Edges { top: 1.0, right: 1.0, bottom: 1.0, left: 1.0 },
                         clips_children: false,
+                        border_radius: 0.0,
                     },
                     run.clone(),
                 ),
@@ -363,6 +370,7 @@ mod tests {
                     border_color: Some(BLACK),
                     border_widths: Edges { top: 1.0, right: 2.0, bottom: 3.0, left: 4.0 },
                     clips_children: false,
+                    border_radius: 0.0,
                 },
             )],
         };

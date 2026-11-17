@@ -53,6 +53,17 @@ impl<'a> PaintAdapter<'a> {
     }
 }
 
+/// Parses a uniform CSS `border-radius` into logical pixels. Percentages
+/// resolve against the smaller side, so `50%` yields a circle/ellipse.
+fn parse_border_radius(value: &str, width: f32, height: f32) -> Option<f32> {
+    let first = value.split('/').next()?.trim().split_ascii_whitespace().next()?;
+    if let Some(percent) = first.strip_suffix('%') {
+        let fraction = percent.trim().parse::<f32>().ok()?.max(0.0) / 100.0;
+        return Some(width.min(height) * fraction);
+    }
+    first.strip_suffix("px").unwrap_or(first).trim().parse::<f32>().ok().map(|v| v.max(0.0))
+}
+
 impl PaintLayout for PaintAdapter<'_> {
     fn viewport(&self) -> PaintRect {
         to_paint_rect(self.viewport)
@@ -85,6 +96,12 @@ impl PaintLayout for PaintAdapter<'_> {
                 clips_children: computed
                     .and_then(|style| style.get("overflow"))
                     .is_some_and(|value| value == "hidden" || value == "clip"),
+                border_radius: computed
+                    .and_then(|style| style.get("border-radius"))
+                    .and_then(|value| {
+                        parse_border_radius(value, layout.rect.width, layout.rect.height)
+                    })
+                    .unwrap_or(0.0),
             };
 
             let background_image: Option<Arc<BackgroundImage>> = computed
@@ -211,6 +228,30 @@ mod tests {
             gradients[0].as_ref(),
             BackgroundImage::Linear(gradient) if gradient.angle == 90.0 && gradient.stops.len() == 2
         ));
+    }
+
+    #[test]
+    fn border_radius_emits_a_round_clip() {
+        let document = HtmlDocument::parse(
+            "<html><head><style>div { display:block; width:20px; height:20px; \
+             border-radius:50%; background:red }</style></head><body><div>x</div></body></html>",
+        );
+        let sheets: Vec<_> = document
+            .inline_stylesheets()
+            .iter()
+            .map(|source| Stylesheet::parse(source).expect("inline stylesheet"))
+            .collect();
+        let styles = StyleEngine::new().compute(&document, &sheets);
+        let tree = LayoutTree::build(&document, &styles, 320.0);
+        let adapter =
+            PaintAdapter::new(&tree, &styles, Rect { x: 0.0, y: 0.0, width: 320.0, height: 200.0 });
+        let list = Painter::new(&adapter, 1.0).expect("valid scale").paint();
+        assert!(
+            list.items.iter().any(
+                |item| matches!(item, PaintItem::PushRoundClip { radius, .. } if *radius > 0.0)
+            ),
+            "a 50% radius on a 20px box should emit a round clip"
+        );
     }
 
     #[test]

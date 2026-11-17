@@ -922,6 +922,7 @@ impl ComputedStyle {
     fn initial() -> Self {
         let mut style = Self::default();
         style.set("display".into(), "inline".into());
+        style.set("border-radius".into(), "0".into());
         style.set("position".into(), "static".into());
         style.set("top".into(), "auto".into());
         style.set("right".into(), "auto".into());

@@ -72,7 +72,8 @@ layout tree, text and image rasterization, network transport and privacy filteri
 - Linear-gradient backgrounds rasterized from CSS angles/`to <side>` directions
   and percentage/length color stops.
 - Composable `transform` translate/scale with rasterizer application to rects,
-  glyphs and clips; subtree `opacity` and `text-decoration` lines.
+  glyphs and clips; subtree `opacity`, `text-decoration` lines and rounded-corner
+  clipping from `border-radius`.
 - Single-line flexbox: direction, grow/shrink, justification, alignment, gaps
   and the `flex`/`gap` shorthands.
 - `position: relative/absolute/fixed` with offsets and positioned containing

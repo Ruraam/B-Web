@@ -15,6 +15,8 @@ pub struct PaintStyle {
     pub border_widths: Edges,
     /// Whether descendants must be clipped to this node's rectangle.
     pub clips_children: bool,
+    /// Corner radius in logical pixels for background, border and clipping.
+    pub border_radius: f32,
 }
 
 /// A paintable node with absolute logical-pixel geometry and optional text.

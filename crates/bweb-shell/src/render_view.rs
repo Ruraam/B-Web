@@ -196,6 +196,7 @@ fn translate_y(item: &mut PaintItem, offset: f32) {
         | PaintItem::BorderRect { rect, .. }
         | PaintItem::LinearGradient { rect, .. }
         | PaintItem::PushClip { rect }
+        | PaintItem::PushRoundClip { rect, .. }
         | PaintItem::Image { rect, .. } => rect.y += offset,
         PaintItem::Text { glyphs, .. } => {
             for glyph in glyphs {

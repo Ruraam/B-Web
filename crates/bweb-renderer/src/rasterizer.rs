@@ -27,6 +27,7 @@ impl Rasterizer {
             height: framebuffer.height() as f32,
         };
         let mut clips = vec![root];
+        let mut clip_radii: Vec<f32> = vec![0.0];
         let mut transforms = vec![Transform::IDENTITY];
         let mut opacities: Vec<f32> = vec![1.0];
 
@@ -38,6 +39,7 @@ impl Rasterizer {
                         framebuffer,
                         transforms.last().expect("root transform").rect(*rect),
                         clip,
+                        *clip_radii.last().expect("root radius"),
                         {
                             let alpha = *opacities.last().expect("root opacity");
                             Color::rgba(
@@ -56,6 +58,7 @@ impl Rasterizer {
                         transforms.last().expect("root transform").rect(*rect),
                         *widths,
                         clip,
+                        *clip_radii.last().expect("root radius"),
                         {
                             let alpha = *opacities.last().expect("root opacity");
                             Color::rgba(
@@ -74,6 +77,7 @@ impl Rasterizer {
                         transforms.last().expect("root transform").rect(*rect),
                         gradient,
                         clip,
+                        *clip_radii.last().expect("root radius"),
                         *opacities.last().expect("root opacity"),
                     );
                 }
@@ -94,7 +98,13 @@ impl Rasterizer {
                         color.blue,
                         (f32::from(color.alpha) * alpha).round() as u8,
                     );
-                    blit_glyphs(framebuffer, &moved, clip, effective);
+                    blit_glyphs(
+                        framebuffer,
+                        &moved,
+                        clip,
+                        *clip_radii.last().expect("root radius"),
+                        effective,
+                    );
                     if *decoration != crate::TextDecoration::None {
                         let height = moved
                             .iter()
@@ -117,7 +127,13 @@ impl Rasterizer {
                                     width: glyph.coverage.width as f32,
                                     height: thickness,
                                 };
-                                paint_rect(framebuffer, rect, clip, effective);
+                                paint_rect(
+                                    framebuffer,
+                                    rect,
+                                    clip,
+                                    *clip_radii.last().expect("root radius"),
+                                    effective,
+                                );
                             }
                         }
                     }
@@ -129,6 +145,7 @@ impl Rasterizer {
                         image,
                         transforms.last().expect("root transform").rect(*rect),
                         clip,
+                        *clip_radii.last().expect("root radius"),
                         *opacities.last().expect("root opacity"),
                     );
                 }
@@ -157,10 +174,18 @@ impl Rasterizer {
                     let parent = *clips.last().expect("root clip is always present");
                     let transformed = transforms.last().expect("root transform").rect(*rect);
                     clips.push(intersect(parent, transformed).unwrap_or_default());
+                    clip_radii.push(0.0);
+                }
+                PaintItem::PushRoundClip { rect, radius } => {
+                    let parent = *clips.last().expect("root clip is always present");
+                    let transformed = transforms.last().expect("root transform").rect(*rect);
+                    clips.push(intersect(parent, transformed).unwrap_or_default());
+                    clip_radii.push(radius.max(0.0));
                 }
                 PaintItem::PopClip => {
                     if clips.len() > 1 {
                         clips.pop();
+                        clip_radii.pop();
                     }
                 }
             }
@@ -174,6 +199,7 @@ fn blit_glyphs(
     framebuffer: &mut Framebuffer,
     glyphs: &[crate::PositionedGlyph],
     clip: Rect,
+    clip_radius: f32,
     color: Color,
 ) {
     if !valid_rect(clip) || color.alpha == 0 {
@@ -226,6 +252,7 @@ fn blit_glyphs(
                 || pixel_center_x >= clip.x + clip.width
                 || pixel_center_y < clip.y
                 || pixel_center_y >= clip.y + clip.height
+                || !inside_rounded(clip, clip_radius, pixel_center_x, pixel_center_y)
             {
                 continue;
             }
@@ -245,6 +272,7 @@ fn paint_image(
     image: &crate::Image,
     rect: Rect,
     clip: Rect,
+    clip_radius: f32,
     opacity: f32,
 ) {
     let Some(area) = intersect(rect, clip) else {
@@ -253,7 +281,7 @@ fn paint_image(
     let source_width = image.width();
     let source_height = image.height();
     let pixels = image.pixels();
-    for_each_pixel(framebuffer, area, |target, x, y| {
+    for_each_pixel(framebuffer, area, clip_radius, |target, x, y| {
         let source_x = (f64::from(x) + 0.5 - f64::from(rect.x)) * f64::from(source_width)
             / f64::from(rect.width);
         let source_y = (f64::from(y) + 0.5 - f64::from(rect.y)) * f64::from(source_height)
@@ -276,6 +304,7 @@ fn paint_linear_gradient(
     rect: Rect,
     gradient: &LinearGradient,
     clip: Rect,
+    clip_radius: f32,
     opacity: f32,
 ) {
     let Some(area) = intersect(rect, clip) else {
@@ -292,7 +321,7 @@ fn paint_linear_gradient(
     let center_y = rect.y + rect.height / 2.0;
     let positions = resolve_stop_positions(&gradient.stops, line_length);
 
-    for_each_pixel(framebuffer, area, |target, x, y| {
+    for_each_pixel(framebuffer, area, clip_radius, |target, x, y| {
         let pixel_x = x as f32 + 0.5;
         let pixel_y = y as f32 + 0.5;
         let projection =
@@ -373,11 +402,17 @@ fn mix_colors(from: Color, to: Color, fraction: f32) -> Color {
     )
 }
 
-fn paint_rect(framebuffer: &mut Framebuffer, rect: Rect, clip: Rect, color: Color) {
+fn paint_rect(
+    framebuffer: &mut Framebuffer,
+    rect: Rect,
+    clip: Rect,
+    clip_radius: f32,
+    color: Color,
+) {
     let Some(area) = intersect(rect, clip) else {
         return;
     };
-    for_each_pixel(framebuffer, area, |target, x, y| {
+    for_each_pixel(framebuffer, area, clip_radius, |target, x, y| {
         target.set_pixel(x, y, color.to_rgba8());
     });
 }
@@ -387,6 +422,7 @@ fn paint_border(
     rect: Rect,
     widths: Edges,
     clip: Rect,
+    clip_radius: f32,
     color: Color,
 ) {
     if !valid_rect(rect) || !valid_rect(clip) {
@@ -405,7 +441,7 @@ fn paint_border(
         return;
     };
 
-    for_each_pixel(framebuffer, area, |target, x, y| {
+    for_each_pixel(framebuffer, area, clip_radius, |target, x, y| {
         let px = x as f32 + 0.5;
         let py = y as f32 + 0.5;
         let on_left = widths.left > 0.0 && px < rect.x + widths.left;
@@ -418,9 +454,39 @@ fn paint_border(
     });
 }
 
+/// True when a pixel center lies inside a rounded rectangle.
+fn inside_rounded(rect: Rect, radius: f32, px: f32, py: f32) -> bool {
+    let Some(r) = (radius > 0.0).then_some(radius.min(rect.width * 0.5).min(rect.height * 0.5))
+    else {
+        return true;
+    };
+    let left = rect.x + r;
+    let right = rect.x + rect.width - r;
+    let top = rect.y + r;
+    let bottom = rect.y + rect.height - r;
+    let cx = if px < left {
+        left
+    } else if px > right {
+        right
+    } else {
+        px
+    };
+    let cy = if py < top {
+        top
+    } else if py > bottom {
+        bottom
+    } else {
+        py
+    };
+    let dx = px - cx;
+    let dy = py - cy;
+    dx * dx + dy * dy <= r * r
+}
+
 fn for_each_pixel(
     framebuffer: &mut Framebuffer,
     area: Rect,
+    clip_radius: f32,
     mut paint: impl FnMut(&mut Framebuffer, u32, u32),
 ) {
     if !valid_rect(area) || framebuffer.width() == 0 || framebuffer.height() == 0 {
@@ -440,6 +506,7 @@ fn for_each_pixel(
                 && center_x < area.x + area.width
                 && center_y >= area.y
                 && center_y < area.y + area.height
+                && inside_rounded(area, clip_radius, center_x, center_y)
             {
                 paint(framebuffer, x, y);
             }
@@ -734,6 +801,21 @@ mod tests {
 
         assert_eq!(&framebuffer.pixels()[0..4], &[0, 0, 0, 0]);
         assert_eq!(&framebuffer.pixels()[8..12], &[255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn round_clip_cuts_the_corners_of_a_fill() {
+        let mut list = DisplayList::default();
+        list.push(PaintItem::PushRoundClip { rect: rect(0.0, 0.0, 8.0, 8.0), radius: 8.0 });
+        fill(&mut list, rect(0.0, 0.0, 8.0, 8.0), RED);
+        list.push(PaintItem::PopClip);
+        let mut framebuffer = Framebuffer::new(8, 8).expect("framebuffer");
+
+        Rasterizer.rasterize(&list, &mut framebuffer);
+
+        assert_eq!(&framebuffer.pixels()[0..4], &[0, 0, 0, 0]);
+        let center = (4 * 8 + 4) * 4;
+        assert_eq!(&framebuffer.pixels()[center..center + 4], &[255, 0, 0, 255]);
     }
 
     #[test]

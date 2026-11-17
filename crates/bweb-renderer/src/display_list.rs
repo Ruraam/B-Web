@@ -158,6 +158,8 @@ pub enum PaintItem {
     PopTransform,
     /// Intersects subsequent drawing with this physical-pixel rectangle.
     PushClip { rect: Rect },
+    /// Intersects subsequent drawing with a rounded rectangle.
+    PushRoundClip { rect: Rect, radius: f32 },
     /// Restores the previous clipping rectangle.
     PopClip,
 }
