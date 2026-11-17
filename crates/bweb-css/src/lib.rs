@@ -1630,9 +1630,13 @@ fn expand_flex(style: &mut ComputedStyle, explicit: &HashSet<String>, value: &st
             set_if_absent(style, explicit, "flex-grow", &grow.to_string());
             set_if_absent(style, explicit, "flex-shrink", &shrink.to_string());
         }
-        [grow, shrink, _] => {
+        [grow, shrink, third] => {
             set_if_absent(style, explicit, "flex-grow", &grow.to_string());
             set_if_absent(style, explicit, "flex-shrink", &shrink.to_string());
+            // A unitless third value is a zero/number flex-basis.
+            if basis.is_none() {
+                basis = Some(if *third == 0.0 { "0" } else { "auto" });
+            }
         }
         _ => {}
     }

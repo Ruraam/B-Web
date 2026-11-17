@@ -813,17 +813,17 @@ fn layout_flex_children(
             .and_then(|value| value.parse::<f32>().ok())
             .unwrap_or(1.0)
             .max(0.0);
-        let basis = child_style
+        let explicit_basis = child_style
             .and_then(|s| s.get("flex-basis"))
+            .filter(|value| *value != "auto" && !value.is_empty())
             .and_then(parse_length)
-            .unwrap_or(0.0)
-            .max(0.0);
+            .map(|value| value.max(0.0));
         let natural = if row {
             child.rect.width + child.margin.left + child.margin.right
         } else {
             child.rect.height + child.margin.top + child.margin.bottom
         };
-        items.push((child, grow, shrink, if basis > 0.0 { basis } else { natural }));
+        items.push((child, grow, shrink, explicit_basis.unwrap_or(natural)));
     }
     if items.is_empty() {
         return (Vec::new(), 0.0);
@@ -2758,6 +2758,27 @@ mod tests {
         assert_eq!(boxes[0].rect.width, 50.0);
         assert_eq!(boxes[1].rect.x, 50.0);
         assert_eq!(boxes[1].rect.y, boxes[0].rect.y);
+    }
+
+    #[test]
+    fn flex_basis_zero_overrides_natural_size() {
+        let (document, tree) = layout(
+            "<main><div><span>AAAAAAAAAA</span></div><div>B</div></main>",
+            "main { display:flex; width:200px } main>div { flex:1 0 0; display:block }",
+        );
+        let main = find(&tree.root, element(&document, "main")).expect("flex box");
+        let spans: Vec<_> = document
+            .iter()
+            .filter_map(|(id, node)| {
+                matches!(node.kind(), NodeKind::Element { tag_name, .. } if tag_name == "div")
+                    .then_some(id)
+            })
+            .collect();
+        let widths: Vec<f32> = spans
+            .iter()
+            .map(|id| main.children.iter().find(|c| c.node == *id).expect("item").rect.width)
+            .collect();
+        assert_eq!(widths, vec![100.0, 100.0], "flex:1 1 0 must ignore natural width");
     }
 
     #[test]
