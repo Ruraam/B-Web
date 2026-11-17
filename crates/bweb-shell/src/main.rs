@@ -219,13 +219,11 @@ fn load_page(url: &str, verbose: bool) -> Result<Page, Box<dyn Error>> {
             }
         })
         .collect();
-    let images = collect_images(&loaded.document, &loaded.url, &loaded.resources);
-    let mut background_images = HashMap::new();
-    for resource in loaded.resources.iter().filter(|item| item.kind == ResourceKind::Image) {
-        if let Ok(image) = images::decode(&resource.bytes) {
-            background_images.insert(resource.url.as_str().to_owned(), Arc::new(image));
-        }
-    }
+    // Decode each fetched image once and share the bitmaps between <img>
+    // elements and CSS backgrounds, with a global per-page pixel budget.
+    let decoded_images = images::decode_all(&loaded.resources);
+    let images = collect_images(&loaded.document, &loaded.url, &decoded_images);
+    let background_images = decoded_images;
     Ok(Page { loaded, stylesheets, images, background_images, scripts })
 }
 

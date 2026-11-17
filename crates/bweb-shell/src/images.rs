@@ -61,17 +61,33 @@ pub fn decode(bytes: &[u8]) -> Result<Image, DecodeError> {
         .map_err(|_| DecodeError::UnsupportedOrCorrupt)
 }
 
-/// Maps each `<img>` with a fetched body to its decoded image.
+/// Decodes every fetched image exactly once, keyed by its resolved URL. Both
+/// `<img>` elements and CSS backgrounds share these decoded bitmaps.
+pub fn decode_all(resources: &[LoadedResource]) -> HashMap<String, Arc<Image>> {
+    let mut decoded = HashMap::new();
+    let mut total_pixels = 0usize;
+    for resource in resources.iter().filter(|item| item.kind == ResourceKind::Image) {
+        match decode(&resource.bytes) {
+            Ok(image) => {
+                total_pixels += (image.width() as usize).saturating_mul(image.height() as usize);
+                if total_pixels > MAX_IMAGE_PIXELS {
+                    eprintln!("  image memory budget exhausted; skipping {}", resource.url);
+                    break;
+                }
+                decoded.insert(resource.url.as_str().to_owned(), Arc::new(image));
+            }
+            Err(error) => eprintln!("  invalid image {}: {error}", resource.url),
+        }
+    }
+    decoded
+}
+
+/// Maps each `<img>` with a fetched body to its already-decoded image.
 pub fn collect_images(
     document: &HtmlDocument,
     base: &Url,
-    resources: &[LoadedResource],
+    decoded: &HashMap<String, Arc<Image>>,
 ) -> HashMap<NodeId, Arc<Image>> {
-    let fetched: HashMap<&str, &LoadedResource> = resources
-        .iter()
-        .filter(|resource| resource.kind == ResourceKind::Image)
-        .map(|resource| (resource.url.as_str(), resource))
-        .collect();
     let mut images = HashMap::new();
     for (id, node) in document.iter() {
         let NodeKind::Element { tag_name, attributes } = node.kind() else {
@@ -86,14 +102,8 @@ pub fn collect_images(
         let Ok(resolved) = base.join(source) else {
             continue;
         };
-        let Some(resource) = fetched.get(resolved.as_str()) else {
-            continue;
-        };
-        match decode(&resource.bytes) {
-            Ok(image) => {
-                images.insert(id, Arc::new(image));
-            }
-            Err(error) => eprintln!("  invalid image {}: {error}", resource.url),
+        if let Some(image) = decoded.get(resolved.as_str()) {
+            images.insert(id, Arc::clone(image));
         }
     }
     images
@@ -119,11 +129,12 @@ pub fn image_sizes(images: &HashMap<NodeId, Arc<Image>>) -> HashMap<NodeId, Imag
 
 #[cfg(test)]
 mod tests {
-    use super::{DecodeError, decode, image_sizes};
-    use bweb_html::{HtmlDocument, NodeKind};
+    use super::{DecodeError, collect_images, decode, decode_all, image_sizes};
+    use bweb_html::{HtmlDocument, LoadedResource, NodeKind, ResourceKind};
     use bweb_renderer::Image;
     use image::{ImageEncoder, RgbaImage};
     use std::{collections::HashMap, sync::Arc};
+    use url::Url;
 
     fn png(width: u32, height: u32, color: [u8; 4]) -> Vec<u8> {
         let buffer = RgbaImage::from_pixel(width, height, image::Rgba(color));
@@ -158,6 +169,38 @@ mod tests {
         bytes.extend_from_slice(&100_000u32.to_be_bytes()); // height
         bytes.extend_from_slice(&[8, 6, 0, 0, 0]); // bit depth, color type, etc.
         assert_eq!(decode(&bytes), Err(DecodeError::UnsupportedOrCorrupt));
+    }
+
+    #[test]
+    fn decode_all_shares_bitmaps_and_enforces_a_budget() {
+        // Two resources; collect_images and CSS backgrounds must share the
+        // same Arc rather than decoding twice.
+        let resources = vec![
+            LoadedResource {
+                url: Url::parse("https://example.test/a.png").unwrap(),
+                kind: ResourceKind::Image,
+                content_type: None,
+                bytes: png(4, 4, [255, 0, 0, 255]),
+            },
+            LoadedResource {
+                url: Url::parse("https://example.test/b.png").unwrap(),
+                kind: ResourceKind::Image,
+                content_type: None,
+                bytes: png(4, 4, [0, 255, 0, 255]),
+            },
+        ];
+        let decoded = decode_all(&resources);
+        assert_eq!(decoded.len(), 2);
+
+        let document = HtmlDocument::parse(
+            "<main><img src='https://example.test/a.png'><img src='https://example.test/a.png'></main>",
+        );
+        let base = Url::parse("https://example.test/").unwrap();
+        let images = collect_images(&document, &base, &decoded);
+        assert_eq!(images.len(), 2);
+        // Both <img> elements point to the exact same decoded bitmap.
+        let handles: Vec<&Arc<Image>> = images.values().collect();
+        assert!(Arc::ptr_eq(handles[0], handles[1]));
     }
 
     #[test]
