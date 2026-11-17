@@ -256,10 +256,11 @@ fn open_document(
     let styles = &prepared.styles;
     let sizes: HashMap<NodeId, ImageSize> = image_sizes(&page.images);
     let pseudo = pseudo_content(&prepared.pseudo_styles);
-    let layout = LayoutTree::build_with_all(
+    let layout = LayoutTree::build_with_viewport(
         &page.loaded.document,
         styles,
         1280.0,
+        720.0,
         font.as_ref(),
         &sizes,
         &pseudo,

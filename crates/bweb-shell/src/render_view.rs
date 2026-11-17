@@ -130,10 +130,11 @@ impl ViewBackend for BrowserViewBackend {
         self.pseudo_styles = pseudo_styles;
         let sizes: HashMap<NodeId, ImageSize> = image_sizes(&self.images);
         let pseudo = pseudo_content(&self.pseudo_styles);
-        let layout = LayoutTree::build_with_all(
+        let layout = LayoutTree::build_with_viewport(
             &self.document,
             &self.styles,
             width_css,
+            720.0,
             Some(&self.font),
             &sizes,
             &pseudo,

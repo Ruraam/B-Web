@@ -261,12 +261,35 @@ impl LayoutTree {
     }
 
     /// Builds a layout with real font advances, decoded images and generated
-    /// `::before`/`::after` content.
+    /// `::before`/`::after` content, using a square viewport fallback.
     #[must_use]
     pub fn build_with_all(
         document: &HtmlDocument,
         styles: &ComputedStyleMap,
         viewport_width: f32,
+        font: Option<&Font>,
+        images: &HashMap<NodeId, ImageSize>,
+        pseudo: &HashMap<NodeId, PseudoContent>,
+    ) -> Self {
+        Self::build_with_viewport(
+            document,
+            styles,
+            viewport_width,
+            viewport_width,
+            font,
+            images,
+            pseudo,
+        )
+    }
+
+    /// Builds a layout with an explicit viewport width and height, used to
+    /// resolve viewport units (`vw`, `vh`) in `calc()` and lengths.
+    #[must_use]
+    pub fn build_with_viewport(
+        document: &HtmlDocument,
+        styles: &ComputedStyleMap,
+        viewport_width: f32,
+        viewport_height: f32,
         font: Option<&Font>,
         images: &HashMap<NodeId, ImageSize>,
         pseudo: &HashMap<NodeId, PseudoContent>,
@@ -280,7 +303,7 @@ impl LayoutTree {
             measurer: &measurer,
             images: Some(images),
             pseudo: Some(pseudo),
-            viewport: (width, width),
+            viewport: (width, finite_non_negative(viewport_height)),
         };
         let viewport = Rect { x: 0.0, y: 0.0, width, height: width };
         let root = layout_node(&context, document.root(), 0.0, 0.0, width, viewport, &mut count)
@@ -2135,6 +2158,26 @@ mod tests {
             find(&tree.root, element(doc, "main")).expect("main").line_boxes[0].rect.width
         };
         assert!(width(&tight_tree, &tight) < width(&plain_tree, &plain));
+    }
+
+    #[test]
+    fn vh_uses_the_viewport_height_not_width() {
+        let document = HtmlDocument::parse(
+            "<html><head><style>div { display:block; width:50vh; height:10px }</style></head><body><div>x</div></body></html>",
+        );
+        let sheets: Vec<_> = document
+            .inline_stylesheets()
+            .iter()
+            .map(|source| Stylesheet::parse(source).expect("stylesheet"))
+            .collect();
+        let styles = StyleEngine::new().compute(&document, &sheets);
+        let images = HashMap::new();
+        let pseudo = HashMap::new();
+        let tree = LayoutTree::build_with_viewport(
+            &document, &styles, 400.0, 800.0, None, &images, &pseudo,
+        );
+        let div = find(&tree.root, element(&document, "div")).expect("div");
+        assert_eq!(div.rect.width, 400.0, "50vh of 800px height = 400px");
     }
 
     #[test]
