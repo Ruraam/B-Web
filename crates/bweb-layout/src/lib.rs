@@ -132,7 +132,7 @@ fn layout_node(
     } else {
         Display::Block
     };
-    let margin = parse_edges(style.and_then(|style| style.get("margin")));
+    let mut margin = parse_edges(style.and_then(|style| style.get("margin")));
     let padding = parse_edges(style.and_then(|style| style.get("padding")));
     let border = parse_border_widths(style);
     let content_x = x + margin.left + border.left + padding.left;
@@ -140,12 +140,36 @@ fn layout_node(
     let available_outer_width = (available_width - margin.left - margin.right).max(0.0);
     let horizontal_insets = padding.left + padding.right + border.left + border.right;
     let box_sizing = style.and_then(|style| style.get("box-sizing")).unwrap_or("content-box");
-    let specified_width = style.and_then(|style| style.get("width")).and_then(parse_length);
-    let outer_width = match specified_width {
+    let font_size = style
+        .and_then(|style| style.get("font-size"))
+        .and_then(|value| parse_css_length(value, 16.0))
+        .unwrap_or(16.0);
+    let specified_width = style
+        .and_then(|style| style.get("width"))
+        .and_then(|value| parse_css_length(value, font_size));
+    let mut outer_width = match specified_width {
         Some(width) if box_sizing == "border-box" => width.min(available_outer_width),
         Some(width) => (width + horizontal_insets).min(available_outer_width),
         None => available_outer_width,
     };
+    if let Some(max_width) = style
+        .and_then(|style| style.get("max-width"))
+        .and_then(|value| parse_css_length(value, font_size))
+    {
+        let max_outer_width = max_width + horizontal_insets;
+        outer_width = outer_width.min(max_outer_width).min(available_outer_width);
+    }
+    let (auto_left, auto_right) = horizontal_auto_margins(style);
+    let remaining = (available_outer_width - outer_width).max(0.0);
+    match (auto_left, auto_right) {
+        (true, true) => {
+            margin.left += remaining / 2.0;
+            margin.right += remaining / 2.0;
+        }
+        (true, false) => margin.left += remaining,
+        (false, true) => margin.right += remaining,
+        (false, false) => {}
+    }
     let content_width = (outer_width - horizontal_insets).max(0.0);
 
     *count += 1;
@@ -445,9 +469,43 @@ fn parse_border_widths(style: Option<&bweb_css::ComputedStyle>) -> Edges {
 }
 
 fn parse_length(value: &str) -> Option<f32> {
+    parse_css_length(value, 16.0)
+}
+
+fn parse_css_length(value: &str, font_size: f32) -> Option<f32> {
     let value = value.trim();
-    let numeric = value.strip_suffix("px").unwrap_or(value).trim();
-    numeric.parse::<f32>().ok().filter(|number| number.is_finite())
+    let (numeric, scale) = if let Some(number) = value.strip_suffix("px") {
+        (number, 1.0)
+    } else if let Some(number) = value.strip_suffix("em") {
+        (number, font_size)
+    } else if let Some(number) = value.strip_suffix("rem") {
+        (number, 16.0)
+    } else {
+        (value, 1.0)
+    };
+    numeric
+        .trim()
+        .parse::<f32>()
+        .ok()
+        .map(|number| number * scale)
+        .filter(|number| number.is_finite() && *number >= 0.0)
+}
+
+fn horizontal_auto_margins(style: Option<&bweb_css::ComputedStyle>) -> (bool, bool) {
+    let Some(style) = style else { return (false, false) };
+    let shorthand = style.get("margin").unwrap_or("");
+    let values: Vec<&str> = shorthand.split_ascii_whitespace().collect();
+    let (left, right) = match values.as_slice() {
+        [_] => (values[0], values[0]),
+        [_, horizontal] => (*horizontal, *horizontal),
+        [_, horizontal, _] => (*horizontal, *horizontal),
+        [_, right, _, left] => (*left, *right),
+        _ => ("", ""),
+    };
+    (
+        left == "auto" || style.get("margin-left") == Some("auto"),
+        right == "auto" || style.get("margin-right") == Some("auto"),
+    )
 }
 
 fn finite_non_negative(value: f32) -> f32 {
@@ -588,6 +646,26 @@ mod tests {
         assert_eq!(box_node.rect.height, 50.0);
         assert_eq!(box_node.padding.left, 5.0);
         assert_eq!(box_node.border.left, 0.0);
+    }
+
+    #[test]
+    fn max_width_in_em_and_auto_margins_center_the_box() {
+        let (document, tree) = layout(
+            "<main>centered</main>",
+            "main { display:block; max-width:26em; margin:auto; padding:8px }",
+        );
+        let main = document
+            .iter()
+            .find_map(|(id, node)| {
+                matches!(node.kind(), NodeKind::Element { tag_name, .. } if tag_name == "main")
+                    .then_some(id)
+            })
+            .expect("main");
+        let box_node = find(&tree.root, main).expect("main box");
+        assert_eq!(box_node.rect.width, 432.0);
+        assert_eq!(box_node.rect.x, 184.0);
+        assert_eq!(box_node.margin.left, 184.0);
+        assert_eq!(box_node.margin.right, 184.0);
     }
 
     #[test]
