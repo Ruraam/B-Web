@@ -261,7 +261,9 @@ mod tests {
         node.opacity = Some("0.5".to_owned());
         let layout = MockLayout { viewport: viewport(), nodes: vec![node] };
         let list = Painter::new(&layout, 1.0).expect("valid scale").paint();
-        assert!(list.items.iter().any(|item| matches!(item, PaintItem::PushOpacity { alpha } if (*alpha - 0.5).abs() < 0.001)));
+        assert!(list.items.iter().any(
+            |item| matches!(item, PaintItem::PushOpacity { alpha } if (*alpha - 0.5).abs() < 0.001)
+        ));
         assert!(list.items.iter().any(|item| matches!(item, PaintItem::PopOpacity)));
     }
 

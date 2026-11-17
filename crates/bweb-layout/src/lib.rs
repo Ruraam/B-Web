@@ -346,7 +346,7 @@ fn layout_node(
         .unwrap_or(16.0);
     let specified_width = style
         .and_then(|style| style.get("width"))
-        .and_then(|value| parse_css_length(value, font_size));
+        .and_then(|value| parse_length_basis(value, font_size, available_outer_width));
     let mut outer_width = match specified_width {
         Some(width) if box_sizing == "border-box" => width.min(available_outer_width),
         Some(width) => (width + horizontal_insets).min(available_outer_width),
@@ -354,7 +354,7 @@ fn layout_node(
     };
     if let Some(max_width) = style
         .and_then(|style| style.get("max-width"))
-        .and_then(|value| parse_css_length(value, font_size))
+        .and_then(|value| parse_length_basis(value, font_size, available_outer_width))
     {
         let max_outer_width = max_width + horizontal_insets;
         outer_width = outer_width.min(max_outer_width).min(available_outer_width);
@@ -1848,6 +1848,18 @@ fn parse_length(value: &str) -> Option<f32> {
     parse_css_length(value, 16.0)
 }
 
+/// Resolves a length, with percentages resolved against `basis` (the width of
+/// the containing block for `width`/`max-width`).
+fn parse_length_basis(value: &str, font_size: f32, basis: f32) -> Option<f32> {
+    let value = value.trim();
+    if let Some(percent) = value.strip_suffix('%') {
+        let fraction = percent.trim().parse::<f32>().ok()? / 100.0;
+        let resolved = basis * fraction;
+        return resolved.is_finite().then_some(resolved);
+    }
+    parse_css_length(value, font_size)
+}
+
 fn parse_css_length(value: &str, font_size: f32) -> Option<f32> {
     let value = value.trim();
     let (numeric, scale) = if let Some(number) = value.strip_suffix("px") {
@@ -2024,6 +2036,17 @@ mod tests {
         assert_eq!(box_node.rect.height, 50.0);
         assert_eq!(box_node.padding.left, 5.0);
         assert_eq!(box_node.border.left, 0.0);
+    }
+
+    #[test]
+    fn percentage_width_resolves_against_the_containing_block() {
+        let (document, tree) = layout(
+            "<main><div>x</div></main>",
+            "main { display:block; width:200px } div { display:block; width:50% }",
+        );
+        let main = find(&tree.root, element(&document, "main")).expect("main");
+        let child = main.children.first().expect("child");
+        assert_eq!(child.rect.width, 100.0, "50% of 200px should be 100px");
     }
 
     #[test]
