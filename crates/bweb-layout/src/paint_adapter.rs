@@ -332,6 +332,7 @@ mod tests {
                 y: 8.0,
             }],
             color: Color::rgba(20, 30, 40, 255),
+            ..Default::default()
         });
         let runs = HashMap::from([(text_node, Arc::clone(&run))]);
         let adapter =

@@ -140,7 +140,11 @@ impl<'a, L: PaintLayout> Painter<'a, L> {
                 list.push(PaintItem::Image { rect, image });
             }
             if let Some(run) = node.text {
-                list.push(PaintItem::Text { glyphs: run.glyphs.clone(), color: run.color });
+                list.push(PaintItem::Text {
+                    glyphs: run.glyphs.clone(),
+                    color: run.color,
+                    decoration: run.decoration,
+                });
             }
 
             if node.style.clips_children {
@@ -238,6 +242,7 @@ mod tests {
                 y: 8.0,
             }],
             color: BLACK,
+            ..Default::default()
         }
     }
 
@@ -270,7 +275,7 @@ mod tests {
         assert!(matches!(list.items[1], PaintItem::FillRect { .. }));
         assert!(matches!(list.items[2], PaintItem::BorderRect { .. }));
         match &list.items[3] {
-            PaintItem::Text { glyphs, color } => {
+            PaintItem::Text { glyphs, color, .. } => {
                 assert_eq!(glyphs, &run.glyphs);
                 assert_eq!(*color, run.color);
                 assert_eq!(glyphs[0].x, 12.0);

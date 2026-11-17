@@ -183,6 +183,11 @@ pub fn prepare_text_runs(
         let line_height = fragment.rect.height.max(1.0) * scale_factor;
         let color = bweb_renderer::parse_color(style.get("color").unwrap_or("black"))
             .unwrap_or(Color::rgba(0, 0, 0, 255));
+        let decoration = match style.get("text-decoration") {
+            Some("underline") => bweb_renderer::TextDecoration::Underline,
+            Some("line-through") => bweb_renderer::TextDecoration::LineThrough,
+            _ => bweb_renderer::TextDecoration::None,
+        };
         let layout = layout_text(
             font,
             &fragment.text,
@@ -195,8 +200,11 @@ pub fn prepare_text_runs(
         if layout.glyphs.is_empty() {
             continue;
         }
-        let run =
-            runs.entry(fragment.node).or_insert_with(|| TextRun { glyphs: Vec::new(), color });
+        let run = runs.entry(fragment.node).or_insert_with(|| TextRun {
+            glyphs: Vec::new(),
+            color,
+            decoration,
+        });
         run.glyphs.extend(layout.glyphs);
     }
 

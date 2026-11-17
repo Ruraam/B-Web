@@ -77,7 +77,7 @@ impl Rasterizer {
                         *opacities.last().expect("root opacity"),
                     );
                 }
-                PaintItem::Text { glyphs, color } => {
+                PaintItem::Text { glyphs, color, decoration } => {
                     let clip = *clips.last().expect("root clip is always present");
                     let transform = *transforms.last().expect("root transform");
                     let moved: Vec<_> = glyphs
@@ -87,15 +87,40 @@ impl Rasterizer {
                             crate::PositionedGlyph { coverage: glyph.coverage.clone(), x, y }
                         })
                         .collect();
-                    blit_glyphs(framebuffer, &moved, clip, {
-                        let alpha = *opacities.last().expect("root opacity");
-                        Color::rgba(
-                            color.red,
-                            color.green,
-                            color.blue,
-                            (f32::from(color.alpha) * alpha).round() as u8,
-                        )
-                    });
+                    let alpha = *opacities.last().expect("root opacity");
+                    let effective = Color::rgba(
+                        color.red,
+                        color.green,
+                        color.blue,
+                        (f32::from(color.alpha) * alpha).round() as u8,
+                    );
+                    blit_glyphs(framebuffer, &moved, clip, effective);
+                    if *decoration != crate::TextDecoration::None {
+                        let height = moved
+                            .iter()
+                            .filter_map(|glyph| {
+                                (glyph.coverage.height > 0).then_some(glyph.coverage.height)
+                            })
+                            .max()
+                            .unwrap_or(0);
+                        if height > 0 {
+                            let thickness = (height as f32 * 0.08).max(1.0);
+                            for glyph in &moved {
+                                let line_y = if *decoration == crate::TextDecoration::Underline {
+                                    glyph.y + height as f32 + 1.0
+                                } else {
+                                    glyph.y + height as f32 * 0.5
+                                };
+                                let rect = Rect {
+                                    x: glyph.x,
+                                    y: line_y,
+                                    width: glyph.coverage.width as f32,
+                                    height: thickness,
+                                };
+                                paint_rect(framebuffer, rect, clip, effective);
+                            }
+                        }
+                    }
                 }
                 PaintItem::Image { rect, image } => {
                     let clip = *clips.last().expect("root clip is always present");
@@ -505,6 +530,7 @@ mod tests {
                 y: 0.4,
             }],
             color: Color::rgba(200, 100, 50, 128),
+            decoration: crate::TextDecoration::None,
         });
         let mut framebuffer = Framebuffer::new(3, 1).expect("framebuffer");
 
@@ -532,6 +558,7 @@ mod tests {
                 y: 0.0,
             }],
             color: RED,
+            decoration: crate::TextDecoration::None,
         });
         list.push(PaintItem::PopClip);
         let mut framebuffer = Framebuffer::new(3, 1).expect("framebuffer");
@@ -570,6 +597,7 @@ mod tests {
                 },
             ],
             color: RED,
+            decoration: crate::TextDecoration::None,
         });
         let mut framebuffer = Framebuffer::new(2, 2).expect("framebuffer");
 
@@ -640,6 +668,33 @@ mod tests {
         assert_eq!(&framebuffer.pixels()[0..4], &[0, 0, 0, 0]);
         assert_eq!(&framebuffer.pixels()[4..8], &[255, 0, 0, 255]);
         assert_eq!(&framebuffer.pixels()[8..12], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn underline_draws_a_line_below_glyphs() {
+        let glyph = crate::PositionedGlyph {
+            coverage: bweb_text::Coverage {
+                width: 4,
+                height: 6,
+                left: 0,
+                top: 0,
+                data: vec![255; 24],
+            },
+            x: 1.0,
+            y: 1.0,
+        };
+        let mut list = DisplayList::default();
+        list.push(PaintItem::Text {
+            glyphs: vec![glyph],
+            color: RED,
+            decoration: crate::TextDecoration::Underline,
+        });
+        let mut framebuffer = Framebuffer::new(6, 10).expect("framebuffer");
+        Rasterizer.rasterize(&list, &mut framebuffer);
+
+        // Row 8 (below the glyph) should contain the underline pixels.
+        let row: Vec<u8> = framebuffer.pixels()[8 * 6 * 4..9 * 6 * 4].to_vec();
+        assert!(row.chunks_exact(4).any(|pixel| pixel == [255, 0, 0, 255]));
     }
 
     #[test]

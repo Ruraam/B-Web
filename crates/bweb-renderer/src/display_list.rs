@@ -108,10 +108,19 @@ pub struct PositionedGlyph {
 /// A reusable, already-positioned run of rasterized glyphs.
 ///
 /// Coordinates in each glyph are final physical-pixel positions.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TextDecoration {
+    #[default]
+    None,
+    Underline,
+    LineThrough,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct TextRun {
     pub glyphs: Vec<PositionedGlyph>,
     pub color: Color,
+    pub decoration: TextDecoration,
 }
 
 /// One ordered drawing or clipping command.
@@ -131,7 +140,7 @@ pub enum PaintItem {
     /// Glyph coordinates are snapped to the nearest pixel by the rasterizer.
     /// TODO(renderer-4): add quarter-pixel subpixel positioning and a matching
     /// glyph coverage cache without changing `PositionedGlyph`.
-    Text { glyphs: Vec<PositionedGlyph>, color: Color },
+    Text { glyphs: Vec<PositionedGlyph>, color: Color, decoration: TextDecoration },
     /// Scales and blits a decoded RGBA image into a physical-pixel rectangle.
     Image { rect: Rect, image: Arc<Image> },
     /// Marks the start of a sticky subtree. The shell caps scroll translation
@@ -225,6 +234,7 @@ mod tests {
         list.push(PaintItem::Text {
             glyphs: vec![glyph.clone()],
             color: Color::rgba(10, 20, 30, 255),
+            decoration: crate::TextDecoration::None,
         });
 
         assert!(matches!(&list.items[0], PaintItem::Text { glyphs, .. } if glyphs == &[glyph]));

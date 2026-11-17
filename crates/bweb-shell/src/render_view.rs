@@ -287,6 +287,7 @@ mod tests {
                     y: 4.0,
                 }],
                 color: Color::rgba(0, 0, 0, 255),
+                ..Default::default()
             }),
         );
 
@@ -397,7 +398,11 @@ mod tests {
                 rect: Rect { x: 0.0, y: 2.0, width: 10.0, height: 10.0 },
                 gradient,
             },
-            PaintItem::Text { glyphs: vec![glyph], color: Color::rgba(0, 0, 0, 255) },
+            PaintItem::Text {
+                glyphs: vec![glyph],
+                color: Color::rgba(0, 0, 0, 255),
+                decoration: bweb_renderer::TextDecoration::None,
+            },
             PaintItem::PopClip,
         ];
         for item in items.iter_mut().skip(1) {

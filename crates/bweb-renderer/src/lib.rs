@@ -18,7 +18,7 @@ pub use background::{
 };
 pub use color::parse_color;
 pub use display_list::{
-    Color, DisplayList, Image, ImageError, PaintItem, PositionedGlyph, TextRun,
+    Color, DisplayList, Image, ImageError, PaintItem, PositionedGlyph, TextDecoration, TextRun,
 };
 pub use framebuffer::{Framebuffer, FramebufferError};
 pub use gradient::{
