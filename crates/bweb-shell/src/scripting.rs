@@ -256,7 +256,9 @@ impl Host for DomHost {
                             is_array: true,
                         }))));
                     };
-                    let document = self.document.upgrade().expect("document during script");
+                    let Some(document) = self.document.upgrade() else {
+                        return Ok(Value::Undefined);
+                    };
                     let document = document.borrow();
                     let nodes = document.query_selector_all(&selector);
                     let mut properties = HashMap::new();
@@ -276,7 +278,9 @@ impl Host for DomHost {
                     let Some(tag) = args.first().map(Value::display) else {
                         return Ok(Value::Null);
                     };
-                    let document = self.document.upgrade().expect("document during script");
+                    let Some(document) = self.document.upgrade() else {
+                        return Ok(Value::Undefined);
+                    };
                     let mut document = document.borrow_mut();
                     let node = document.create_element(&tag);
                     return Ok(Value::Host(format!("element:{}", node.index())));
@@ -285,7 +289,9 @@ impl Host for DomHost {
                     let Some(selector) = args.first().map(Value::display) else {
                         return Ok(Value::Null);
                     };
-                    let document = self.document.upgrade().expect("document during script");
+                    let Some(document) = self.document.upgrade() else {
+                        return Ok(Value::Undefined);
+                    };
                     let document = document.borrow();
                     let found = if method == "getElementById" {
                         document.element_by_id(&selector)
@@ -298,7 +304,9 @@ impl Host for DomHost {
                 }
                 "write" => {
                     let text = args.iter().map(Value::display).collect::<Vec<_>>().join(" ");
-                    let document = self.document.upgrade().expect("document during script");
+                    let Some(document) = self.document.upgrade() else {
+                        return Ok(Value::Undefined);
+                    };
                     let mut document = document.borrow_mut();
                     let body = document.iter().find_map(|(id, node)| {
                         matches!(node.kind(), bweb_html::NodeKind::Element { tag_name, .. } if tag_name == "body")
@@ -321,6 +329,33 @@ mod tests {
     use bweb_html::{HtmlDocument, NodeKind};
     use bweb_js::{Runtime, Value};
     use std::{cell::RefCell, rc::Rc};
+
+    #[test]
+    fn host_survives_as_long_as_the_document_rc_is_alive() {
+        let document = Rc::new(RefCell::new(HtmlDocument::parse(
+            "<html><body><p id='x'>one</p></body></html>",
+        )));
+        let events = Rc::new(RefCell::new(EventRegistry::default()));
+        let mut runtime = Runtime::new();
+        runtime.set_host(Box::new(DomHost::new(&document, events.clone())));
+        runtime.define_global("document", Value::Host("document".into()));
+        // Register a handler, then keep the Rc alive (the real fix in the shell).
+        runtime
+            .eval("document.getElementById('x').addEventListener('click', function(){ document.title = 'clicked'; });")
+            .expect("script");
+        assert_eq!(document.borrow().title(), None);
+        // Simulate an event callback firing later, while the Rc is still alive.
+        let handle = {
+            let dom = document.borrow();
+            let id = dom.element_by_id("x").expect("paragraph");
+            format!("element:{}", id.index())
+        };
+        let callbacks = events.borrow().callbacks(&handle, "click");
+        for callback in callbacks {
+            runtime.call(callback, vec![Value::Host("event".into())]).expect("handler");
+        }
+        assert_eq!(document.borrow().title().as_deref(), Some("clicked"));
+    }
 
     #[test]
     fn scripts_can_mutate_the_document() {

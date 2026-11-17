@@ -10,7 +10,7 @@ mod shell;
 use address_bar::AddressBar;
 use bweb_css::{ComputedStyle, ComputedStyleMap, PseudoElement, StyleEngine, Stylesheet};
 use bweb_filterlists::FilterListDownloader;
-use bweb_html::{DocumentLoader, LoadedDocument, NodeId, ResourceKind};
+use bweb_html::{DocumentLoader, HtmlDocument, LoadedDocument, NodeId, ResourceKind};
 use bweb_js::{Runtime, Value};
 use bweb_layout::{ImageSize, LayoutTree, PaintAdapter, Rect as LayoutRect, View, Viewport};
 use bweb_net::{HttpTransport, NetworkPolicy};
@@ -210,6 +210,9 @@ fn load_page(url: &str, verbose: bool) -> Result<Page, Box<dyn Error>> {
 }
 
 struct PreparedPage {
+    /// Kept alive for the whole page lifetime: the JS host bridge holds a
+    /// `Weak` to it, so dropping this `Rc` would break every event handler.
+    document: Rc<RefCell<HtmlDocument>>,
     styles: ComputedStyleMap,
     pseudo_styles: HashMap<(NodeId, PseudoElement), ComputedStyle>,
     runtime: Runtime,
@@ -231,14 +234,9 @@ fn prepare_page(page: &mut Page) -> PreparedPage {
     for line in runtime.output() {
         println!("  script: {line}");
     }
-    page.loaded.document = Rc::try_unwrap(document).expect("script host released").into_inner();
-    let (styles, pseudo_styles) = StyleEngine::new().compute_generated(
-        &page.loaded.document,
-        &page.stylesheets,
-        1280.0,
-        720.0,
-    );
-    PreparedPage { styles, pseudo_styles, runtime, events }
+    let (styles, pseudo_styles) =
+        StyleEngine::new().compute_generated(&document.borrow(), &page.stylesheets, 1280.0, 720.0);
+    PreparedPage { document, styles, pseudo_styles, runtime, events }
 }
 
 fn open_document(
@@ -259,7 +257,7 @@ fn open_document(
     let sizes: HashMap<NodeId, ImageSize> = image_sizes(&page.images);
     let pseudo = pseudo_content(&prepared.pseudo_styles);
     let layout = LayoutTree::build_with_viewport(
-        &page.loaded.document,
+        &prepared.document.borrow(),
         styles,
         1280.0,
         720.0,
@@ -268,8 +266,8 @@ fn open_document(
         &pseudo,
     );
     println!("Document: {}", page.loaded.url);
-    println!("Title: {}", page.loaded.document.title().as_deref().unwrap_or("(untitled)"));
-    println!("DOM nodes: {}", page.loaded.document.node_count());
+    println!("Title: {}", prepared.document.borrow().title().as_deref().unwrap_or("(untitled)"));
+    println!("DOM nodes: {}", prepared.document.borrow().node_count());
     println!("Loaded subresources: {}", page.loaded.resources.len());
     println!("Parsed stylesheets: {}", page.stylesheets.len());
     println!("Computed styles: {} NodeId entries", styles.len());
@@ -287,13 +285,13 @@ fn open_document(
         write_ppm(path, &framebuffer)?;
         println!("Rendered frame: 1280x720 px, {glyph_count} glyphs -> {}", path.display());
     }
-    if show_window {
-        println!("Opening native B-Web window...");
-        show_browser_window(&page, prepared.runtime, prepared.events, &prepared.pseudo_styles)?;
-    }
     if dump_layout {
         println!();
-        print!("{}", layout.dump(&page.loaded.document));
+        print!("{}", layout.dump(&prepared.document.borrow()));
+    }
+    if show_window {
+        println!("Opening native B-Web window...");
+        show_browser_window(&page, prepared)?;
     }
     println!("Viewport: 1280 CSS px");
     println!("Failed/blocked subresources: {}", page.loaded.failed_resources.len());
@@ -342,24 +340,19 @@ fn content_viewport(width: u32, height: u32, scale_factor: f64) -> Option<Viewpo
 }
 
 /// Displays the retained browser view in a native winit + softbuffer window.
-fn show_browser_window(
-    page: &Page,
-    runtime: Runtime,
-    events: Rc<RefCell<EventRegistry>>,
-    pseudo_styles: &HashMap<(NodeId, PseudoElement), ComputedStyle>,
-) -> Result<(), Box<dyn Error>> {
+fn show_browser_window(page: &Page, prepared: PreparedPage) -> Result<(), Box<dyn Error>> {
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     let proxy = event_loop.create_proxy();
     let context = Context::new(event_loop.owned_display_handle())?;
     let font = load_system_font()?;
     let chrome_font = load_system_font()?;
     let backend = BrowserViewBackend::new(
-        page.loaded.document.clone(),
+        prepared.document.borrow().clone(),
         page.stylesheets.clone(),
         font,
         page.images.clone(),
         page.background_images.clone(),
-        pseudo_styles.clone(),
+        prepared.pseudo_styles.clone(),
         page.loaded.url.as_str(),
     );
     let history = History::new(page.loaded.url.clone());
@@ -370,8 +363,9 @@ fn show_browser_window(
         history,
         address_bar,
         chrome_font,
-        runtime,
-        events,
+        document: prepared.document,
+        runtime: prepared.runtime,
+        events: prepared.events,
         proxy,
         pending: None,
         next_navigation_id: 0,
@@ -396,6 +390,8 @@ struct WindowApp<D> {
     history: History,
     address_bar: AddressBar,
     chrome_font: Font,
+    /// Kept alive so the JS host bridge's Weak reference stays valid.
+    document: Rc<RefCell<HtmlDocument>>,
     runtime: Runtime,
     events: Rc<RefCell<EventRegistry>>,
     proxy: EventLoopProxy<UserEvent>,
@@ -444,16 +440,15 @@ impl<D: raw_window_handle::HasDisplayHandle + 'static> ApplicationHandler<UserEv
                 for line in self.runtime.take_output() {
                     println!("  script: {line}");
                 }
-                page.loaded.document =
-                    Rc::try_unwrap(document).expect("script host released").into_inner();
                 let (_, pseudo_styles) = StyleEngine::new().compute_generated(
-                    &page.loaded.document,
+                    &document.borrow(),
                     &page.stylesheets,
                     1280.0,
                     720.0,
                 );
+                self.document = document.clone();
                 let backend = BrowserViewBackend::new(
-                    page.loaded.document,
+                    document.borrow().clone(),
                     page.stylesheets,
                     font,
                     page.images,
