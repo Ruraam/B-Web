@@ -140,6 +140,16 @@ fn box_blur_pass(
     }
 }
 
+/// Number of box-blur passes; each pass spreads influence by `radius` along
+/// its axis, so the total reach of the filter is `3 * radius` per axis.
+const BLUR_PASSES: usize = 3;
+
+/// Radius actually used by [`blur_layer`], shared with the bounds calculation
+/// so the temporary layer is always large enough to hold the whole shadow.
+fn effective_blur_radius(blur: f32) -> usize {
+    blur.clamp(0.5, MAX_BLUR_RADIUS).round() as usize
+}
+
 /// Separable box blur approximating a Gaussian (three passes). Colors are
 /// blurred in premultiplied form so the result can be composited source-over
 /// without double-darkening semi-transparent edges.
@@ -147,7 +157,7 @@ fn blur_layer(buffer: &mut Framebuffer, radius: f32) {
     if radius <= 0.0 {
         return;
     }
-    let radius = radius.clamp(0.5, MAX_BLUR_RADIUS).round() as usize;
+    let radius = effective_blur_radius(radius);
     let width = buffer.width() as usize;
     let height = buffer.height() as usize;
     if width == 0 || height == 0 {
@@ -167,7 +177,7 @@ fn blur_layer(buffer: &mut Framebuffer, radius: f32) {
     // Two scratch buffers, reused across all passes (no per-pass allocation).
     let mut horizontal = vec![0u8; source.len()];
     let mut vertical = vec![0u8; source.len()];
-    for _ in 0..3 {
+    for _ in 0..BLUR_PASSES {
         box_blur_pass(&source, &mut horizontal, width, height, radius, true);
         box_blur_pass(&horizontal, &mut vertical, width, height, radius, false);
         std::mem::swap(&mut source, &mut vertical);
@@ -365,9 +375,13 @@ fn run_commands(
                     let dy = shadow.offset_y;
                     if shadow.blur > 0.0 {
                         let blur = shadow.blur.min(MAX_BLUR_RADIUS);
+                        // Three passes of radius r spread each glyph pixel by
+                        // 3 * r along both axes. The old 2 * r + 1 margin cut
+                        // off the outer part of large shadows.
+                        let padding = (effective_blur_radius(blur) * BLUR_PASSES + 1) as f32;
                         // Blur only the region actually covered by the shadow,
                         // not the whole viewport.
-                        if let Some(mut bounds) = glyphs_bounds(&moved, blur * 2.0 + 1.0) {
+                        if let Some(mut bounds) = glyphs_bounds(&moved, padding) {
                             bounds.x += dx;
                             bounds.y += dy;
                             let (bw, bh) = (
@@ -1456,6 +1470,49 @@ mod tests {
             }
         }
         assert!(spread > 0, "a spatial blur should produce partial-alpha pixels");
+    }
+
+    #[test]
+    fn blur_bounds_cover_the_full_three_pass_propagation() {
+        use crate::TextShadow;
+        let size = 10u32;
+        let glyph = crate::PositionedGlyph {
+            coverage: bweb_text::Coverage {
+                width: size,
+                height: size,
+                left: 0,
+                top: 0,
+                data: vec![255; (size * size) as usize],
+            },
+            x: 50.0,
+            y: 50.0,
+        };
+        let shadow = TextShadow {
+            offset_x: 0.0,
+            offset_y: 0.0,
+            blur: 2.0,
+            color: Color::rgba(255, 0, 0, 255),
+        };
+        let mut list = DisplayList::default();
+        list.push(PaintItem::PushClip { rect: rect(0.0, 0.0, 100.0, 100.0) });
+        list.push(PaintItem::Text {
+            glyphs: vec![glyph],
+            color: Color::rgba(0, 0, 255, 0),
+            decoration: crate::TextDecoration::None,
+            shadows: vec![shadow],
+        });
+        list.push(PaintItem::PopClip);
+        let mut framebuffer = Framebuffer::new(100, 100).expect("framebuffer");
+        framebuffer.clear([255, 255, 255, 255]);
+        Rasterizer.rasterize(&list, &mut framebuffer);
+
+        let painted = |x: u32, y: u32| framebuffer.pixel(x, y) != [255, 255, 255, 255];
+        // Three passes of radius 2 reach up to 6px from the glyph edge. The
+        // old 2*r + 1 = 5px margin cut off the outermost non-zero pixels.
+        assert!(painted(44, 55), "left shadow cut off: {:?}", framebuffer.pixel(44, 55));
+        assert!(painted(65, 55), "right shadow cut off: {:?}", framebuffer.pixel(65, 55));
+        assert!(painted(55, 44), "top shadow cut off: {:?}", framebuffer.pixel(55, 44));
+        assert!(painted(55, 65), "bottom shadow cut off: {:?}", framebuffer.pixel(55, 65));
     }
 
     #[test]
