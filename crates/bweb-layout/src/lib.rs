@@ -1140,6 +1140,10 @@ struct GridPlacement {
     span: usize,
 }
 
+fn parse_grid_number(value: &str) -> Option<usize> {
+    value.trim().parse::<usize>().ok().filter(|line| *line <= 1024)
+}
+
 fn parse_grid_placement(value: Option<&str>) -> GridPlacement {
     let Some(value) = value else {
         return GridPlacement { start: None, span: 1 };
@@ -1148,20 +1152,21 @@ fn parse_grid_placement(value: Option<&str>) -> GridPlacement {
     if value.is_empty() || value == "auto" {
         return GridPlacement { start: None, span: 1 };
     }
+    const MAX_GRID_LINE: usize = 1024;
     let parts: Vec<&str> = value.split('/').map(str::trim).collect();
     let mut start = None;
     let mut span = 1;
     if let Some(count) = parts[0].strip_prefix("span ") {
-        span = count.trim().parse::<usize>().unwrap_or(1).max(1);
+        span = parse_grid_number(count).unwrap_or(1).clamp(1, MAX_GRID_LINE);
     } else {
-        start = parts[0].parse::<usize>().ok().map(|line| line.saturating_sub(1));
+        start = parse_grid_number(parts[0]).map(|line| line.saturating_sub(1));
     }
     if let Some(end) = parts.get(1) {
         if let Some(count) = end.strip_prefix("span ") {
-            span = count.trim().parse::<usize>().unwrap_or(1).max(1);
-        } else if let Ok(line) = end.parse::<usize>() {
+            span = parse_grid_number(count).unwrap_or(1).clamp(1, MAX_GRID_LINE);
+        } else if let Some(line) = parse_grid_number(end) {
             if let Some(first) = start {
-                span = line.saturating_sub(first + 1).max(1);
+                span = line.saturating_sub(first.saturating_add(1)).clamp(1, MAX_GRID_LINE);
             }
         }
     }
@@ -2600,6 +2605,19 @@ mod tests {
         assert_eq!(boxes[2].rect.y, 20.0);
         assert_eq!(boxes[3].rect.x, 150.0);
         assert_eq!(boxes[3].rect.y, 20.0);
+    }
+
+    #[test]
+    fn grid_clamps_huge_explicit_spans() {
+        let (document, tree) = layout(
+            "<main><div>x</div></main>",
+            "main { display:grid; width:50px; grid-template-columns:1fr; \
+             grid-column:span 999999999999999999999 } div { height:5px }",
+        );
+        let main = find(&tree.root, element(&document, "main")).expect("grid box");
+        // Must not panic or allocate unbounded cells; the item is placed.
+        assert_eq!(main.children.len(), 1);
+        assert!(main.children[0].rect.width.is_finite());
     }
 
     #[test]
