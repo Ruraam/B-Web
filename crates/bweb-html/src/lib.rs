@@ -12,6 +12,7 @@ use bweb_net::{HttpTransport, HttpTransportError};
 use bweb_shield::ResourceType;
 use reqwest::header::{CONTENT_TYPE, HeaderMap};
 use std::{
+    collections::HashSet,
     error::Error,
     fmt,
     io::{self, Read},
@@ -22,6 +23,10 @@ const MAX_DOCUMENT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_STYLESHEET_BYTES: usize = 4 * 1024 * 1024;
 const MAX_SCRIPT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_IMAGE_BYTES: usize = 16 * 1024 * 1024;
+/// Cumulative download budget for one page, including the main document.
+const MAX_TOTAL_RESOURCE_BYTES: usize = 32 * 1024 * 1024;
+/// Maximum number of distinct subresources fetched for one page.
+const MAX_TOTAL_RESOURCES: usize = 256;
 
 /// Stable index into a document's node arena.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -1708,18 +1713,101 @@ impl Error for DocumentLoadError {
     }
 }
 
+/// Limits applied to all resources downloaded for a single page.
+///
+/// The defaults are deliberately generous enough for real pages while keeping
+/// the total work bounded. Callers may tighten them with
+/// [`DocumentLoader::with_limits`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResourceLimits {
+    /// Maximum cumulative bytes, including the main HTML document.
+    pub max_total_bytes: usize,
+    /// Maximum number of distinct subresources (CSS, scripts and images).
+    pub max_resources: usize,
+}
+
+impl ResourceLimits {
+    pub const DEFAULT: Self =
+        Self { max_total_bytes: MAX_TOTAL_RESOURCE_BYTES, max_resources: MAX_TOTAL_RESOURCES };
+}
+
+impl Default for ResourceLimits {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+/// Per-page accounting shared by both reference-fetching passes.
+#[derive(Debug)]
+struct ResourceBudget {
+    limits: ResourceLimits,
+    used_bytes: usize,
+    fetched: usize,
+    downloaded: HashSet<String>,
+}
+
+/// Decision returned when a reference is considered for download.
+enum Admission {
+    Fetch,
+    /// The resolved URL was already downloaded; skip without reporting a failure.
+    Duplicate,
+    Rejected(String),
+}
+
+impl ResourceBudget {
+    fn new(document_bytes: usize, limits: ResourceLimits) -> Self {
+        Self { limits, used_bytes: document_bytes, fetched: 0, downloaded: HashSet::new() }
+    }
+
+    fn remaining_bytes(&self) -> usize {
+        self.limits.max_total_bytes.saturating_sub(self.used_bytes)
+    }
+
+    fn admit(&mut self, url: &str) -> Admission {
+        if self.downloaded.contains(url) {
+            return Admission::Duplicate;
+        }
+        if self.fetched >= self.limits.max_resources {
+            return Admission::Rejected(format!(
+                "resource count limit ({}) reached",
+                self.limits.max_resources
+            ));
+        }
+        if self.remaining_bytes() == 0 {
+            return Admission::Rejected(format!(
+                "page byte budget ({}) exhausted",
+                self.limits.max_total_bytes
+            ));
+        }
+        self.downloaded.insert(url.to_owned());
+        self.fetched += 1;
+        Admission::Fetch
+    }
+
+    fn record(&mut self, bytes: usize) {
+        self.used_bytes = self.used_bytes.saturating_add(bytes);
+    }
+}
+
 /// Loads documents and their external resources using one guarded transport.
 ///
 /// This type deliberately has no reqwest client and no alternate networking
 /// implementation. Its only network capability is the supplied HttpTransport.
 pub struct DocumentLoader {
     transport: HttpTransport,
+    limits: ResourceLimits,
 }
 
 impl DocumentLoader {
     #[must_use]
     pub const fn new(transport: HttpTransport) -> Self {
-        Self { transport }
+        Self::with_limits(transport, ResourceLimits::DEFAULT)
+    }
+
+    /// Builds a loader with a custom per-page resource budget.
+    #[must_use]
+    pub const fn with_limits(transport: HttpTransport, limits: ResourceLimits) -> Self {
+        Self { transport, limits }
     }
 
     /// Fetches, parses, then loads CSS, image, and script references.
@@ -1744,6 +1832,7 @@ impl DocumentLoader {
             BoundedReadError::TooLarge => DocumentLoadError::TooLarge { limit: MAX_DOCUMENT_BYTES },
         })?;
         let source = String::from_utf8(source).map_err(|_| DocumentLoadError::InvalidUtf8)?;
+        let document_bytes = source.len();
         let document = HtmlDocument::parse(source);
         let resource_base = document
             .base_href()
@@ -1752,6 +1841,9 @@ impl DocumentLoader {
             .unwrap_or_else(|| url.clone());
         let mut resources = Vec::new();
         let mut failed_resources = Vec::new();
+        // One budget for the whole page: both reference passes, including CSS
+        // url() images, draw from the same byte and resource allowances.
+        let mut budget = ResourceBudget::new(document_bytes, self.limits);
         let references = document.resource_references();
         self.fetch_references(
             &references,
@@ -1759,6 +1851,7 @@ impl DocumentLoader {
             &url,
             &mut resources,
             &mut failed_resources,
+            &mut budget,
         );
 
         // CSS `url()` references can only be known after stylesheets arrive.
@@ -1783,6 +1876,7 @@ impl DocumentLoader {
             &url,
             &mut resources,
             &mut failed_resources,
+            &mut budget,
         );
 
         Ok(LoadedDocument { url, document, resources, failed_resources })
@@ -1795,6 +1889,7 @@ impl DocumentLoader {
         document_url: &Url,
         resources: &mut Vec<LoadedResource>,
         failed_resources: &mut Vec<FailedResource>,
+        budget: &mut ResourceBudget,
     ) {
         for reference in references {
             let resolved = match resource_base.join(&reference.url) {
@@ -1814,6 +1909,16 @@ impl DocumentLoader {
                     continue;
                 }
             };
+            // Admission is checked before any network I/O, so an exhausted or
+            // already-downloaded URL costs neither a request nor an allocation.
+            match budget.admit(resolved.as_str()) {
+                Admission::Fetch => {}
+                Admission::Duplicate => continue,
+                Admission::Rejected(error) => {
+                    failed_resources.push(FailedResource { reference: reference.clone(), error });
+                    continue;
+                }
+            }
             let response = self.transport.execute(
                 "GET",
                 resolved.as_str(),
@@ -1844,22 +1949,36 @@ impl DocumentLoader {
                 .get(CONTENT_TYPE)
                 .and_then(|value| value.to_str().ok())
                 .map(str::to_owned);
-            let limit = reference.kind.max_bytes();
+            // Read at most the smaller of the per-kind cap and the budget still
+            // available; read_bounded enforces this before growing the buffer.
+            let kind_limit = reference.kind.max_bytes();
+            let remaining = budget.remaining_bytes();
+            let limit = kind_limit.min(remaining);
             match read_bounded(response, limit) {
-                Ok(bytes) => resources.push(LoadedResource {
-                    url: resolved,
-                    kind: reference.kind,
-                    content_type,
-                    bytes,
-                }),
+                Ok(bytes) => {
+                    budget.record(bytes.len());
+                    resources.push(LoadedResource {
+                        url: resolved,
+                        kind: reference.kind,
+                        content_type,
+                        bytes,
+                    });
+                }
                 Err(BoundedReadError::Io(error)) => failed_resources.push(FailedResource {
                     reference: reference.clone(),
                     error: error.to_string(),
                 }),
-                Err(BoundedReadError::TooLarge) => failed_resources.push(FailedResource {
-                    reference: reference.clone(),
-                    error: format!("resource exceeded the {limit}-byte limit"),
-                }),
+                Err(BoundedReadError::TooLarge) => {
+                    let error = if remaining < kind_limit {
+                        format!(
+                            "resource would exceed the page byte budget ({})",
+                            budget.limits.max_total_bytes
+                        )
+                    } else {
+                        format!("resource exceeded the {kind_limit}-byte limit")
+                    };
+                    failed_resources.push(FailedResource { reference: reference.clone(), error });
+                }
             }
         }
     }
@@ -2471,5 +2590,163 @@ mod tests {
             let _ = d.node_count();
             let _ = d.resource_references();
         }
+    }
+}
+
+#[cfg(test)]
+mod resource_budget_tests {
+    use super::{DocumentLoader, ResourceLimits};
+    use bweb_net::{HttpTransport, NetworkPolicy};
+    use bweb_shield::Shield;
+    use std::{
+        collections::HashMap,
+        io::{Read, Write},
+        net::TcpListener,
+        sync::{Arc, Mutex},
+        thread,
+    };
+
+    fn loader(limits: ResourceLimits) -> DocumentLoader {
+        let transport =
+            HttpTransport::new(NetworkPolicy::new(Shield::empty())).expect("local transport");
+        DocumentLoader::with_limits(transport, limits)
+    }
+
+    /// Serves up to `expected` sequential requests from a local HTTP server and
+    /// records how many times each path was requested.
+    fn serve(
+        routes: &[(&str, &str, &str)],
+        expected: usize,
+    ) -> (String, Arc<Mutex<HashMap<String, usize>>>) {
+        let owned: Vec<(String, Vec<u8>, String)> = routes
+            .iter()
+            .map(|(path, body, content_type)| {
+                ((*path).to_owned(), body.as_bytes().to_vec(), (*content_type).to_owned())
+            })
+            .collect();
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local test server");
+        let base = format!("http://{}", listener.local_addr().expect("local address"));
+        let hits = Arc::new(Mutex::new(HashMap::new()));
+        let hits_for_server = Arc::clone(&hits);
+        thread::spawn(move || {
+            for _ in 0..expected {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
+                let mut request = [0u8; 4096];
+                let read = stream.read(&mut request).unwrap_or(0);
+                let path = String::from_utf8_lossy(&request[..read])
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap_or("/")
+                    .to_owned();
+                *hits_for_server.lock().expect("hits lock").entry(path.clone()).or_insert(0) += 1;
+                if let Some((_, body, content_type)) = owned.iter().find(|(p, _, _)| p == &path) {
+                    let header = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(header.as_bytes());
+                    let _ = stream.write_all(body);
+                } else {
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    );
+                }
+            }
+        });
+        (base, hits)
+    }
+
+    #[test]
+    fn repeated_and_css_discovered_urls_are_downloaded_once() {
+        let html = "<html><head><style>body{background:url(/bg.png)}</style>\
+            <link rel=stylesheet href=/a.css></head><body>\
+            <img src=/bg.png><img src=/other.png><img src=/bg.png></body></html>";
+        let (base, hits) = serve(
+            &[
+                ("/", html, "text/html"),
+                ("/a.css", "div{background:url(/bg.png)}", "text/css"),
+                ("/bg.png", "PNG", "image/png"),
+                ("/other.png", "PNG", "image/png"),
+            ],
+            4,
+        );
+        let loaded = loader(ResourceLimits::DEFAULT).load(&format!("{base}/")).expect("load");
+
+        assert!(loaded.failed_resources.is_empty());
+        assert_eq!(loaded.resources.len(), 3, "three distinct resources loaded");
+        let hits = hits.lock().expect("hits");
+        assert_eq!(hits.get("/"), Some(&1));
+        assert_eq!(hits.get("/a.css"), Some(&1));
+        assert_eq!(hits.get("/bg.png"), Some(&1), "deduplicated across both fetch passes");
+        assert_eq!(hits.get("/other.png"), Some(&1));
+    }
+
+    #[test]
+    fn resource_count_limit_stops_further_downloads() {
+        let html = "<html><body>\
+            <img src=/i0.png><img src=/i1.png><img src=/i2.png>\
+            <img src=/i3.png><img src=/i4.png></body></html>";
+        let paths = ["/i0.png", "/i1.png", "/i2.png", "/i3.png", "/i4.png"];
+        let mut routes: Vec<(&str, &str, &str)> = vec![("/", html, "text/html")];
+        routes.extend(paths.into_iter().map(|path| (path, "PNG", "image/png")));
+        let (base, hits) = serve(&routes, 6);
+        let limits = ResourceLimits { max_total_bytes: 1024 * 1024, max_resources: 2 };
+        let loaded = loader(limits).load(&format!("{base}/")).expect("load");
+
+        assert_eq!(loaded.resources.len(), 2);
+        assert_eq!(loaded.failed_resources.len(), 3);
+        assert!(
+            loaded.failed_resources.iter().all(|item| item.error.contains("resource count limit")),
+            "rejections must be reported cleanly: {:?}",
+            loaded.failed_resources
+        );
+        let hits = hits.lock().expect("hits");
+        assert_eq!(hits.len(), 3, "only the document and two resources were requested");
+    }
+
+    #[test]
+    fn exhausted_byte_budget_rejects_remaining_references() {
+        let html = "<html><body><img src=/a.png><img src=/b.png></body></html>";
+        let limits = ResourceLimits { max_total_bytes: html.len() + 4, max_resources: 10 };
+        let (base, hits) = serve(
+            &[
+                ("/", html, "text/html"),
+                ("/a.png", "abcd", "image/png"),
+                ("/b.png", "abcd", "image/png"),
+            ],
+            3,
+        );
+        let loaded = loader(limits).load(&format!("{base}/")).expect("load");
+
+        assert_eq!(loaded.resources.len(), 1, "the first resource fits the remaining budget");
+        assert_eq!(loaded.failed_resources.len(), 1);
+        assert!(
+            loaded.failed_resources[0].error.contains("byte budget"),
+            "unexpected error: {}",
+            loaded.failed_resources[0].error
+        );
+        let hits = hits.lock().expect("hits");
+        assert_eq!(hits.get("/a.png"), Some(&1));
+        assert_eq!(hits.get("/b.png"), None, "no request is made once the budget is exhausted");
+    }
+
+    #[test]
+    fn oversized_resource_is_read_only_up_to_the_remaining_budget() {
+        let html = "<html><body><img src=/big.png></body></html>";
+        let limits = ResourceLimits { max_total_bytes: html.len() + 3, max_resources: 10 };
+        let (base, hits) =
+            serve(&[("/", html, "text/html"), ("/big.png", "0123456789", "image/png")], 2);
+        let loaded = loader(limits).load(&format!("{base}/")).expect("load");
+
+        assert!(loaded.resources.is_empty());
+        assert_eq!(loaded.failed_resources.len(), 1);
+        assert!(
+            loaded.failed_resources[0].error.contains("byte budget"),
+            "unexpected error: {}",
+            loaded.failed_resources[0].error
+        );
+        assert_eq!(hits.lock().expect("hits").get("/big.png"), Some(&1));
     }
 }
