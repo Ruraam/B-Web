@@ -1827,9 +1827,14 @@ impl DocumentLoader {
         if !response.status().is_success() {
             return Err(DocumentLoadError::HttpStatus(response.status().as_u16()));
         }
-        let source = read_bounded(response, MAX_DOCUMENT_BYTES).map_err(|error| match error {
-            BoundedReadError::Io(error) => DocumentLoadError::Io(error),
-            BoundedReadError::TooLarge => DocumentLoadError::TooLarge { limit: MAX_DOCUMENT_BYTES },
+        // A custom page budget also caps the main document: never read (and
+        // allocate) more than the caller allowed, even for the HTML itself.
+        let document_limit = MAX_DOCUMENT_BYTES.min(self.limits.max_total_bytes);
+        let source = read_bounded(response, document_limit).map_err(|error| match error {
+            BoundedReadError::Io { error, .. } => DocumentLoadError::Io(error),
+            BoundedReadError::TooLarge { .. } => {
+                DocumentLoadError::TooLarge { limit: document_limit }
+            }
         })?;
         let source = String::from_utf8(source).map_err(|_| DocumentLoadError::InvalidUtf8)?;
         let document_bytes = source.len();
@@ -1964,20 +1969,29 @@ impl DocumentLoader {
                         bytes,
                     });
                 }
-                Err(BoundedReadError::Io(error)) => failed_resources.push(FailedResource {
-                    reference: reference.clone(),
-                    error: error.to_string(),
-                }),
-                Err(BoundedReadError::TooLarge) => {
-                    let error = if remaining < kind_limit {
-                        format!(
-                            "resource would exceed the page byte budget ({})",
-                            budget.limits.max_total_bytes
-                        )
-                    } else {
-                        format!("resource exceeded the {kind_limit}-byte limit")
+                Err(error) => {
+                    // Even a rejected response consumed network bytes. Debit
+                    // them before deciding on the next reference, otherwise
+                    // repeated oversized responses could bypass the budget.
+                    let (bytes_read, message) = match error {
+                        BoundedReadError::Io { error, bytes_read } => {
+                            (bytes_read, error.to_string())
+                        }
+                        BoundedReadError::TooLarge { bytes_read } => {
+                            let message = if remaining < kind_limit {
+                                format!(
+                                    "resource would exceed the page byte budget ({})",
+                                    budget.limits.max_total_bytes
+                                )
+                            } else {
+                                format!("resource exceeded the {kind_limit}-byte limit")
+                            };
+                            (bytes_read, message)
+                        }
                     };
-                    failed_resources.push(FailedResource { reference: reference.clone(), error });
+                    budget.record(bytes_read);
+                    failed_resources
+                        .push(FailedResource { reference: reference.clone(), error: message });
                 }
             }
         }
@@ -2024,19 +2038,23 @@ fn extract_css_urls(source: &str, output: &mut Vec<String>) {
     }
 }
 
+#[derive(Debug)]
 enum BoundedReadError {
-    Io(io::Error),
-    TooLarge,
+    /// I/O failed after `bytes_read` bytes were already consumed.
+    Io { error: io::Error, bytes_read: usize },
+    /// The response exceeded `limit`; `bytes_read` is `limit + 1` (or the full
+    /// body if it was shorter than the read cap but still over the limit).
+    TooLarge { bytes_read: usize },
 }
 
 fn read_bounded(reader: impl Read, limit: usize) -> Result<Vec<u8>, BoundedReadError> {
     let mut bytes = Vec::new();
-    reader
-        .take(u64::try_from(limit).unwrap_or(u64::MAX).saturating_add(1))
-        .read_to_end(&mut bytes)
-        .map_err(BoundedReadError::Io)?;
+    let mut limited = reader.take(u64::try_from(limit).unwrap_or(u64::MAX).saturating_add(1));
+    if let Err(error) = limited.read_to_end(&mut bytes) {
+        return Err(BoundedReadError::Io { error, bytes_read: bytes.len() });
+    }
     if bytes.len() > limit {
-        return Err(BoundedReadError::TooLarge);
+        return Err(BoundedReadError::TooLarge { bytes_read: bytes.len() });
     }
     Ok(bytes)
 }
@@ -2748,5 +2766,99 @@ mod resource_budget_tests {
             loaded.failed_resources[0].error
         );
         assert_eq!(hits.lock().expect("hits").get("/big.png"), Some(&1));
+    }
+
+    #[test]
+    fn read_bounded_reports_bytes_consumed_on_overflow_and_io_error() {
+        use super::{BoundedReadError, read_bounded};
+        use std::io::{Error, Result as IoResult};
+
+        struct PartialThenError {
+            sent: usize,
+            total: usize,
+        }
+
+        impl Read for PartialThenError {
+            fn read(&mut self, buffer: &mut [u8]) -> IoResult<usize> {
+                if self.sent >= self.total {
+                    return Err(Error::other("simulated I/O failure"));
+                }
+                let count = buffer.len().min(self.total - self.sent);
+                for byte in buffer.iter_mut().take(count) {
+                    *byte = b'x';
+                }
+                self.sent += count;
+                Ok(count)
+            }
+        }
+
+        // A too-large response is read up to limit + 1 bytes and that count is
+        // reported, so the caller can debit the network traffic.
+        match read_bounded(std::io::repeat(b'x'), 16).expect_err("over the limit") {
+            BoundedReadError::TooLarge { bytes_read } => assert_eq!(bytes_read, 17),
+            other => panic!("unexpected error: {other:?}"),
+        }
+
+        // A partial read followed by an I/O error reports the bytes obtained
+        // before the failure.
+        match read_bounded(PartialThenError { sent: 0, total: 8 }, 64).expect_err("I/O error") {
+            BoundedReadError::Io { bytes_read, .. } => assert_eq!(bytes_read, 8),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn oversized_resources_debit_the_budget_and_stop_further_requests() {
+        let html = "<html><body>\
+            <img src=/big0.png><img src=/big1.png><img src=/big2.png>\
+            </body></html>";
+        let limits = ResourceLimits { max_total_bytes: html.len() + 50, max_resources: 10 };
+        let big = "x".repeat(200);
+        let routes = [
+            ("/", html, "text/html"),
+            ("/big0.png", big.as_str(), "image/png"),
+            ("/big1.png", big.as_str(), "image/png"),
+            ("/big2.png", big.as_str(), "image/png"),
+        ];
+        let (base, hits) = serve(&routes, 4);
+        let loaded = loader(limits).load(&format!("{base}/")).expect("load");
+
+        assert!(loaded.resources.is_empty());
+        assert_eq!(loaded.failed_resources.len(), 3);
+        assert!(
+            loaded.failed_resources[0].error.contains("byte budget"),
+            "first failure should be the oversized read: {}",
+            loaded.failed_resources[0].error
+        );
+        assert!(
+            loaded.failed_resources[1].error.contains("exhausted")
+                && loaded.failed_resources[2].error.contains("exhausted"),
+            "later references must be rejected up front: {:?}",
+            loaded.failed_resources
+        );
+        let hits = hits.lock().expect("hits");
+        assert_eq!(hits.get("/"), Some(&1));
+        assert_eq!(hits.get("/big0.png"), Some(&1), "one oversized read consumed the budget");
+        assert_eq!(hits.get("/big1.png"), None, "no request after the budget is exhausted");
+        assert_eq!(hits.get("/big2.png"), None);
+    }
+
+    #[test]
+    fn main_document_cannot_exceed_a_custom_byte_budget() {
+        use super::DocumentLoadError;
+        let html = "<html><body><p>a document larger than the configured budget</p>\
+            <img src=/a.png></body></html>";
+        let limit = 32usize;
+        let limits = ResourceLimits { max_total_bytes: limit, max_resources: 10 };
+        let (base, hits) = serve(&[("/", html, "text/html"), ("/a.png", "PNG", "image/png")], 2);
+        let error = loader(limits).load(&format!("{base}/")).expect_err("document over budget");
+
+        assert!(
+            matches!(error, DocumentLoadError::TooLarge { limit: reported } if reported == limit),
+            "unexpected error: {error:?}"
+        );
+        let hits = hits.lock().expect("hits");
+        assert_eq!(hits.get("/"), Some(&1));
+        assert_eq!(hits.get("/a.png"), None, "no resources fetched after a rejected document");
     }
 }
