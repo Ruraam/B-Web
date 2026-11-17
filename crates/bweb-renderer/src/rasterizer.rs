@@ -58,56 +58,123 @@ struct RasterState {
     filters: Vec<crate::ColorFilter>,
 }
 
-/// Separable box blur on the alpha channel of an RGBA8 buffer, approximating a
-/// Gaussian by three passes. Colors are kept; only alpha is smoothed.
-fn blur_alpha(buffer: &mut Framebuffer, radius: f32) {
+/// Upper bound on a CSS blur radius in physical pixels. A page cannot request
+/// an arbitrarily expensive blur; larger values are clamped.
+const MAX_BLUR_RADIUS: f32 = 64.0;
+
+/// Separable box blur approximating a Gaussian (three passes). Colors are
+/// blurred in premultiplied form so the result can be composited source-over
+/// without double-darkening semi-transparent edges.
+fn blur_layer(buffer: &mut Framebuffer, radius: f32) {
     if radius <= 0.0 {
         return;
     }
-    let passes = 3;
-    let radius = radius.max(0.5).round() as usize;
+    let radius = radius.clamp(0.5, MAX_BLUR_RADIUS).round() as usize;
     let width = buffer.width() as usize;
     let height = buffer.height() as usize;
-    let mut source = buffer.pixels().to_vec();
+    // Convert to premultiplied alpha for correct filtering.
+    let mut source = vec![0u8; width * height * 4];
+    for (out, chunk) in source.chunks_exact_mut(4).zip(buffer.pixels().chunks_exact(4)) {
+        let a = chunk[3] as u32;
+        out[0] = ((chunk[0] as u32 * a + 127) / 255) as u8;
+        out[1] = ((chunk[1] as u32 * a + 127) / 255) as u8;
+        out[2] = ((chunk[2] as u32 * a + 127) / 255) as u8;
+        out[3] = chunk[3];
+    }
+
+    let passes = 3;
     for _ in 0..passes {
         // Horizontal pass.
         let mut horizontal = source.clone();
         for y in 0..height {
             for x in 0..width {
-                let mut sum = 0u32;
-                let mut count = 0u32;
+                let (mut r, mut g, mut b, mut a, mut count) = (0u32, 0u32, 0u32, 0u32, 0u32);
                 for dx in -(radius as isize)..=(radius as isize) {
                     let sx = x as isize + dx;
                     if sx >= 0 && sx < width as isize {
-                        sum += source[(y * width + sx as usize) * 4 + 3] as u32;
+                        let i = (y * width + sx as usize) * 4;
+                        r += source[i] as u32;
+                        g += source[i + 1] as u32;
+                        b += source[i + 2] as u32;
+                        a += source[i + 3] as u32;
                         count += 1;
                     }
                 }
-                horizontal[(y * width + x) * 4 + 3] = (sum / count) as u8;
+                let i = (y * width + x) * 4;
+                horizontal[i] = (r / count) as u8;
+                horizontal[i + 1] = (g / count) as u8;
+                horizontal[i + 2] = (b / count) as u8;
+                horizontal[i + 3] = (a / count) as u8;
             }
         }
         // Vertical pass.
         let mut vertical = horizontal.clone();
         for y in 0..height {
             for x in 0..width {
-                let mut sum = 0u32;
-                let mut count = 0u32;
+                let (mut r, mut g, mut b, mut a, mut count) = (0u32, 0u32, 0u32, 0u32, 0u32);
                 for dy in -(radius as isize)..=(radius as isize) {
                     let sy = y as isize + dy;
                     if sy >= 0 && sy < height as isize {
-                        sum += horizontal[((sy as usize) * width + x) * 4 + 3] as u32;
+                        let i = (sy as usize * width + x) * 4;
+                        r += horizontal[i] as u32;
+                        g += horizontal[i + 1] as u32;
+                        b += horizontal[i + 2] as u32;
+                        a += horizontal[i + 3] as u32;
                         count += 1;
                     }
                 }
-                vertical[(y * width + x) * 4 + 3] = (sum / count) as u8;
+                let i = (y * width + x) * 4;
+                vertical[i] = (r / count) as u8;
+                vertical[i + 1] = (g / count) as u8;
+                vertical[i + 2] = (b / count) as u8;
+                vertical[i + 3] = (a / count) as u8;
             }
         }
         source = vertical;
     }
-    let pixels = buffer.pixels_mut();
-    for (index, chunk) in pixels.chunks_exact_mut(4).enumerate() {
-        chunk[3] = source[index * 4 + 3];
+
+    // Convert back from premultiplied to straight alpha.
+    for (chunk, src) in buffer.pixels_mut().chunks_exact_mut(4).zip(source.chunks_exact(4)) {
+        let a = src[3] as u32;
+        if a == 0 {
+            chunk.copy_from_slice(&[0, 0, 0, 0]);
+        } else {
+            let unpremul = |value: u8| {
+                ((value as u32 * 255 + a / 2).checked_div(a).unwrap_or(0)).clamp(0, 255) as u8
+            };
+            chunk[0] = unpremul(src[0]);
+            chunk[1] = unpremul(src[1]);
+            chunk[2] = unpremul(src[2]);
+            chunk[3] = src[3];
+        }
     }
+}
+
+/// Returns a rectangle enclosing all glyph masks, expanded by `padding`, and
+/// clipped to the buffer bounds. Used to restrict blur work to the shadow area.
+fn glyphs_bounds(glyphs: &[crate::PositionedGlyph], padding: f32) -> Option<Rect> {
+    let mut min_x = f32::INFINITY;
+    let mut min_y = f32::INFINITY;
+    let mut max_x = f32::NEG_INFINITY;
+    let mut max_y = f32::NEG_INFINITY;
+    for glyph in glyphs {
+        if !glyph.x.is_finite() || !glyph.y.is_finite() {
+            continue;
+        }
+        min_x = min_x.min(glyph.x);
+        min_y = min_y.min(glyph.y);
+        max_x = max_x.max(glyph.x + glyph.coverage.width as f32);
+        max_y = max_y.max(glyph.y + glyph.coverage.height as f32);
+    }
+    if !min_x.is_finite() || max_x < min_x || max_y < min_y {
+        return None;
+    }
+    Some(Rect {
+        x: min_x - padding,
+        y: min_y - padding,
+        width: max_x - min_x + padding * 2.0,
+        height: max_y - min_y + padding * 2.0,
+    })
 }
 
 /// Composes a temporary group framebuffer onto its parent with a uniform
@@ -265,28 +332,55 @@ fn run_commands(
                         })
                         .collect();
                     if shadow.blur > 0.0 {
-                        // Render the shadow into a temporary buffer, blur its
-                        // alpha, then composite once onto the group.
-                        let (width, height) = {
-                            let target = &groups[0].0;
-                            (target.width(), target.height())
-                        };
-                        let mut layer = Framebuffer::new(width, height).unwrap_or_default();
-                        blit_glyphs(
-                            &mut layer,
-                            &shifted,
-                            clip,
-                            *clip_radii.last().expect("root radius"),
-                            shadow_color,
-                            clip_mappings.last().copied().unwrap_or(None),
-                        );
-                        blur_alpha(&mut layer, shadow.blur);
-                        let parent = &mut groups.last_mut().expect("group stack").0;
-                        for y in 0..height {
-                            for x in 0..width {
-                                let source = layer.pixel(x, y);
-                                if source[3] > 0 {
-                                    parent.set_pixel(x, y, source);
+                        let blur = shadow.blur.min(MAX_BLUR_RADIUS);
+                        // Blur only the region actually covered by the shadow,
+                        // not the whole viewport.
+                        if let Some(bounds) = glyphs_bounds(&shifted, blur * 2.0 + 1.0) {
+                            let (bw, bh) = (
+                                (bounds.width.ceil().max(1.0) as u32),
+                                (bounds.height.ceil().max(1.0) as u32),
+                            );
+                            let layer = Framebuffer::new(bw, bh);
+                            if let Ok(mut layer) = layer {
+                                // Re-express glyph positions relative to the layer.
+                                let local: Vec<_> = shifted
+                                    .iter()
+                                    .map(|glyph| crate::PositionedGlyph {
+                                        coverage: glyph.coverage.clone(),
+                                        x: glyph.x - bounds.x,
+                                        y: glyph.y - bounds.y,
+                                    })
+                                    .collect();
+                                blit_glyphs(
+                                    &mut layer,
+                                    &local,
+                                    Rect { x: 0.0, y: 0.0, width: bw as f32, height: bh as f32 },
+                                    0.0,
+                                    shadow_color,
+                                    None,
+                                );
+                                blur_layer(&mut layer, blur);
+                                // Composite the blurred layer source-over at
+                                // the bounding box's screen position.
+                                let parent = &mut groups.last_mut().expect("group stack").0;
+                                let ox = bounds.x.round() as i64;
+                                let oy = bounds.y.round() as i64;
+                                for y in 0..bh {
+                                    for x in 0..bw {
+                                        let px = ox + x as i64;
+                                        let py = oy + y as i64;
+                                        if px < 0
+                                            || py < 0
+                                            || px >= parent.width() as i64
+                                            || py >= parent.height() as i64
+                                        {
+                                            continue;
+                                        }
+                                        let pixel = layer.pixel(x, y);
+                                        if pixel[3] > 0 {
+                                            parent.set_pixel(px as u32, py as u32, pixel);
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1291,6 +1385,44 @@ mod tests {
             }
         }
         assert!(spread > 0, "a spatial blur should produce partial-alpha pixels");
+    }
+
+    #[test]
+    fn huge_blur_radius_is_bounded() {
+        use crate::TextShadow;
+        let glyph = crate::PositionedGlyph {
+            coverage: bweb_text::Coverage {
+                width: 2,
+                height: 2,
+                left: 0,
+                top: 0,
+                data: vec![255; 4],
+            },
+            x: 5.0,
+            y: 5.0,
+        };
+        let shadow = TextShadow {
+            offset_x: 0.0,
+            offset_y: 0.0,
+            blur: 1_000_000.0,
+            color: Color::rgba(255, 0, 0, 255),
+        };
+        let mut list = DisplayList::default();
+        list.push(PaintItem::PushClip { rect: rect(0.0, 0.0, 40.0, 40.0) });
+        list.push(PaintItem::Text {
+            glyphs: vec![glyph],
+            color: Color::rgba(0, 0, 255, 255),
+            decoration: crate::TextDecoration::None,
+            shadows: vec![shadow],
+        });
+        list.push(PaintItem::PopClip);
+        let mut framebuffer = Framebuffer::new(40, 40).expect("framebuffer");
+
+        // Must not allocate or loop over a million-pixel radius.
+        Rasterizer.rasterize(&list, &mut framebuffer);
+        // The shadow is clamped to the clip and the viewport.
+        assert_eq!(framebuffer.width(), 40);
+        assert!(framebuffer.pixel(20, 20)[3] == 0, "far pixels stay empty");
     }
 
     #[test]

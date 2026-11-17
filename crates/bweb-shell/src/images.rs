@@ -36,12 +36,11 @@ impl Error for DecodeError {}
 /// a safety net for decoders that ignore limits.
 pub fn decode(bytes: &[u8]) -> Result<Image, DecodeError> {
     let mut limits = image::Limits::default();
-    // Bound both the decoded surface and the temporary allocation. RGBA8 uses
-    // 4 bytes per pixel, which is the largest intermediate we expect.
+    // Bound the decoded allocation by total pixels (RGBA8 = 4 bytes/pixel).
+    // No per-axis dimension cap: a panoramic image such as 16000x100 is well
+    // within the pixel budget and must be accepted. `max_alloc` alone still
+    // rejects a crafted 100000x100000 header before any large allocation.
     limits.max_alloc = Some((MAX_IMAGE_PIXELS as u64) * 4);
-    let max_dimension = (MAX_IMAGE_PIXELS as u32).isqrt().max(1);
-    limits.max_image_width = Some(max_dimension);
-    limits.max_image_height = Some(max_dimension);
 
     let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format()
@@ -169,6 +168,15 @@ mod tests {
         bytes.extend_from_slice(&100_000u32.to_be_bytes()); // height
         bytes.extend_from_slice(&[8, 6, 0, 0, 0]); // bit depth, color type, etc.
         assert_eq!(decode(&bytes), Err(DecodeError::UnsupportedOrCorrupt));
+    }
+
+    #[test]
+    fn accepts_panoramic_images_within_the_pixel_budget() {
+        // 5000x10 = 50k pixels, far below the 16M budget, but the width
+        // exceeds the old 4000 per-axis cap. It must be accepted.
+        let bytes = png(5000, 10, [10, 20, 30, 255]);
+        let image = decode(&bytes).expect("panoramic image within budget");
+        assert_eq!((image.width(), image.height()), (5000, 10));
     }
 
     #[test]
