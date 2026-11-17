@@ -73,7 +73,8 @@ layout tree, text and image rasterization, network transport and privacy filteri
   and percentage/length color stops.
 - Composable `transform` translate/scale/rotate/skew with inverse pixel mapping
   and explicit `transform-origin`; subtree `opacity`, `text-decoration` lines,
-  rounded-corner clipping from `border-radius` and composable color filters.
+  rounded-corner clipping from `border-radius`, outer/inset `box-shadow` with
+  blur and composable color filters.
 - Multi-line flexbox: direction, wrapping, grow/shrink, justification, alignment,
   gaps and the `flex`/`gap` shorthands.
 - `position: relative/absolute/fixed/sticky` with offsets, positioned containing

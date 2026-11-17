@@ -139,6 +139,7 @@ impl PaintLayout for PaintAdapter<'_> {
                     .map(str::to_owned),
                 opacity: computed.and_then(|style| style.get("opacity")).map(str::to_owned),
                 filter: computed.and_then(|style| style.get("filter")).map(str::to_owned),
+                box_shadow: computed.and_then(|style| style.get("box-shadow")).map(str::to_owned),
                 sticky: layout.sticky.active.then_some((
                     layout.sticky.active,
                     layout.sticky.threshold,

@@ -100,6 +100,11 @@ impl Rasterizer {
                         mapping,
                     );
                 }
+                PaintItem::BoxShadow { rect, shadow } => {
+                    let clip = *clips.last().expect("root clip is always present");
+                    let effective = effective_color(shadow.color, &opacities, &filters);
+                    paint_box_shadow(framebuffer, *rect, *shadow, clip, effective);
+                }
                 PaintItem::Text { glyphs, color, decoration } => {
                     let clip = *clips.last().expect("root clip is always present");
                     let transform = *transforms.last().expect("root transform");
@@ -215,6 +220,63 @@ impl Rasterizer {
                     }
                 }
             }
+        }
+    }
+}
+
+/// Rasterizes a box shadow using a signed-distance field for anti-aliased
+/// rounded corners and a smooth blur falloff.
+fn paint_box_shadow(
+    framebuffer: &mut Framebuffer,
+    box_rect: Rect,
+    shadow: crate::BoxShadow,
+    clip: Rect,
+    color: Color,
+) {
+    use crate::shadow::{rounded_rect_distance, shadow_coverage};
+
+    if color.alpha == 0 {
+        return;
+    }
+    let shape = shadow.shape(box_rect);
+    let area = if shadow.inset {
+        // Inset shadows are painted inside the box only.
+        intersect(box_rect, clip)
+    } else {
+        intersect(shadow.outer_area(box_rect), clip)
+    };
+    let Some(area) = area else { return };
+    if !valid_rect(area) {
+        return;
+    }
+
+    let left = area.x.max(0.0).floor().max(0.0) as u32;
+    let top = area.y.max(0.0).floor().max(0.0) as u32;
+    let right = (area.x + area.width).min(framebuffer.width() as f32).ceil().max(0.0) as u32;
+    let bottom = (area.y + area.height).min(framebuffer.height() as f32).ceil().max(0.0) as u32;
+    for y in top..bottom.min(framebuffer.height()) {
+        for x in left..right.min(framebuffer.width()) {
+            let px = x as f32 + 0.5;
+            let py = y as f32 + 0.5;
+            let distance = rounded_rect_distance(shape, shadow.radius, px, py);
+            let coverage = if shadow.inset {
+                // Inside the shape: coverage grows from the inner edge.
+                shadow_coverage(-distance, shadow.blur)
+            } else {
+                // Outside the shape: coverage grows away from the outer edge.
+                shadow_coverage(distance, shadow.blur)
+            };
+            if coverage <= 0.0 {
+                continue;
+            }
+            let alpha = (f32::from(color.alpha) * coverage).round() as u8;
+            if alpha == 0 {
+                continue;
+            }
+            // framebuffer.set_pixel composites source-over, so a
+            // semi-transparent shadow color is enough.
+            let target = Color::rgba(color.red, color.green, color.blue, alpha);
+            framebuffer.set_pixel(x, y, target.to_rgba8());
         }
     }
 }
@@ -858,6 +920,34 @@ mod tests {
         assert_eq!(opaque, &[255, 0, 0, 255]);
         assert_eq!(faded[0], 255);
         assert!(faded[1] > 0 && faded[1] < 255, "red should be blended: {faded:?}");
+    }
+
+    #[test]
+    fn box_shadow_paints_outside_the_box() {
+        use crate::BoxShadow;
+        let mut list = DisplayList::default();
+        list.push(PaintItem::PushClip { rect: rect(0.0, 0.0, 40.0, 40.0) });
+        let shadow = BoxShadow {
+            offset_x: 2.0,
+            offset_y: 2.0,
+            blur: 0.0,
+            spread: 0.0,
+            color: Color::rgba(0, 0, 0, 255),
+            inset: false,
+            radius: 0.0,
+        };
+        list.push(PaintItem::BoxShadow { rect: rect(10.0, 10.0, 10.0, 10.0), shadow });
+        list.push(PaintItem::PopClip);
+        let mut framebuffer = Framebuffer::new(40, 40).expect("framebuffer");
+        framebuffer.clear([255, 255, 255, 255]);
+
+        Rasterizer.rasterize(&list, &mut framebuffer);
+
+        let at = |x: usize, y: usize| framebuffer.pixels()[(y * 40 + x) * 4..][..4].to_vec();
+        // Just outside the box (offset +2) the shadow is painted.
+        assert_eq!(at(13, 13), vec![0, 0, 0, 255]);
+        // Far away it stays untouched.
+        assert_eq!(at(35, 35), vec![255, 255, 255, 255]);
     }
 
     #[test]

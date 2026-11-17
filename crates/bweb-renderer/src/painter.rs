@@ -114,6 +114,19 @@ impl<'a, L: PaintLayout> Painter<'a, L> {
 
             let rect = scale_rect(node.rect, self.scale_factor);
             let radius = node.style.border_radius * self.scale_factor;
+
+            // Parse box-shadow once; outer shadows paint before the box's
+            // clipping/background so they can extend beyond it, inset shadows
+            // after the background so they darken the inside.
+            let shadows: Vec<crate::BoxShadow> = node
+                .box_shadow
+                .as_deref()
+                .map(|value| parse_box_shadows(value, radius, self.scale_factor))
+                .unwrap_or_default();
+            for shadow in shadows.iter().filter(|shadow| !shadow.inset) {
+                list.push(PaintItem::BoxShadow { rect, shadow: *shadow });
+            }
+
             // A rounded box clips its own background, border and descendants.
             if radius > 0.0 {
                 list.push(PaintItem::PushRoundClip { rect, radius });
@@ -121,6 +134,9 @@ impl<'a, L: PaintLayout> Painter<'a, L> {
             }
             if let Some(color) = node.style.background {
                 list.push(PaintItem::FillRect { rect, color });
+            }
+            for shadow in shadows.iter().filter(|shadow| shadow.inset) {
+                list.push(PaintItem::BoxShadow { rect, shadow: *shadow });
             }
             // Background images paint above the background color but below
             // borders, inline content and descendants.
@@ -200,6 +216,42 @@ impl<'a, L: PaintLayout> Painter<'a, L> {
         list.push(PaintItem::PopClip);
         list
     }
+}
+
+/// Splits a box-shadow value into layers and parses each one. Lengths are in
+/// CSS pixels here (the layout has already resolved units/percentages).
+fn parse_box_shadows(value: &str, radius: f32, scale: f32) -> Vec<crate::BoxShadow> {
+    let mut result = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0;
+    let bytes = value.as_bytes();
+    let mut layers = Vec::new();
+    for (index, byte) in bytes.iter().enumerate() {
+        match byte {
+            b'(' => depth += 1,
+            b')' => depth -= 1,
+            b',' if depth == 0 => {
+                layers.push(&value[start..index]);
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    layers.push(&value[start..]);
+    for layer in layers {
+        if let Some(shadow) = crate::parse_box_shadow(layer.trim(), radius, |token| {
+            token
+                .trim()
+                .trim_end_matches("px")
+                .trim()
+                .parse::<f32>()
+                .ok()
+                .map(|value| value * scale)
+        }) {
+            result.push(shadow);
+        }
+    }
+    result
 }
 
 fn scale_rect(rect: Rect, scale: f32) -> Rect {

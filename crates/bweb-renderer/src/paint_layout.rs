@@ -50,6 +50,8 @@ pub struct PaintNode {
     pub opacity: Option<String>,
     /// CSS `filter` value for this node and its subtree.
     pub filter: Option<String>,
+    /// CSS `box-shadow` value for this node.
+    pub box_shadow: Option<String>,
     /// Scroll-dependent sticky shift: `(active, threshold, dx, dy)`.
     pub sticky: Option<(bool, f32, f32, f32)>,
 }

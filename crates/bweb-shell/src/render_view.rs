@@ -194,6 +194,7 @@ impl ViewBackend for BrowserViewBackend {
 fn translate_y(item: &mut PaintItem, offset: f32) {
     match item {
         PaintItem::FillRect { rect, .. }
+        | PaintItem::BoxShadow { rect, .. }
         | PaintItem::BorderRect { rect, .. }
         | PaintItem::LinearGradient { rect, .. }
         | PaintItem::PushClip { rect }

@@ -132,6 +132,8 @@ pub enum PaintItem {
     BorderRect { rect: Rect, widths: Edges, radius: f32, color: Color },
     /// Paints a CSS linear gradient into a physical-pixel rectangle.
     LinearGradient { rect: Rect, gradient: Arc<crate::LinearGradient> },
+    /// Paints a CSS box shadow (outer or inset) behind/inside a box.
+    BoxShadow { rect: Rect, shadow: crate::BoxShadow },
     /// Blits pre-rasterized glyph masks at final physical-pixel positions.
     ///
     /// Glyph coordinates are snapped to the nearest pixel by the rasterizer.

@@ -11,6 +11,7 @@ mod gradient;
 mod paint_layout;
 mod painter;
 mod rasterizer;
+mod shadow;
 mod transform;
 
 pub use background::{
@@ -30,6 +31,7 @@ pub use gradient::{
 pub use paint_layout::{PaintLayout, PaintNode, PaintStyle};
 pub use painter::{Painter, PainterError};
 pub use rasterizer::Rasterizer;
+pub use shadow::{BoxShadow, parse_box_shadow};
 pub use transform::{Transform, parse_transform, parse_transform_origin};
 
 /// A rectangle in physical pixel coordinates for rendering commands.
