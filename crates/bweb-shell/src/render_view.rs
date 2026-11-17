@@ -130,23 +130,28 @@ impl BrowserViewBackend {
 impl ViewBackend for BrowserViewBackend {
     type Error = String;
 
-    fn reflow(&mut self, width: u32, scale_factor: f64) -> Result<(), Self::Error> {
+    fn reflow(&mut self, width: u32, height: u32, scale_factor: f64) -> Result<(), Self::Error> {
         let scale = scale_factor as f32;
         if !scale.is_finite() || scale <= 0.0 {
             return Err("device scale factor is outside the supported f32 range".into());
         }
         let width_css = width as f32 / scale;
-        if !width_css.is_finite() || width_css <= 0.0 {
-            return Err("logical viewport width is invalid".into());
+        let height_css = height as f32 / scale;
+        if !width_css.is_finite()
+            || width_css <= 0.0
+            || !height_css.is_finite()
+            || height_css <= 0.0
+        {
+            return Err("logical viewport dimensions are invalid".into());
         }
 
-        // Media queries depend on the viewport width, so styles are recomputed
-        // on every reflow from the original stylesheets.
+        // Media queries and vh units depend on both dimensions, so styles and
+        // layout are recomputed on every reflow from the original stylesheets.
         let (styles, pseudo_styles) = StyleEngine::new().compute_generated(
             &self.document,
             &self.stylesheets,
             width_css,
-            720.0,
+            height_css,
         );
         self.styles = styles;
         self.pseudo_styles = pseudo_styles;
@@ -156,7 +161,7 @@ impl ViewBackend for BrowserViewBackend {
             &self.document,
             &self.styles,
             width_css,
-            720.0,
+            height_css,
             Some(&self.font),
             &sizes,
             &pseudo,
@@ -356,7 +361,7 @@ mod tests {
             "https://example.test/",
         );
         let viewport = Viewport::new(200, 100, 1.0).expect("viewport");
-        backend.reflow(200, 1.0).expect("initial reflow");
+        backend.reflow(200, 100, 1.0).expect("initial reflow");
         backend.repaint(viewport).expect("initial paint");
         let initial = backend.framebuffer().expect("initial frame").clone();
 

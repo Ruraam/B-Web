@@ -74,7 +74,7 @@ mod tests {
 
     impl ViewBackend for MockView {
         type Error = Infallible;
-        fn reflow(&mut self, _width: u32, _scale: f64) -> Result<(), Self::Error> {
+        fn reflow(&mut self, _width: u32, _height: u32, _scale: f64) -> Result<(), Self::Error> {
             self.reflows += 1;
             Ok(())
         }
@@ -124,13 +124,13 @@ mod tests {
     }
 
     #[test]
-    fn height_only_dispatches_repaint() {
+    fn height_only_dispatches_reflow_for_viewport_units() {
         let mut c = controller();
         c.queue(vp(800, 600));
         assert_eq!(c.dispatch(), Ok(ResizeDispatch::Reflow));
         c.queue(vp(800, 720));
-        assert_eq!(c.dispatch(), Ok(ResizeDispatch::Repaint));
-        assert_eq!(c.view().backend().reflows, 1);
+        assert_eq!(c.dispatch(), Ok(ResizeDispatch::Reflow));
+        assert_eq!(c.view().backend().reflows, 2);
         assert_eq!(c.view().backend().repaints, 2);
     }
 

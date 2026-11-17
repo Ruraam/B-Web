@@ -1,7 +1,7 @@
 //! Viewport state and resize invalidation policy.
 //!
-//! A width or scale change invalidates layout and text geometry. A height-only
-//! change reuses that geometry and requests painting only.
+//! Any viewport dimension or scale change invalidates layout and text geometry,
+//! because `vh` units and height media queries depend on the height too.
 
 /// A validated viewport in physical pixels and its output scale factor.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -57,8 +57,10 @@ pub enum ResizeOutcome {
 pub trait ViewBackend {
     type Error;
 
-    /// Recalculates layout and prepared text for a new width and output scale.
-    fn reflow(&mut self, width: u32, scale_factor: f64) -> Result<(), Self::Error>;
+    /// Recalculates layout and prepared text for a new viewport (physical
+    /// pixels). Both dimensions matter: `vh` and height media queries depend on
+    /// the height.
+    fn reflow(&mut self, width: u32, height: u32, scale_factor: f64) -> Result<(), Self::Error>;
 
     /// Paints the current layout into the supplied viewport.
     fn repaint(&mut self, viewport: Viewport) -> Result<(), Self::Error>;
@@ -68,24 +70,22 @@ pub trait ViewBackend {
 pub struct View<B> {
     backend: B,
     viewport: Option<Viewport>,
-    layout_width: Option<u32>,
-    layout_scale_factor: Option<f64>,
+    layout_viewport: Option<Viewport>,
 }
 
 impl<B: ViewBackend> View<B> {
     /// Creates a view whose first resize performs its initial layout and paint.
     #[must_use]
     pub const fn new(backend: B) -> Self {
-        Self { backend, viewport: None, layout_width: None, layout_scale_factor: None }
+        Self { backend, viewport: None, layout_viewport: None }
     }
 
     /// Applies a new viewport configuration without repeating redundant work.
     ///
-    /// Width or scale changes trigger reflow (including text preparation) and
-    /// painting. A height-only change triggers painting without reflow.
+    /// Any dimension or scale change triggers reflow: `vh` units and height
+    /// media queries mean layout depends on the height too.
     pub fn resize(&mut self, next: Viewport) -> Result<ResizeOutcome, B::Error> {
-        let needs_reflow = self.layout_width != Some(next.width)
-            || self.layout_scale_factor != Some(next.scale_factor);
+        let needs_reflow = self.layout_viewport != Some(next);
         let needs_paint = self.viewport != Some(next) || needs_reflow;
 
         if !needs_paint {
@@ -93,11 +93,10 @@ impl<B: ViewBackend> View<B> {
         }
 
         if needs_reflow {
-            self.backend.reflow(next.width, next.scale_factor)?;
+            self.backend.reflow(next.width, next.height, next.scale_factor)?;
             // Record successful geometry independently: if painting fails, a
-            // retry at the same width must not repeat the expensive reflow.
-            self.layout_width = Some(next.width);
-            self.layout_scale_factor = Some(next.scale_factor);
+            // retry at the same viewport must not repeat the expensive reflow.
+            self.layout_viewport = Some(next);
         }
 
         self.backend.repaint(next)?;
@@ -109,8 +108,7 @@ impl<B: ViewBackend> View<B> {
     /// Invalidates cached layout so the next resize/reflow rebuilds geometry.
     /// Used when the document content changes (e.g. a script mutates the DOM).
     pub fn invalidate_layout(&mut self) {
-        self.layout_width = None;
-        self.layout_scale_factor = None;
+        self.layout_viewport = None;
     }
 
     /// Repaints the current viewport without changing its configuration.
@@ -164,16 +162,21 @@ mod tests {
     struct MockLayout {
         reflow_calls: usize,
         repaint_calls: usize,
-        last_reflow: Option<(u32, f64)>,
+        last_reflow: Option<(u32, u32, f64)>,
         last_paint: Option<Viewport>,
     }
 
     impl ViewBackend for MockLayout {
         type Error = Infallible;
 
-        fn reflow(&mut self, width: u32, scale_factor: f64) -> Result<(), Self::Error> {
+        fn reflow(
+            &mut self,
+            width: u32,
+            height: u32,
+            scale_factor: f64,
+        ) -> Result<(), Self::Error> {
             self.reflow_calls += 1;
-            self.last_reflow = Some((width, scale_factor));
+            self.last_reflow = Some((width, height, scale_factor));
             Ok(())
         }
 
@@ -195,7 +198,7 @@ mod tests {
         assert_eq!(view.resize(viewport(800, 600, 1.0)), Ok(ResizeOutcome::Reflowed));
         assert_eq!(view.backend().reflow_calls, 1);
         assert_eq!(view.backend().repaint_calls, 1);
-        assert_eq!(view.backend().last_reflow, Some((800, 1.0)));
+        assert_eq!(view.backend().last_reflow, Some((800, 600, 1.0)));
     }
 
     #[test]
@@ -217,17 +220,20 @@ mod tests {
         assert_eq!(view.resize(viewport(640, 600, 1.0)), Ok(ResizeOutcome::Reflowed));
         assert_eq!(view.backend().reflow_calls, 2);
         assert_eq!(view.backend().repaint_calls, 2);
-        assert_eq!(view.backend().last_reflow, Some((640, 1.0)));
+        assert_eq!(view.backend().last_reflow, Some((640, 600, 1.0)));
     }
 
     #[test]
-    fn height_only_change_repaints_without_reflow() {
+    fn height_only_change_reflows_for_viewport_units() {
         let mut view = View::new(MockLayout::default());
         view.resize(viewport(800, 600, 1.0)).expect("initial render");
 
-        assert_eq!(view.resize(viewport(800, 720, 1.0)), Ok(ResizeOutcome::Repainted));
-        assert_eq!(view.backend().reflow_calls, 1);
+        // vh units and height media queries depend on the height, so a
+        // height-only change must reflow.
+        assert_eq!(view.resize(viewport(800, 720, 1.0)), Ok(ResizeOutcome::Reflowed));
+        assert_eq!(view.backend().reflow_calls, 2);
         assert_eq!(view.backend().repaint_calls, 2);
+        assert_eq!(view.backend().last_reflow, Some((800, 720, 1.0)));
         assert_eq!(view.backend().last_paint, Some(viewport(800, 720, 1.0)));
     }
 
@@ -254,11 +260,11 @@ mod tests {
     }
 
     #[test]
-    fn set_viewport_height_repaints_without_reflow() {
+    fn set_viewport_height_reflows() {
         let mut view = View::new(MockLayout::default());
         view.resize(viewport(800, 600, 1.0)).expect("initial render");
-        assert_eq!(view.set_viewport_height(720), Ok(Some(ResizeOutcome::Repainted)));
-        assert_eq!(view.backend().reflow_calls, 1);
+        assert_eq!(view.set_viewport_height(720), Ok(Some(ResizeOutcome::Reflowed)));
+        assert_eq!(view.backend().reflow_calls, 2);
         assert_eq!(view.backend().repaint_calls, 2);
         assert_eq!(view.viewport(), Some(viewport(800, 720, 1.0)));
     }
@@ -281,7 +287,7 @@ mod tests {
         assert_eq!(view.resize(viewport(800, 600, 1.5)), Ok(ResizeOutcome::Reflowed));
         assert_eq!(view.backend().reflow_calls, 2);
         assert_eq!(view.backend().repaint_calls, 2);
-        assert_eq!(view.backend().last_reflow, Some((800, 1.5)));
+        assert_eq!(view.backend().last_reflow, Some((800, 600, 1.5)));
     }
 
     #[test]
