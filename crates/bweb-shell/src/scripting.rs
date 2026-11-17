@@ -431,6 +431,103 @@ mod tests {
     }
 
     #[test]
+    fn todo_list_pattern_builds_and_styles_items() {
+        let document = Rc::new(RefCell::new(HtmlDocument::parse(
+            "<html><body><ul id='todo'></ul></body></html>",
+        )));
+        let events = Rc::new(RefCell::new(EventRegistry::default()));
+        let mut runtime = Runtime::new();
+        runtime.set_host(Box::new(DomHost::new(&document, events.clone())));
+        runtime.define_global("document", Value::Host("document".into()));
+        // A typical "render a list from data" snippet using only supported DOM APIs.
+        runtime
+            .eval(
+                "var list = document.getElementById('todo'); \
+                 var labels = ['Buy milk', 'Write tests', 'Ship it']; \
+                 for (var i = 0; i < labels.length; i = i + 1) { \
+                   var li = document.createElement('li'); \
+                   li.textContent = labels[i]; \
+                   li.classList.add('task'); \
+                   if (i == 0) { li.classList.add('first'); } \
+                   list.appendChild(li); \
+                 }",
+            )
+            .expect("script");
+        let dom = document.borrow();
+        let items = dom.query_selector_all("li");
+        assert_eq!(items.len(), 3);
+        assert_eq!(dom.text_content(items[0]), "Buy milk");
+        assert_eq!(dom.text_content(items[2]), "Ship it");
+        assert!(dom.has_class(items[0], "first"));
+        assert!(dom.has_class(items[2], "task"));
+        let list = dom.element_by_id("todo").expect("list");
+        assert!(dom.ancestor_elements(items[0]).contains(&list));
+    }
+
+    #[test]
+    fn query_selector_all_for_each_updates_every_item() {
+        let document = Rc::new(RefCell::new(HtmlDocument::parse(
+            "<html><body><ul>\
+               <li class='task'>a</li><li class='task'>b</li><li class='task'>c</li>\
+             </ul></body></html>",
+        )));
+        let events = Rc::new(RefCell::new(EventRegistry::default()));
+        let mut runtime = Runtime::new();
+        runtime.set_host(Box::new(DomHost::new(&document, events.clone())));
+        runtime.define_global("document", Value::Host("document".into()));
+        let value = runtime
+            .eval(
+                "var done = 0; \
+                 document.querySelectorAll('.task').forEach(function(item) { \
+                   item.classList.add('done'); \
+                   done = done + 1; \
+                 }); \
+                 done",
+            )
+            .expect("script");
+        assert_eq!(value.display(), "3");
+        let dom = document.borrow();
+        for item in dom.query_selector_all(".task") {
+            assert!(dom.has_class(item, "done"));
+        }
+    }
+
+    #[test]
+    fn click_handler_mutates_dom_through_the_bridge() {
+        let document = Rc::new(RefCell::new(HtmlDocument::parse(
+            "<html><body>\
+               <button id='toggle'>Toggle</button><p id='status'>off</p>\
+             </body></html>",
+        )));
+        let events = Rc::new(RefCell::new(EventRegistry::default()));
+        let mut runtime = Runtime::new();
+        runtime.set_host(Box::new(DomHost::new(&document, events.clone())));
+        runtime.define_global("document", Value::Host("document".into()));
+        runtime
+            .eval(
+                "document.getElementById('toggle').addEventListener('click', function() { \
+                   var status = document.getElementById('status'); \
+                   status.textContent = 'on'; \
+                   status.classList.add('active'); \
+                 });",
+            )
+            .expect("script");
+        let handle = {
+            let dom = document.borrow();
+            format!("element:{}", dom.element_by_id("toggle").expect("button").index())
+        };
+        let callbacks = events.borrow().callbacks(&handle, "click");
+        assert_eq!(callbacks.len(), 1, "one click handler registered");
+        for callback in callbacks {
+            runtime.call(callback, vec![Value::Host("event".into())]).expect("handler");
+        }
+        let dom = document.borrow();
+        let status = dom.element_by_id("status").expect("status");
+        assert_eq!(dom.text_content(status), "on");
+        assert!(dom.has_class(status, "active"));
+    }
+
+    #[test]
     fn event_listeners_are_registered() {
         let document = Rc::new(RefCell::new(HtmlDocument::parse("<p>x</p>")));
         let events = Rc::new(RefCell::new(EventRegistry::default()));
