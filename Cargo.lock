@@ -185,6 +185,7 @@ name = "bweb-css"
 version = "0.1.0"
 dependencies = [
  "bweb-html",
+ "url",
 ]
 
 [[package]]
