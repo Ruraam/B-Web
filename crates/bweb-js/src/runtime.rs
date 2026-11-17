@@ -172,12 +172,21 @@ enum Flow {
     Continue,
 }
 
+/// Global instruction budget per top-level evaluation or event callback.
+const INSTRUCTION_BUDGET: u64 = 10_000_000;
+/// Maximum nested function calls before aborting (prevents stack overflow).
+const MAX_CALL_DEPTH: usize = 64;
+
 /// A JavaScript interpreter instance.
 pub struct Runtime {
     global: Env,
     host: Option<Box<dyn Host>>,
     output: Vec<String>,
     completion: Value,
+    /// Remaining instructions for the current top-level evaluation.
+    budget: u64,
+    /// Current nested call depth.
+    call_depth: usize,
 }
 
 impl Default for Runtime {
@@ -215,7 +224,14 @@ impl Runtime {
         let console = Rc::new(RefCell::new(Object::default()));
         console.borrow_mut().properties.insert("log".into(), Value::Native(native_print));
         global.define("console", Value::Object(console), false);
-        Self { global, host: None, output: Vec::new(), completion: Value::Undefined }
+        Self {
+            global,
+            host: None,
+            output: Vec::new(),
+            completion: Value::Undefined,
+            budget: INSTRUCTION_BUDGET,
+            call_depth: 0,
+        }
     }
 
     pub fn set_host(&mut self, host: Box<dyn Host>) {
@@ -251,6 +267,8 @@ impl Runtime {
     pub fn eval(&mut self, source: &str) -> Result<Value, JsError> {
         let statements =
             crate::parser::parse(source).map_err(|error| JsError { message: error.message })?;
+        self.budget = INSTRUCTION_BUDGET;
+        self.call_depth = 0;
         self.run(&statements)
     }
 
@@ -264,7 +282,18 @@ impl Runtime {
         Ok(Flow::Normal)
     }
 
+    /// Consumes one unit of the execution budget. Returns an error when the
+    /// budget is exhausted, aborting the current evaluation.
+    fn tick(&mut self) -> Result<(), JsError> {
+        if self.budget == 0 {
+            return Err(JsError { message: "script instruction budget exceeded".into() });
+        }
+        self.budget -= 1;
+        Ok(())
+    }
+
     fn exec_statement(&mut self, statement: &Stmt, env: &mut Env) -> Result<Flow, JsError> {
+        self.tick()?;
         match statement {
             Stmt::Empty => Ok(Flow::Normal),
             Stmt::Expression(expression) => {
@@ -356,6 +385,7 @@ impl Runtime {
     }
 
     fn eval_expr(&mut self, expression: &Expr, env: &mut Env) -> Result<Value, JsError> {
+        self.tick()?;
         match expression {
             Expr::Undefined => Ok(Value::Undefined),
             Expr::Null => Ok(Value::Null),
@@ -509,20 +539,30 @@ impl Runtime {
     }
 
     /// Calls a runtime value as a function, used by embedding event dispatch.
+    /// Each dispatch gets a fresh budget so one handler cannot starve another.
     pub fn call(&mut self, callee: Value, args: Vec<Value>) -> Result<Value, JsError> {
+        self.budget = INSTRUCTION_BUDGET;
+        self.call_depth = 0;
         self.call_value(callee, args)
     }
 
     fn call_value(&mut self, callee: Value, args: Vec<Value>) -> Result<Value, JsError> {
+        self.tick()?;
         match callee {
             Value::Native(function) => function(self, args),
             Value::Function(function) => {
+                if self.call_depth >= MAX_CALL_DEPTH {
+                    return Err(JsError { message: "maximum call depth exceeded".into() });
+                }
+                self.call_depth += 1;
                 let mut env = Env::child(&function.env);
                 for (index, param) in function.params.iter().enumerate() {
                     let value = args.get(index).cloned().unwrap_or(Value::Undefined);
                     env.define(param, value, true);
                 }
-                match self.exec_statements(&function.body, &mut env)? {
+                let result = self.exec_statements(&function.body, &mut env);
+                self.call_depth -= 1;
+                match result? {
                     Flow::Return(value) => Ok(value),
                     _ => Ok(Value::Undefined),
                 }

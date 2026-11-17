@@ -98,4 +98,37 @@ mod tests {
         let error = Runtime::new().eval("missing").unwrap_err();
         assert!(error.message.contains("not defined"));
     }
+
+    #[test]
+    fn global_instruction_budget_stops_nested_loops() {
+        // One loop of 100k is allowed by the per-loop guard, but nested loops
+        // multiply the work; the global budget must abort them.
+        let error = Runtime::new()
+            .eval("let n = 0; for (let i = 0; i < 100000; i = i + 1) { for (let j = 0; j < 100000; j = j + 1) { n = n + 1; } }")
+            .unwrap_err();
+        assert!(
+            error.message.contains("budget") || error.message.contains("iteration"),
+            "unexpected error: {}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn recursion_depth_is_limited() {
+        let error = Runtime::new().eval("function f(n) { return f(n + 1); } f(0)").unwrap_err();
+        assert!(error.message.contains("call depth"), "unexpected error: {}", error.message);
+    }
+
+    #[test]
+    fn budget_is_reset_between_evaluations() {
+        let mut runtime = Runtime::new();
+        // A moderately long but bounded loop should succeed.
+        let value = runtime
+            .eval("let s = 0; for (let i = 0; i < 1000; i = i + 1) { s = s + 1; } s")
+            .expect("script");
+        assert_eq!(value.display(), "1000");
+        // A second evaluation still has a full budget.
+        let value = runtime.eval("1 + 1").expect("script");
+        assert_eq!(value.display(), "2");
+    }
 }
