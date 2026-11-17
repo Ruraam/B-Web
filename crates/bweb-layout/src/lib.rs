@@ -4,6 +4,7 @@
 //! first-pass flow model; text shaping, line wrapping, floats and positioning
 //! are tracked in the roadmap.
 
+mod calc;
 mod paint_adapter;
 mod text_layout;
 mod view;
@@ -198,6 +199,7 @@ struct LayoutContext<'a> {
     measurer: &'a TextMeasurer<'a>,
     images: Option<&'a HashMap<NodeId, ImageSize>>,
     pseudo: Option<&'a HashMap<NodeId, PseudoContent>>,
+    viewport: (f32, f32),
 }
 
 impl LayoutTree {
@@ -278,6 +280,7 @@ impl LayoutTree {
             measurer: &measurer,
             images: Some(images),
             pseudo: Some(pseudo),
+            viewport: (width, width),
         };
         let viewport = Rect { x: 0.0, y: 0.0, width, height: width };
         let root = layout_node(&context, document.root(), 0.0, 0.0, width, viewport, &mut count)
@@ -334,9 +337,9 @@ fn layout_node(
     } else {
         Display::Block
     };
-    let mut margin = parse_edges(style, "margin");
-    let padding = parse_edges(style, "padding");
-    let border = parse_border_widths(style);
+    let mut margin = parse_edges(style, "margin", available_width, context.viewport);
+    let padding = parse_edges(style, "padding", available_width, context.viewport);
+    let border = parse_border_widths(style, available_width, context.viewport);
     let available_outer_width = (available_width - margin.left - margin.right).max(0.0);
     let horizontal_insets = padding.left + padding.right + border.left + border.right;
     let box_sizing = style.and_then(|style| style.get("box-sizing")).unwrap_or("content-box");
@@ -346,7 +349,7 @@ fn layout_node(
         .unwrap_or(16.0);
     let specified_width = style
         .and_then(|style| style.get("width"))
-        .and_then(|value| parse_length_basis(value, font_size, available_outer_width));
+        .and_then(|value| parse_length_basis(value, font_size, available_width, context.viewport));
     let mut outer_width = match specified_width {
         Some(width) if box_sizing == "border-box" => width.min(available_outer_width),
         Some(width) => (width + horizontal_insets).min(available_outer_width),
@@ -354,7 +357,7 @@ fn layout_node(
     };
     if let Some(max_width) = style
         .and_then(|style| style.get("max-width"))
-        .and_then(|value| parse_length_basis(value, font_size, available_outer_width))
+        .and_then(|value| parse_length_basis(value, font_size, available_width, context.viewport))
     {
         let max_outer_width = max_width + horizontal_insets;
         outer_width = outer_width.min(max_outer_width).min(available_outer_width);
@@ -1515,14 +1518,20 @@ fn build_line_boxes(
     let text_align = style.and_then(|s| s.get("text-align")).unwrap_or("start");
     let letter_spacing = style
         .and_then(|s| s.get("letter-spacing"))
-        .and_then(|value| if value == "normal" { Some(0.0) } else { parse_signed_length(value) })
+        .and_then(|value| {
+            if value == "normal" { Some(0.0) } else { parse_signed_length(value, context.viewport) }
+        })
         .unwrap_or(0.0);
     let word_spacing = style
         .and_then(|s| s.get("word-spacing"))
-        .and_then(|value| if value == "normal" { Some(0.0) } else { parse_signed_length(value) })
+        .and_then(|value| {
+            if value == "normal" { Some(0.0) } else { parse_signed_length(value, context.viewport) }
+        })
         .unwrap_or(0.0);
-    let text_indent =
-        style.and_then(|s| s.get("text-indent")).and_then(parse_signed_length).unwrap_or(0.0);
+    let text_indent = style
+        .and_then(|s| s.get("text-indent"))
+        .and_then(|value| parse_signed_length(value, context.viewport))
+        .unwrap_or(0.0);
     let space_advance = context.measurer.char_advance(' ', font_size) + word_spacing;
     let mut items = Vec::new();
     if let Some(before) = pseudo.and_then(|content| content.before.as_ref()) {
@@ -1801,12 +1810,45 @@ fn dump_box(output: &mut String, document: &HtmlDocument, layout: &LayoutBox, de
     }
 }
 
+/// Splits a shorthand value on whitespace outside parentheses, so `calc(...)`
+/// with internal spaces stays a single token.
+fn split_edge_tokens(value: &str) -> Vec<&str> {
+    let mut result = Vec::new();
+    let mut start = 0;
+    let mut depth = 0i32;
+    for (index, character) in value.char_indices() {
+        match character {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            c if c.is_ascii_whitespace() && depth == 0 => {
+                if start < index {
+                    result.push(&value[start..index]);
+                }
+                start = index + character.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    if start < value.len() {
+        result.push(&value[start..]);
+    }
+    result
+}
+
 /// Reads a shorthand edge property and then applies per-side longhands.
-fn parse_edges(style: Option<&bweb_css::ComputedStyle>, property: &str) -> Edges {
+fn parse_edges(
+    style: Option<&bweb_css::ComputedStyle>,
+    property: &str,
+    basis: f32,
+    viewport: (f32, f32),
+) -> Edges {
     let Some(style) = style else { return Edges::default() };
     let mut edges = Edges::default();
     if let Some(value) = style.get(property) {
-        let values: Vec<f32> = value.split_ascii_whitespace().filter_map(parse_length).collect();
+        let values: Vec<f32> = split_edge_tokens(value)
+            .into_iter()
+            .filter_map(|token| parse_length_basis(token, 16.0, basis, viewport))
+            .collect();
         edges = match values.as_slice() {
             [all] => Edges { top: *all, right: *all, bottom: *all, left: *all },
             [vertical, horizontal] => {
@@ -1827,15 +1869,22 @@ fn parse_edges(style: Option<&bweb_css::ComputedStyle>, property: &str) -> Edges
         ("bottom", &mut edges.bottom),
         ("left", &mut edges.left),
     ] {
-        if let Some(value) = style.get(&format!("{property}-{side}")).and_then(parse_length) {
+        if let Some(value) = style
+            .get(&format!("{property}-{side}"))
+            .and_then(|value| parse_length_basis(value, 16.0, basis, viewport))
+        {
             *edge = value;
         }
     }
     edges
 }
 
-fn parse_border_widths(style: Option<&bweb_css::ComputedStyle>) -> Edges {
-    parse_edges(style, "border-width")
+fn parse_border_widths(
+    style: Option<&bweb_css::ComputedStyle>,
+    basis: f32,
+    viewport: (f32, f32),
+) -> Edges {
+    parse_edges(style, "border-width", basis, viewport)
 }
 
 /// CSS `line-height` accepts a multiplier when no unit is given.
@@ -1849,37 +1898,35 @@ fn parse_line_height(value: &str, font_size: f32) -> Option<f32> {
     result.is_finite().then_some(result)
 }
 
-fn parse_length(value: &str) -> Option<f32> {
-    parse_css_length(value, 16.0)
-}
-
-/// Parses a length that may be negative (letter/word spacing, text-indent).
-fn parse_signed_length(value: &str) -> Option<f32> {
+/// Evaluates a CSS length, including `calc()`, to logical pixels.
+/// `basis` is the containing-block width used to resolve percentages.
+fn resolve_length(
+    value: &str,
+    font_size: f32,
+    basis: Option<f32>,
+    viewport: (f32, f32),
+    allow_negative: bool,
+) -> Option<f32> {
     let value = value.trim();
-    let (numeric, scale) = if let Some(number) = value.strip_suffix("px") {
-        (number, 1.0)
-    } else if let Some(number) = value.strip_suffix("em") {
-        (number, 16.0)
-    } else {
-        (value, 1.0)
-    };
-    numeric.trim().parse::<f32>().ok().map(|n| n * scale).filter(|n| n.is_finite())
-}
-
-/// Resolves a length, with percentages resolved against `basis` (the width of
-/// the containing block for `width`/`max-width`).
-fn parse_length_basis(value: &str, font_size: f32, basis: f32) -> Option<f32> {
-    let value = value.trim();
+    if let Some(body) = calc::calc_body(value) {
+        let resolved = calc::eval_calc(body, font_size, basis, viewport)?;
+        return (resolved.is_finite() && (allow_negative || resolved >= 0.0)).then_some(resolved);
+    }
     if let Some(percent) = value.strip_suffix('%') {
         let fraction = percent.trim().parse::<f32>().ok()? / 100.0;
-        let resolved = basis * fraction;
+        let resolved = basis? * fraction;
+        return (resolved.is_finite() && (allow_negative || resolved >= 0.0)).then_some(resolved);
+    }
+    if let Some(vw) = value.strip_suffix("vw") {
+        let fraction = vw.trim().parse::<f32>().ok()? / 100.0;
+        let resolved = viewport.0 * fraction;
         return resolved.is_finite().then_some(resolved);
     }
-    parse_css_length(value, font_size)
-}
-
-fn parse_css_length(value: &str, font_size: f32) -> Option<f32> {
-    let value = value.trim();
+    if let Some(vh) = value.strip_suffix("vh") {
+        let fraction = vh.trim().parse::<f32>().ok()? / 100.0;
+        let resolved = viewport.1 * fraction;
+        return resolved.is_finite().then_some(resolved);
+    }
     let (numeric, scale) = if let Some(number) = value.strip_suffix("px") {
         (number, 1.0)
     } else if let Some(number) = value.strip_suffix("em") {
@@ -1894,7 +1941,30 @@ fn parse_css_length(value: &str, font_size: f32) -> Option<f32> {
         .parse::<f32>()
         .ok()
         .map(|number| number * scale)
-        .filter(|number| number.is_finite() && *number >= 0.0)
+        .filter(|number| number.is_finite() && (allow_negative || *number >= 0.0))
+}
+
+fn parse_length(value: &str) -> Option<f32> {
+    resolve_length(value, 16.0, None, (0.0, 0.0), false)
+}
+
+/// Parses a length that may be negative (letter/word spacing, text-indent).
+fn parse_signed_length(value: &str, viewport: (f32, f32)) -> Option<f32> {
+    resolve_length(value, 16.0, None, viewport, true)
+}
+
+/// Resolves a length with the given containing-block basis (width/max-width).
+fn parse_length_basis(
+    value: &str,
+    font_size: f32,
+    basis: f32,
+    viewport: (f32, f32),
+) -> Option<f32> {
+    resolve_length(value, font_size, Some(basis), viewport, false)
+}
+
+fn parse_css_length(value: &str, font_size: f32) -> Option<f32> {
+    resolve_length(value, font_size, None, (0.0, 0.0), false)
 }
 
 fn horizontal_auto_margins(style: Option<&bweb_css::ComputedStyle>) -> (bool, bool) {
@@ -2065,6 +2135,32 @@ mod tests {
             find(&tree.root, element(doc, "main")).expect("main").line_boxes[0].rect.width
         };
         assert!(width(&tight_tree, &tight) < width(&plain_tree, &plain));
+    }
+
+    #[test]
+    fn calc_in_edge_shorthand_is_not_split_on_spaces() {
+        let (document, tree) = layout(
+            "<main><div>x</div></main>",
+            "main { display:block; width:400px } div { display:block; padding:calc(10px + 5px) }",
+        );
+        let main = find(&tree.root, element(&document, "main")).expect("main");
+        let child = main.children.first().expect("child");
+        assert_eq!(child.padding.left, 15.0);
+        assert_eq!(child.padding.top, 15.0);
+    }
+
+    #[test]
+    fn calc_width_and_margin_resolve_at_layout_time() {
+        let (document, tree) = layout(
+            "<main><div>x</div></main>",
+            "main { display:block; width:400px } \
+             div { display:block; width:calc(100% - 40px); margin-left:calc(10px + 5px) }",
+        );
+        let main = find(&tree.root, element(&document, "main")).expect("main");
+        let child = main.children.first().expect("child");
+        assert_eq!(child.rect.width, 360.0, "calc(100% - 40px) of 400 = 360");
+        assert_eq!(child.margin.left, 15.0, "calc(10px + 5px) = 15");
+        assert_eq!(child.rect.x, 15.0);
     }
 
     #[test]

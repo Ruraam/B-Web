@@ -63,8 +63,8 @@ layout tree, text and image rasterization, network transport and privacy filteri
 
 ### Layout and rendering
 - Box tree with margins (including auto), padding, borders, `max-width`,
-  em/rem sizing, inline formatting, `text-align`, `text-indent` and letter/word
-  spacing.
+  em/rem/vw/vh sizing, `calc()` length expressions, inline formatting,
+  `text-align`, `text-indent` and letter/word spacing.
 - Font-metric-based text layout with Swash shaping (kerning and ligatures),
   using the same advances as glyph rasterization.
 - Images sized from attributes or intrinsic dimensions and painted inline.
