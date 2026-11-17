@@ -22,6 +22,19 @@ fn effective_color(color: Color, opacities: &[f32], filters: &[crate::ColorFilte
     )
 }
 
+/// Returns the destination bounding box of a transformed rect and, when the
+/// transform is not axis-aligned, an inverse mapping so each pixel is sampled
+/// in local space. This makes rotate()/skew() render correctly.
+fn mapped_rect(rect: Rect, transform: Transform) -> (Rect, Option<Mapping>) {
+    let bounds = transform.rect(rect);
+    let mapping = if transform.is_axis_aligned() {
+        None
+    } else {
+        transform.inverse().map(|inverse| Mapping { inverse, local_rect: rect })
+    };
+    (bounds, mapping)
+}
+
 /// CPU rasterizer for the backend-independent display list.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Rasterizer;
@@ -48,34 +61,43 @@ impl Rasterizer {
             match item {
                 PaintItem::FillRect { rect, color } => {
                     let clip = *clips.last().expect("root clip is always present");
+                    let (bounds, mapping) =
+                        mapped_rect(*rect, *transforms.last().expect("root transform"));
                     paint_rect(
                         framebuffer,
-                        transforms.last().expect("root transform").rect(*rect),
+                        bounds,
                         clip,
                         *clip_radii.last().expect("root radius"),
                         effective_color(*color, &opacities, &filters),
+                        mapping,
                     );
                 }
                 PaintItem::BorderRect { rect, widths, color, .. } => {
                     let clip = *clips.last().expect("root clip is always present");
+                    let (bounds, mapping) =
+                        mapped_rect(*rect, *transforms.last().expect("root transform"));
                     paint_border(
                         framebuffer,
-                        transforms.last().expect("root transform").rect(*rect),
+                        bounds,
                         *widths,
                         clip,
                         *clip_radii.last().expect("root radius"),
                         effective_color(*color, &opacities, &filters),
+                        mapping,
                     );
                 }
                 PaintItem::LinearGradient { rect, gradient } => {
                     let clip = *clips.last().expect("root clip is always present");
+                    let (bounds, mapping) =
+                        mapped_rect(*rect, *transforms.last().expect("root transform"));
                     paint_linear_gradient(
                         framebuffer,
-                        transforms.last().expect("root transform").rect(*rect),
+                        bounds,
                         gradient,
                         clip,
                         *clip_radii.last().expect("root radius"),
                         *opacities.last().expect("root opacity"),
+                        mapping,
                     );
                 }
                 PaintItem::Text { glyphs, color, decoration } => {
@@ -124,6 +146,7 @@ impl Rasterizer {
                                     clip,
                                     *clip_radii.last().expect("root radius"),
                                     effective_color(*color, &opacities, &filters),
+                                    None,
                                 );
                             }
                         }
@@ -131,13 +154,16 @@ impl Rasterizer {
                 }
                 PaintItem::Image { rect, image } => {
                     let clip = *clips.last().expect("root clip is always present");
+                    let (bounds, mapping) =
+                        mapped_rect(*rect, *transforms.last().expect("root transform"));
                     paint_image(
                         framebuffer,
                         image,
-                        transforms.last().expect("root transform").rect(*rect),
+                        bounds,
                         clip,
                         *clip_radii.last().expect("root radius"),
                         *opacities.last().expect("root opacity"),
+                        mapping,
                     );
                 }
                 PaintItem::PushSticky { .. } | PaintItem::PopSticky => {
@@ -274,6 +300,7 @@ fn paint_image(
     clip: Rect,
     clip_radius: f32,
     opacity: f32,
+    mapping: Option<Mapping>,
 ) {
     let Some(area) = intersect(rect, clip) else {
         return;
@@ -281,10 +308,10 @@ fn paint_image(
     let source_width = image.width();
     let source_height = image.height();
     let pixels = image.pixels();
-    for_each_pixel(framebuffer, area, clip_radius, |target, x, y| {
-        let source_x = (f64::from(x) + 0.5 - f64::from(rect.x)) * f64::from(source_width)
+    for_each_pixel(framebuffer, area, clip_radius, mapping, |target, x, y, local_x, local_y| {
+        let source_x = (f64::from(local_x) - f64::from(rect.x)) * f64::from(source_width)
             / f64::from(rect.width);
-        let source_y = (f64::from(y) + 0.5 - f64::from(rect.y)) * f64::from(source_height)
+        let source_y = (f64::from(local_y) - f64::from(rect.y)) * f64::from(source_height)
             / f64::from(rect.height);
         let source_x = (source_x as usize).min(source_width as usize - 1);
         let source_y = (source_y as usize).min(source_height as usize - 1);
@@ -306,6 +333,7 @@ fn paint_linear_gradient(
     clip: Rect,
     clip_radius: f32,
     opacity: f32,
+    mapping: Option<Mapping>,
 ) {
     let Some(area) = intersect(rect, clip) else {
         return;
@@ -321,9 +349,9 @@ fn paint_linear_gradient(
     let center_y = rect.y + rect.height / 2.0;
     let positions = resolve_stop_positions(&gradient.stops, line_length);
 
-    for_each_pixel(framebuffer, area, clip_radius, |target, x, y| {
-        let pixel_x = x as f32 + 0.5;
-        let pixel_y = y as f32 + 0.5;
+    for_each_pixel(framebuffer, area, clip_radius, mapping, |target, x, y, local_x, local_y| {
+        let pixel_x = local_x;
+        let pixel_y = local_y;
         let projection =
             ((pixel_x - center_x) * sine - (pixel_y - center_y) * cosine) / line_length + 0.5;
         let color = interpolate_stops(&gradient.stops, &positions, projection);
@@ -408,11 +436,12 @@ fn paint_rect(
     clip: Rect,
     clip_radius: f32,
     color: Color,
+    mapping: Option<Mapping>,
 ) {
     let Some(area) = intersect(rect, clip) else {
         return;
     };
-    for_each_pixel(framebuffer, area, clip_radius, |target, x, y| {
+    for_each_pixel(framebuffer, area, clip_radius, mapping, |target, x, y, _local_x, _local_y| {
         target.set_pixel(x, y, color.to_rgba8());
     });
 }
@@ -424,6 +453,7 @@ fn paint_border(
     clip: Rect,
     clip_radius: f32,
     color: Color,
+    mapping: Option<Mapping>,
 ) {
     if !valid_rect(rect) || !valid_rect(clip) {
         return;
@@ -441,9 +471,9 @@ fn paint_border(
         return;
     };
 
-    for_each_pixel(framebuffer, area, clip_radius, |target, x, y| {
-        let px = x as f32 + 0.5;
-        let py = y as f32 + 0.5;
+    for_each_pixel(framebuffer, area, clip_radius, mapping, |target, x, y, local_x, local_y| {
+        let px = local_x;
+        let py = local_y;
         let on_left = widths.left > 0.0 && px < rect.x + widths.left;
         let on_right = widths.right > 0.0 && px >= rect.x + rect.width - widths.right;
         let on_top = widths.top > 0.0 && py < rect.y + widths.top;
@@ -483,11 +513,21 @@ fn inside_rounded(rect: Rect, radius: f32, px: f32, py: f32) -> bool {
     dx * dx + dy * dy <= r * r
 }
 
+/// Describes an inverse mapping from destination (screen) pixels to a rectangle
+/// in local space. When present, only pixels whose pre-image lies inside
+/// `local_rect` are painted, and the callback receives local coordinates.
+#[derive(Clone, Copy)]
+struct Mapping {
+    inverse: Transform,
+    local_rect: Rect,
+}
+
 fn for_each_pixel(
     framebuffer: &mut Framebuffer,
     area: Rect,
     clip_radius: f32,
-    mut paint: impl FnMut(&mut Framebuffer, u32, u32),
+    mapping: Option<Mapping>,
+    mut paint: impl FnMut(&mut Framebuffer, u32, u32, f32, f32),
 ) {
     if !valid_rect(area) || framebuffer.width() == 0 || framebuffer.height() == 0 {
         return;
@@ -502,14 +542,30 @@ fn for_each_pixel(
         for x in left..right.min(framebuffer.width()) {
             let center_x = x as f32 + 0.5;
             let center_y = y as f32 + 0.5;
-            if center_x >= area.x
-                && center_x < area.x + area.width
-                && center_y >= area.y
-                && center_y < area.y + area.height
-                && inside_rounded(area, clip_radius, center_x, center_y)
+            if center_x < area.x
+                || center_x >= area.x + area.width
+                || center_y < area.y
+                || center_y >= area.y + area.height
+                || !inside_rounded(area, clip_radius, center_x, center_y)
             {
-                paint(framebuffer, x, y);
+                continue;
             }
+            let (sample_x, sample_y) = match mapping {
+                Some(mapping) => {
+                    let (local_x, local_y) = mapping.inverse.point(center_x, center_y);
+                    if local_x < mapping.local_rect.x
+                        || local_x >= mapping.local_rect.x + mapping.local_rect.width
+                        || local_y < mapping.local_rect.y
+                        || local_y >= mapping.local_rect.y + mapping.local_rect.height
+                        || !inside_rounded(mapping.local_rect, clip_radius, local_x, local_y)
+                    {
+                        continue;
+                    }
+                    (local_x, local_y)
+                }
+                None => (center_x, center_y),
+            };
+            paint(framebuffer, x, y, sample_x, sample_y);
         }
     }
 }
@@ -805,11 +861,39 @@ mod tests {
     }
 
     #[test]
+    fn rotate_45_produces_a_diamond_not_a_filled_bounding_box() {
+        let mut list = DisplayList::default();
+        list.push(PaintItem::PushClip { rect: rect(0.0, 0.0, 30.0, 30.0) });
+        list.push(PaintItem::PushTransform {
+            // The Painter applies transform-origin at the box center; emulate it.
+            transform: crate::parse_transform(Some("rotate(45deg)"), 10.0, 10.0, None)
+                .unwrap()
+                .around_origin(15.0, 15.0),
+        });
+        fill(&mut list, rect(10.0, 10.0, 10.0, 10.0), RED);
+        list.push(PaintItem::PopTransform);
+        list.push(PaintItem::PopClip);
+        let mut framebuffer = Framebuffer::new(30, 30).expect("framebuffer");
+
+        Rasterizer.rasterize(&list, &mut framebuffer);
+
+        let pixel = |x: usize, y: usize| {
+            let offset = (y * 30 + x) * 4;
+            framebuffer.pixels()[offset..offset + 4].to_vec()
+        };
+        // The diamond's center is painted.
+        assert_eq!(pixel(15, 15), vec![255, 0, 0, 255]);
+        // A corner of the axis-aligned bounding box must stay empty: this
+        // distinguishes a true rotated diamond from a filled bounding box.
+        assert_eq!(pixel(8, 8), vec![0, 0, 0, 0], "corner must be empty");
+    }
+
+    #[test]
     fn translate_transform_moves_drawing_and_descendants() {
         let mut list = DisplayList::default();
         list.push(PaintItem::PushClip { rect: rect(0.0, 0.0, 6.0, 2.0) });
         list.push(PaintItem::PushTransform {
-            transform: crate::parse_transform(Some("translate(2px, 0)"), 1.0, 1.0).unwrap(),
+            transform: crate::parse_transform(Some("translate(2px, 0)"), 1.0, 1.0, None).unwrap(),
         });
         fill(&mut list, rect(0.0, 0.0, 2.0, 2.0), RED);
         list.push(PaintItem::PopTransform);

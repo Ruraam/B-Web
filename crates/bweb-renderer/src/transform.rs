@@ -1,8 +1,10 @@
 //! CSS `transform` parsing for the software rasterizer.
 //!
-//! Only translate and scale are supported: they keep rectangles axis-aligned,
-//! which the rasterizer requires. Rotations and perspective are not handled.
-//! Percentages in `translate()` resolve against the element's own box.
+//! Supports translate, scale, rotate, skew and their combinations as 2D affine
+//! transforms. The rasterizer maps each destination pixel back through the
+//! inverse matrix, so rotated/skewed boxes are rendered correctly. Perspective
+//! is not handled. Percentages in `translate()` resolve against the element's
+//! own box.
 
 use crate::Rect;
 
@@ -54,6 +56,40 @@ impl Transform {
         let bottom = y1.max(y2).max(y3).max(y4);
         Rect { x: left, y: top, width: right - left, height: bottom - top }
     }
+
+    /// Applies this transform around a specific origin point, returning the
+    /// composed `T(origin) ∘ self ∘ T(-origin)` matrix. CSS transforms use the
+    /// element's center as the default origin.
+    #[must_use]
+    pub fn around_origin(self, origin_x: f32, origin_y: f32) -> Self {
+        let to_origin = Self { e: -origin_x, f: -origin_y, ..Self::IDENTITY };
+        let from_origin = Self { e: origin_x, f: origin_y, ..Self::IDENTITY };
+        from_origin.compose(self).compose(to_origin)
+    }
+
+    /// Whether the transform preserves axis-aligned rectangles (no rotation/skew).
+    #[must_use]
+    pub const fn is_axis_aligned(self) -> bool {
+        self.b.abs() < 1e-9 && self.c.abs() < 1e-9
+    }
+
+    /// Returns the inverse transform, or `None` when the matrix is singular.
+    /// Used by the rasterizer to map destination pixels back to local space.
+    #[must_use]
+    pub fn inverse(self) -> Option<Self> {
+        let determinant = self.a * self.d - self.b * self.c;
+        if !determinant.is_finite() || determinant.abs() < 1e-12 {
+            return None;
+        }
+        let inv = 1.0 / determinant;
+        let a = self.d * inv;
+        let b = -self.b * inv;
+        let c = -self.c * inv;
+        let d = self.a * inv;
+        let e = -(a * self.e + c * self.f);
+        let f = -(b * self.e + d * self.f);
+        Some(Self { a, b, c, d, e, f })
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -85,7 +121,12 @@ fn resolve(component: Component, basis: f32) -> f32 {
 /// Parses a CSS `transform` value. Returns `None` for `none` or unsupported
 /// functions (notably rotations and perspective).
 #[must_use]
-pub fn parse_transform(value: Option<&str>, width: f32, height: f32) -> Option<Transform> {
+pub fn parse_transform(
+    value: Option<&str>,
+    width: f32,
+    height: f32,
+    origin: Option<(f32, f32)>,
+) -> Option<Transform> {
     let value = value.unwrap_or("").trim();
     if value.is_empty() || value.eq_ignore_ascii_case("none") {
         return None;
@@ -113,6 +154,21 @@ pub fn parse_transform(value: Option<&str>, width: f32, height: f32) -> Option<T
         let args = &value[args_start..index.min(bytes.len())];
         index += 1;
 
+        // Angles are parsed separately (the translate/scale number parser does
+        // not accept `deg`).
+        fn parse_angle(args: &str, index: usize) -> Option<f32> {
+            let raw = args.split(',').nth(index)?.trim();
+            let number = raw
+                .strip_suffix("deg")
+                .or_else(|| raw.strip_suffix("rad"))
+                .unwrap_or(raw)
+                .trim()
+                .parse::<f32>()
+                .ok()?;
+            let degrees = if raw.trim().ends_with("rad") { number.to_degrees() } else { number };
+            degrees.is_finite().then_some(degrees)
+        }
+
         let components: Vec<Component> = args.split(',').filter_map(number).collect();
         let local = match name.as_str() {
             "translate" | "translate3d" => {
@@ -138,10 +194,41 @@ pub fn parse_transform(value: Option<&str>, width: f32, height: f32) -> Option<T
             "scaley" => {
                 Transform { d: resolve(components.first().copied()?, 1.0), ..Transform::IDENTITY }
             }
+            "rotate" | "rotatez" => {
+                let radians = parse_angle(args, 0)?.to_radians();
+                let (sine, cosine) = radians.sin_cos();
+                Transform { a: cosine, b: sine, c: -sine, d: cosine, ..Transform::IDENTITY }
+            }
+            "skewx" => {
+                let tangent = parse_angle(args, 0)?.to_radians().tan();
+                if !tangent.is_finite() {
+                    return None;
+                }
+                Transform { c: tangent, ..Transform::IDENTITY }
+            }
+            "skewy" => {
+                let tangent = parse_angle(args, 0)?.to_radians().tan();
+                if !tangent.is_finite() {
+                    return None;
+                }
+                Transform { b: tangent, ..Transform::IDENTITY }
+            }
+            "skew" => {
+                let x = parse_angle(args, 0)?.to_radians().tan();
+                let y = parse_angle(args, 1).unwrap_or(0.0).to_radians().tan();
+                if !x.is_finite() || !y.is_finite() {
+                    return None;
+                }
+                Transform { b: y, c: x, ..Transform::IDENTITY }
+            }
             _ => return None, // unsupported function: drop the whole transform
         };
         result = result.compose(local);
     }
+    let result = match origin {
+        Some((x, y)) => result.around_origin(x, y),
+        None => result,
+    };
     (result != Transform::IDENTITY).then_some(result)
 }
 
@@ -151,26 +238,54 @@ mod tests {
 
     #[test]
     fn translate_resolves_percentages() {
-        let transform = parse_transform(Some("translate(50%, 10px)"), 100.0, 40.0).unwrap();
+        let transform = parse_transform(Some("translate(50%, 10px)"), 100.0, 40.0, None).unwrap();
         assert_eq!(transform.point(0.0, 0.0), (50.0, 10.0));
     }
 
     #[test]
     fn scale_multiplies_coordinates() {
-        let transform = parse_transform(Some("scale(2, 0.5)"), 100.0, 40.0).unwrap();
+        let transform = parse_transform(Some("scale(2, 0.5)"), 100.0, 40.0, None).unwrap();
         assert_eq!(transform.point(10.0, 10.0), (20.0, 5.0));
     }
 
     #[test]
     fn compose_applies_parent_then_child() {
-        let parent = parse_transform(Some("translate(10px, 0)"), 100.0, 40.0).unwrap();
-        let child = parse_transform(Some("scale(2)"), 100.0, 40.0).unwrap();
+        let parent = parse_transform(Some("translate(10px, 0)"), 100.0, 40.0, None).unwrap();
+        let child = parse_transform(Some("scale(2)"), 100.0, 40.0, None).unwrap();
         let composed = parent.compose(child);
         assert_eq!(composed.point(5.0, 0.0), (20.0, 0.0));
     }
 
     #[test]
-    fn unsupported_rotation_is_dropped() {
-        assert!(parse_transform(Some("rotate(45deg)"), 100.0, 40.0).is_none());
+    fn rotate_and_skew_are_supported() {
+        let rotated = parse_transform(Some("rotate(90deg)"), 100.0, 40.0, None).unwrap();
+        let (x, y) = rotated.point(10.0, 0.0);
+        assert!((x).abs() < 0.001 && (y - 10.0).abs() < 0.001, "got ({x}, {y})");
+
+        let skewed = parse_transform(Some("skewX(45deg)"), 100.0, 40.0, None).unwrap();
+        let (x, y) = skewed.point(0.0, 10.0);
+        assert!((x - 10.0).abs() < 0.001 && (y - 10.0).abs() < 0.001, "got ({x}, {y})");
+    }
+
+    #[test]
+    fn inverse_round_trips() {
+        let transform =
+            parse_transform(Some("translate(10px, 5px) rotate(30deg) scale(2)"), 100.0, 40.0, None)
+                .unwrap();
+        let inverse = transform.inverse().unwrap();
+        let (x, y) = transform.point(7.0, 3.0);
+        let (rx, ry) = inverse.point(x, y);
+        assert!((rx - 7.0).abs() < 0.001 && (ry - 3.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn singular_transform_has_no_inverse() {
+        let zero = parse_transform(Some("scale(0)"), 100.0, 40.0, None).unwrap();
+        assert!(zero.inverse().is_none());
+    }
+
+    #[test]
+    fn unsupported_function_is_dropped() {
+        assert!(parse_transform(Some("perspective(100px)"), 100.0, 40.0, None).is_none());
     }
 }

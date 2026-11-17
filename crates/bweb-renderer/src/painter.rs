@@ -87,9 +87,12 @@ impl<'a, L: PaintLayout> Painter<'a, L> {
                 }
             }
 
-            if let Some(transform) =
-                crate::parse_transform(node.transform.as_deref(), node.rect.width, node.rect.height)
-            {
+            if let Some(transform) = crate::parse_transform(
+                node.transform.as_deref(),
+                node.rect.width,
+                node.rect.height,
+                Some((node.rect.x + node.rect.width * 0.5, node.rect.y + node.rect.height * 0.5)),
+            ) {
                 list.push(PaintItem::PushTransform { transform });
                 transform_depths.push(node.depth);
             }
