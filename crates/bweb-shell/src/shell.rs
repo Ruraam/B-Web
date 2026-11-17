@@ -31,6 +31,12 @@ impl<B: ViewBackend> ResizeController<B> {
         &mut self.view
     }
 
+    /// Invalidates cached layout so the next dispatch rebuilds it. Used after
+    /// a script mutates the document.
+    pub fn invalidate_layout(&mut self) {
+        self.view_mut().invalidate_layout();
+    }
+
     /// Repaints the current viewport after a content-only change such as scroll.
     pub fn repaint(&mut self) -> Result<ResizeDispatch, B::Error> {
         if self.view.repaint()? { Ok(ResizeDispatch::Repaint) } else { Ok(ResizeDispatch::Skip) }

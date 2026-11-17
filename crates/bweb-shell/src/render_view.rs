@@ -61,6 +61,28 @@ impl BrowserViewBackend {
         &self.document
     }
 
+    /// Replaces the document after an external mutation (e.g. a JS event
+    /// handler) and recomputes styles. The display list is cleared so the next
+    /// reflow rebuilds layout and text geometry.
+    pub fn replace_document(&mut self, document: HtmlDocument, document_url: &str) {
+        self.document = document;
+        let mut styles = StyleEngine::new().compute_with_viewport(
+            &self.document,
+            &self.stylesheets,
+            1280.0,
+            720.0,
+        );
+        styles.resolve_urls(document_url);
+        self.styles = styles;
+        self.pseudo_styles = StyleEngine::new()
+            .compute_generated(&self.document, &self.stylesheets, 1280.0, 720.0)
+            .1;
+        self.display_list = None;
+        self.framebuffer = None;
+        self.text_runs.clear();
+        self.scroll_y = 0.0;
+    }
+
     #[must_use]
     pub fn framebuffer(&self) -> Option<&Framebuffer> {
         self.framebuffer.as_ref()

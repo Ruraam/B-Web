@@ -639,7 +639,7 @@ impl<D: raw_window_handle::HasDisplayHandle> WindowApp<D> {
                 backend.document().ancestor_elements(target)
             };
             chain.extend(ancestors);
-            self.dispatch_click(&chain);
+            self.dispatch_click(&chain, window);
         }
         if self.events.borrow().prevented() {
             return;
@@ -653,7 +653,7 @@ impl<D: raw_window_handle::HasDisplayHandle> WindowApp<D> {
         self.start_navigation(url, NavigationKind::New, window);
     }
 
-    fn dispatch_click(&mut self, targets: &[NodeId]) {
+    fn dispatch_click(&mut self, targets: &[NodeId], window: &Window) {
         self.events.borrow_mut().reset();
         let event = Value::Host("event".into());
         for target in targets {
@@ -665,6 +665,27 @@ impl<D: raw_window_handle::HasDisplayHandle> WindowApp<D> {
                 }
             }
         }
+        self.sync_document_after_script(window);
+    }
+
+    /// If a script mutated the shared document, push the new DOM into the
+    /// view backend, recompute styles and force a reflow + repaint.
+    fn sync_document_after_script(&mut self, window: &Window) {
+        let changed = {
+            let dom = self.document.borrow();
+            &*dom != self.controller.view().backend().document()
+        };
+        if !changed {
+            return;
+        }
+        let updated = self.document.borrow().clone();
+        let url = self.history.current().to_string();
+        self.controller.view_mut().backend_mut().replace_document(updated, &url);
+        self.controller.invalidate_layout();
+        if let Some(viewport) = self.content_viewport {
+            self.controller.queue(viewport);
+        }
+        window.request_redraw();
     }
 
     fn handle_key(&mut self, event: &KeyEvent, window: &Window) {

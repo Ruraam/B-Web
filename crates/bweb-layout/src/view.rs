@@ -106,6 +106,13 @@ impl<B: ViewBackend> View<B> {
         Ok(if needs_reflow { ResizeOutcome::Reflowed } else { ResizeOutcome::Repainted })
     }
 
+    /// Invalidates cached layout so the next resize/reflow rebuilds geometry.
+    /// Used when the document content changes (e.g. a script mutates the DOM).
+    pub fn invalidate_layout(&mut self) {
+        self.layout_width = None;
+        self.layout_scale_factor = None;
+    }
+
     /// Repaints the current viewport without changing its configuration.
     ///
     /// Returns whether a repaint was performed. This is used for content-only
@@ -233,6 +240,17 @@ mod tests {
         assert_eq!(view.repaint(), Ok(true));
         assert_eq!(view.backend().reflow_calls, 1);
         assert_eq!(view.backend().repaint_calls, 2);
+    }
+
+    #[test]
+    fn invalidate_layout_forces_reflow_on_same_viewport() {
+        let mut view = View::new(MockLayout::default());
+        let vp = viewport(800, 600, 1.0);
+        view.resize(vp).expect("initial render");
+        assert_eq!(view.resize(vp), Ok(ResizeOutcome::Unchanged));
+        view.invalidate_layout();
+        assert_eq!(view.resize(vp), Ok(ResizeOutcome::Reflowed));
+        assert_eq!(view.backend().reflow_calls, 2);
     }
 
     #[test]
