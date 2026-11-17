@@ -1,16 +1,17 @@
 //! Font loading, metrics, character mapping, and glyph rasterization for B-Web.
 //!
-//! This crate deliberately does not perform text shaping or line breaking.
-//! Those responsibilities belong to `bweb-layout`. The renderer will consume
+//! This crate provides shaping and glyph rasterization but does not perform
+//! line breaking, which belongs to `bweb-layout`. The renderer consumes
 //! positioned glyph data and coverage masks without depending on this crate.
 //!
 //! Swash is kept behind this small API so its implementation can be replaced
 //! without coupling layout or rendering to Swash types.
 
-use std::fmt;
+use std::{cell::RefCell, fmt};
 
 use swash::scale::image::Content;
 use swash::scale::{Render, ScaleContext, Source};
+use swash::shape::ShapeContext;
 use swash::{CacheKey, FontRef};
 
 /// Errors that can occur while loading font data.
@@ -87,6 +88,15 @@ pub struct Font {
     offset: u32,
     key: CacheKey,
     scale_context: ScaleContext,
+    shape_context: RefCell<ShapeContext>,
+}
+
+/// A shaped glyph with its final horizontal offset and advance.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ShapedGlyph {
+    pub glyph: u16,
+    pub x: f32,
+    pub advance: f32,
 }
 
 impl Font {
@@ -102,7 +112,13 @@ impl Font {
             (font.offset, font.key)
         };
 
-        Ok(Self { data, offset, key, scale_context: ScaleContext::new() })
+        Ok(Self {
+            data,
+            offset,
+            key,
+            scale_context: ScaleContext::new(),
+            shape_context: RefCell::new(ShapeContext::new()),
+        })
     }
 
     fn font_ref(&self) -> FontRef<'_> {
@@ -145,6 +161,25 @@ impl Font {
         }
 
         self.font_ref().glyph_metrics(&[]).scale(px_size).advance_width(glyph)
+    }
+
+    /// Shapes a run of text, returning positioned glyphs with kerning and
+    /// ligatures applied by Swash.
+    pub fn shape(&self, text: &str, px_size: f32) -> Vec<ShapedGlyph> {
+        if text.is_empty() || !px_size.is_finite() || px_size <= 0.0 {
+            return Vec::new();
+        }
+        let font = FontRef { data: &self.data, offset: self.offset, key: self.key };
+        let mut context = self.shape_context.borrow_mut();
+        let mut shaper = context.builder(font).size(px_size).build();
+        shaper.add_str(text);
+        let mut glyphs = Vec::new();
+        shaper.shape_with(|cluster| {
+            for glyph in cluster.glyphs {
+                glyphs.push(ShapedGlyph { glyph: glyph.id, x: glyph.x, advance: glyph.advance });
+            }
+        });
+        glyphs
     }
 
     /// Rasterizes a glyph outline into an 8-bit alpha coverage mask.
@@ -193,6 +228,15 @@ mod tests {
     #[test]
     fn loading_invalid_data_fails() {
         assert_eq!(Font::from_bytes(vec![0; 16]).err(), Some(FontError::Invalid));
+    }
+
+    #[test]
+    fn shapes_text_into_positioned_glyphs() {
+        let font = load();
+        let glyphs = font.shape("hello", 20.0);
+        assert_eq!(glyphs.len(), 5);
+        assert!(glyphs.iter().all(|glyph| glyph.advance > 0.0));
+        assert!(font.shape("", 20.0).is_empty());
     }
 
     #[test]
