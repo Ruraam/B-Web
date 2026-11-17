@@ -58,6 +58,58 @@ struct RasterState {
     filters: Vec<crate::ColorFilter>,
 }
 
+/// Separable box blur on the alpha channel of an RGBA8 buffer, approximating a
+/// Gaussian by three passes. Colors are kept; only alpha is smoothed.
+fn blur_alpha(buffer: &mut Framebuffer, radius: f32) {
+    if radius <= 0.0 {
+        return;
+    }
+    let passes = 3;
+    let radius = radius.max(0.5).round() as usize;
+    let width = buffer.width() as usize;
+    let height = buffer.height() as usize;
+    let mut source = buffer.pixels().to_vec();
+    for _ in 0..passes {
+        // Horizontal pass.
+        let mut horizontal = source.clone();
+        for y in 0..height {
+            for x in 0..width {
+                let mut sum = 0u32;
+                let mut count = 0u32;
+                for dx in -(radius as isize)..=(radius as isize) {
+                    let sx = x as isize + dx;
+                    if sx >= 0 && sx < width as isize {
+                        sum += source[(y * width + sx as usize) * 4 + 3] as u32;
+                        count += 1;
+                    }
+                }
+                horizontal[(y * width + x) * 4 + 3] = (sum / count) as u8;
+            }
+        }
+        // Vertical pass.
+        let mut vertical = horizontal.clone();
+        for y in 0..height {
+            for x in 0..width {
+                let mut sum = 0u32;
+                let mut count = 0u32;
+                for dy in -(radius as isize)..=(radius as isize) {
+                    let sy = y as isize + dy;
+                    if sy >= 0 && sy < height as isize {
+                        sum += horizontal[((sy as usize) * width + x) * 4 + 3] as u32;
+                        count += 1;
+                    }
+                }
+                vertical[(y * width + x) * 4 + 3] = (sum / count) as u8;
+            }
+        }
+        source = vertical;
+    }
+    let pixels = buffer.pixels_mut();
+    for (index, chunk) in pixels.chunks_exact_mut(4).enumerate() {
+        chunk[3] = source[index * 4 + 3];
+    }
+}
+
 /// Composes a temporary group framebuffer onto its parent with a uniform
 /// alpha. Unlike per-primitive alpha this keeps overlaps at the group's alpha.
 fn composite_group(parent: &mut Framebuffer, group: &Framebuffer, alpha: f32) {
@@ -202,17 +254,6 @@ fn run_commands(
                 // Paint text shadows first, behind the glyphs.
                 for shadow in shadows {
                     let shadow_color = effective_color(shadow.color, opacities, filters);
-                    let alpha_scale = if shadow.blur > 0.0 {
-                        (0.75_f32 - shadow.blur * 0.05).clamp(0.15, 0.75)
-                    } else {
-                        1.0
-                    };
-                    let soft = Color::rgba(
-                        shadow_color.red,
-                        shadow_color.green,
-                        shadow_color.blue,
-                        (f32::from(shadow_color.alpha) * alpha_scale).round() as u8,
-                    );
                     let dx = shadow.offset_x;
                     let dy = shadow.offset_y;
                     let shifted: Vec<_> = moved
@@ -223,15 +264,43 @@ fn run_commands(
                             y: glyph.y + dy,
                         })
                         .collect();
-                    let shadow_target = &mut groups.last_mut().expect("group stack").0;
-                    blit_glyphs(
-                        shadow_target,
-                        &shifted,
-                        clip,
-                        *clip_radii.last().expect("root radius"),
-                        soft,
-                        clip_mappings.last().copied().unwrap_or(None),
-                    );
+                    if shadow.blur > 0.0 {
+                        // Render the shadow into a temporary buffer, blur its
+                        // alpha, then composite once onto the group.
+                        let (width, height) = {
+                            let target = &groups[0].0;
+                            (target.width(), target.height())
+                        };
+                        let mut layer = Framebuffer::new(width, height).unwrap_or_default();
+                        blit_glyphs(
+                            &mut layer,
+                            &shifted,
+                            clip,
+                            *clip_radii.last().expect("root radius"),
+                            shadow_color,
+                            clip_mappings.last().copied().unwrap_or(None),
+                        );
+                        blur_alpha(&mut layer, shadow.blur);
+                        let parent = &mut groups.last_mut().expect("group stack").0;
+                        for y in 0..height {
+                            for x in 0..width {
+                                let source = layer.pixel(x, y);
+                                if source[3] > 0 {
+                                    parent.set_pixel(x, y, source);
+                                }
+                            }
+                        }
+                    } else {
+                        let shadow_target = &mut groups.last_mut().expect("group stack").0;
+                        blit_glyphs(
+                            shadow_target,
+                            &shifted,
+                            clip,
+                            *clip_radii.last().expect("root radius"),
+                            shadow_color,
+                            clip_mappings.last().copied().unwrap_or(None),
+                        );
+                    }
                 }
 
                 let text_color = effective_color(*color, opacities, filters);
@@ -1176,6 +1245,52 @@ mod tests {
         assert_eq!(alpha_at(0), alpha_at(1), "group alpha must be uniform across overlaps");
         assert_eq!(alpha_at(1), alpha_at(2));
         assert!(alpha_at(1) > 0 && alpha_at(1) < 255);
+    }
+
+    #[test]
+    fn text_shadow_blur_spreads_alpha_spatially() {
+        use crate::TextShadow;
+        let glyph = crate::PositionedGlyph {
+            coverage: bweb_text::Coverage {
+                width: 2,
+                height: 2,
+                left: 0,
+                top: 0,
+                data: vec![255; 4],
+            },
+            x: 5.0,
+            y: 5.0,
+        };
+        let shadow = TextShadow {
+            offset_x: 0.0,
+            offset_y: 0.0,
+            blur: 2.0,
+            color: Color::rgba(255, 0, 0, 255),
+        };
+        let mut list = DisplayList::default();
+        list.push(PaintItem::PushClip { rect: rect(0.0, 0.0, 12.0, 12.0) });
+        list.push(PaintItem::Text {
+            glyphs: vec![glyph],
+            color: Color::rgba(0, 0, 255, 255),
+            decoration: crate::TextDecoration::None,
+            shadows: vec![shadow],
+        });
+        list.push(PaintItem::PopClip);
+        let mut framebuffer = Framebuffer::new(12, 12).expect("framebuffer");
+
+        Rasterizer.rasterize(&list, &mut framebuffer);
+
+        // Blur must spread alpha beyond the original 2x2 glyph (x=5,6).
+        let mut spread = 0;
+        for y in 0..12 {
+            for x in 0..12 {
+                let alpha = framebuffer.pixel(x, y)[3];
+                if alpha > 0 && alpha < 255 {
+                    spread += 1;
+                }
+            }
+        }
+        assert!(spread > 0, "a spatial blur should produce partial-alpha pixels");
     }
 
     #[test]
