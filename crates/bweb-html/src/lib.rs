@@ -150,16 +150,16 @@ impl HtmlDocument {
         self.nodes
             .iter()
             .enumerate()
-            .filter_map(|(index, node)| {
+            .filter(|(_, node)| {
                 matches!(
                     &node.kind,
                     NodeKind::Element { tag_name, .. } if tag_name == "style"
                 )
-                .then(|| {
-                    let mut source = String::new();
-                    self.collect_text(NodeId(index), &mut source);
-                    source
-                })
+            })
+            .map(|(index, _)| {
+                let mut source = String::new();
+                self.collect_text(NodeId(index), &mut source);
+                source
             })
             .filter(|source| !source.trim().is_empty())
             .collect()
