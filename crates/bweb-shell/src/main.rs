@@ -11,9 +11,9 @@ use address_bar::AddressBar;
 use bweb_css::{ComputedStyle, ComputedStyleMap, PseudoElement, StyleEngine, Stylesheet};
 use bweb_filterlists::FilterListDownloader;
 use bweb_html::{DocumentLoader, HtmlDocument, LoadedDocument, NodeId, ResourceKind, ScriptRef};
-use bweb_js::{Runtime, Value};
+use bweb_js::{PAGE_INSTRUCTION_BUDGET, Runtime, Value};
 use bweb_layout::{ImageSize, LayoutTree, PaintAdapter, Rect as LayoutRect, View, Viewport};
-use bweb_net::{HttpTransport, NetworkPolicy};
+use bweb_net::{AddressPolicy, HttpTransport, NetworkPolicy};
 use bweb_renderer::{Framebuffer, Image, Painter, Rasterizer};
 use bweb_shield::{FilterListCache, FilterListError, Shield};
 use bweb_text::Font;
@@ -109,8 +109,15 @@ fn show_status() -> Result<(), Box<dyn Error>> {
     println!("Stage: {:?}", bweb_core::STAGE);
     println!("Privacy engine: {}", bweb_shield::FILTER_ENGINE);
     println!("JavaScript runtime: {:?} (in-process Rust runtime)", bweb_js::RuntimeStatus::Ready);
-    let (_transport, _shield_active) = build_transport(true)?;
-    println!("HTTP/HTTPS transport: ready (rustls, Shield-gated, Sec-GPC/DNT enabled)");
+    let (_transport, shield_active) = build_transport(true)?;
+    println!("HTTP/HTTPS transport: ready (rustls, policy-gated, Sec-GPC/DNT enabled)");
+    if shield_active {
+        println!("Tracker filtering: active (cached EasyList/EasyPrivacy rules)");
+    } else {
+        println!(
+            "Tracker filtering: INACTIVE (no filter lists installed; run 'b-web update-filters')"
+        );
+    }
     Ok(())
 }
 
@@ -146,7 +153,17 @@ struct Page {
 /// Navigation from the native window reuses this exact path, so every visited
 /// URL still passes through Shield and the privacy policy.
 fn load_page(url: &str, verbose: bool) -> Result<Page, Box<dyn Error>> {
-    let (transport, shield_active) = build_transport(verbose)?;
+    load_page_with_policy(url, verbose, AddressPolicy::DenyLocal)
+}
+
+/// Navigation with an explicit local-address policy. Production callers use
+/// the safe default; local development and tests can opt in to loopback.
+fn load_page_with_policy(
+    url: &str,
+    verbose: bool,
+    address_policy: AddressPolicy,
+) -> Result<Page, Box<dyn Error>> {
+    let (transport, shield_active) = build_transport_with_policy(verbose, address_policy)?;
     if verbose {
         println!("Loading: {url}");
         if !shield_active {
@@ -244,11 +261,13 @@ fn prepare_page(page: &mut Page) -> PreparedPage {
     let mut runtime = Runtime::new();
     runtime.set_host(Box::new(DomHost::new(&document, events.clone())));
     runtime.define_global("document", Value::Host("document".into()));
+    runtime.set_page_budget(PAGE_INSTRUCTION_BUDGET);
     for source in &page.scripts {
         if let Err(error) = runtime.eval(source) {
             eprintln!("  script error: {error}");
         }
     }
+    runtime.clear_page_budget();
     for line in runtime.output() {
         println!("  script: {line}");
     }
@@ -450,11 +469,13 @@ impl<D: raw_window_handle::HasDisplayHandle + 'static> ApplicationHandler<UserEv
                 self.events.borrow_mut().clear();
                 self.runtime.set_host(Box::new(DomHost::new(&document, self.events.clone())));
                 self.runtime.define_global("document", Value::Host("document".into()));
+                self.runtime.set_page_budget(PAGE_INSTRUCTION_BUDGET);
                 for source in &page.scripts {
                     if let Err(error) = self.runtime.eval(source) {
                         eprintln!("  script error: {error}");
                     }
                 }
+                self.runtime.clear_page_budget();
                 for line in self.runtime.take_output() {
                     println!("  script: {line}");
                 }
@@ -938,6 +959,13 @@ fn write_ppm(path: &Path, framebuffer: &Framebuffer) -> Result<(), io::Error> {
 }
 
 fn build_transport(verbose: bool) -> Result<(HttpTransport, bool), Box<dyn Error>> {
+    build_transport_with_policy(verbose, AddressPolicy::DenyLocal)
+}
+
+fn build_transport_with_policy(
+    verbose: bool,
+    address_policy: AddressPolicy,
+) -> Result<(HttpTransport, bool), Box<dyn Error>> {
     let cache_directory = filter_list_cache_directory()?;
     let cache = FilterListCache::new(&cache_directory);
     let shield = match cache.load_shield() {
@@ -956,9 +984,11 @@ fn build_transport(verbose: bool) -> Result<(HttpTransport, bool), Box<dyn Error
         }
         Err(error) => return Err(error.into()),
     };
-    let transport = HttpTransport::new(NetworkPolicy::new(shield.0))?;
+    let transport =
+        HttpTransport::new(NetworkPolicy::with_address_policy(shield.0, address_policy))?;
     if verbose {
         println!("Cache: {}", cache.directory().display());
+        println!("Address policy: {address_policy:?}");
     }
     Ok((transport, shield.1))
 }
@@ -1007,17 +1037,24 @@ fn filter_list_cache_directory() -> Result<PathBuf, io::Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::{content_viewport, copy_scaled_pixels, load_page};
+    use super::{
+        NodeId, Page, content_viewport, copy_scaled_pixels, load_page_with_policy, prepare_page,
+    };
     use crate::scripting::{DomHost, EventRegistry};
-    use bweb_html::{HtmlDocument, NodeKind};
+    use bweb_html::{HtmlDocument, LoadedDocument, NodeKind};
     use bweb_js::{Runtime, Value};
+    use bweb_net::AddressPolicy;
+    use bweb_renderer::Image;
     use std::{
         cell::RefCell,
+        collections::HashMap,
         io::{Read, Write},
         net::TcpListener,
         rc::Rc,
+        sync::Arc,
         thread,
     };
+    use url::Url;
 
     /// Serves one HTTP response on an ephemeral local port and returns its URL.
     fn serve_once(body: String, content_type: &str) -> String {
@@ -1072,13 +1109,36 @@ mod tests {
     }
 
     #[test]
+    fn prepare_page_runs_scripts_in_order_and_clears_the_page_budget() {
+        let mut page = Page {
+            loaded: LoadedDocument {
+                url: Url::parse("https://example.test/").expect("url"),
+                document: HtmlDocument::parse("<html><body></body></html>"),
+                resources: Vec::new(),
+                failed_resources: Vec::new(),
+            },
+            stylesheets: Vec::new(),
+            images: HashMap::<NodeId, Arc<Image>>::new(),
+            background_images: HashMap::new(),
+            scripts: vec![
+                "document.title = 'first';".to_owned(),
+                "document.title = 'second';".to_owned(),
+            ],
+        };
+        let prepared = prepare_page(&mut page);
+        assert_eq!(prepared.document.borrow().title().as_deref(), Some("second"));
+        assert_eq!(prepared.runtime.page_budget_remaining(), None);
+    }
+
+    #[test]
     fn load_page_exercises_the_real_navigation_path() {
         let html = "<!DOCTYPE html><html><head><title>Smoke</title>\
             <style>body { color: red }</style>\
             <script>document.title = 'Loaded';</script>\
             </head><body><p>hello</p></body></html>";
         let url = serve_once(html.to_owned(), "text/html; charset=utf-8");
-        let page = load_page(&url, false).expect("load local page");
+        let page = load_page_with_policy(&url, false, AddressPolicy::AllowLoopback)
+            .expect("load local page");
 
         // DocumentLoader fetched through the real transport; inline CSS and
         // scripts were extracted in document order.
@@ -1115,7 +1175,8 @@ mod tests {
             ),
             ("/pixel.png", png_bytes, "image/png"),
         ]);
-        let page = load_page(&url, false).expect("load page with image");
+        let page = load_page_with_policy(&url, false, AddressPolicy::AllowLoopback)
+            .expect("load page with image");
         assert_eq!(page.loaded.resources.len(), 1, "one image subresource loaded");
         assert_eq!(page.images.len(), 1, "<img> decoded to a painting image");
     }

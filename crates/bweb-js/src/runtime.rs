@@ -174,6 +174,10 @@ enum Flow {
 
 /// Global instruction budget per top-level evaluation or event callback.
 const INSTRUCTION_BUDGET: u64 = 10_000_000;
+/// Shared instruction budget for every script of one page (page load and event
+/// callbacks). It complements, rather than replaces, the per-evaluation and
+/// per-event budgets below.
+pub const PAGE_INSTRUCTION_BUDGET: u64 = 10_000_000;
 /// Smaller budget for interactive event handlers, which run directly on the
 /// window's event loop. Measured at roughly 5 ms in release builds (10M ticks
 /// take ~0.5 s), it keeps a handler within a frame's time slice.
@@ -191,6 +195,9 @@ pub struct Runtime {
     budget: u64,
     /// Current nested call depth.
     call_depth: usize,
+    /// Optional remaining instruction allowance shared by all evaluations and
+    /// event callbacks of the current page. `None` keeps the legacy behaviour.
+    page_budget: Option<u64>,
 }
 
 impl Default for Runtime {
@@ -235,6 +242,46 @@ impl Runtime {
             completion: Value::Undefined,
             budget: INSTRUCTION_BUDGET,
             call_depth: 0,
+            page_budget: None,
+        }
+    }
+
+    /// Enables a shared instruction budget for the current page. Each later
+    /// evaluation or event callback draws from it in addition to its own limit.
+    pub fn set_page_budget(&mut self, budget: u64) {
+        self.page_budget = Some(budget);
+    }
+
+    /// Removes the shared page budget, restoring independent per-evaluation
+    /// budgets.
+    pub fn clear_page_budget(&mut self) {
+        self.page_budget = None;
+    }
+
+    /// Returns the remaining shared page budget, if one is active.
+    #[must_use]
+    pub const fn page_budget_remaining(&self) -> Option<u64> {
+        self.page_budget
+    }
+
+    /// Reserves up to `limit` instructions from the shared page budget and
+    /// returns the granted amount. Unused instructions are released afterwards.
+    fn reserve_budget(&mut self, limit: u64) -> Result<u64, JsError> {
+        let Some(remaining) = self.page_budget else {
+            return Ok(limit);
+        };
+        if remaining == 0 {
+            return Err(JsError { message: "page instruction budget exhausted".into() });
+        }
+        let granted = remaining.min(limit);
+        self.page_budget = Some(remaining - granted);
+        Ok(granted)
+    }
+
+    /// Returns instructions left by a completed evaluation to the page budget.
+    fn release_budget(&mut self, granted: u64) {
+        if let Some(remaining) = &mut self.page_budget {
+            *remaining = remaining.saturating_add(self.budget.min(granted));
         }
     }
 
@@ -271,9 +318,12 @@ impl Runtime {
     pub fn eval(&mut self, source: &str) -> Result<Value, JsError> {
         let statements =
             crate::parser::parse(source).map_err(|error| JsError { message: error.message })?;
-        self.budget = INSTRUCTION_BUDGET;
+        let granted = self.reserve_budget(INSTRUCTION_BUDGET)?;
+        self.budget = granted;
         self.call_depth = 0;
-        self.run(&statements)
+        let result = self.run(&statements);
+        self.release_budget(granted);
+        result
     }
 
     fn exec_statements(&mut self, statements: &[Stmt], env: &mut Env) -> Result<Flow, JsError> {
@@ -562,9 +612,12 @@ impl Runtime {
         args: Vec<Value>,
         budget: u64,
     ) -> Result<Value, JsError> {
-        self.budget = budget;
+        let granted = self.reserve_budget(budget)?;
+        self.budget = granted;
         self.call_depth = 0;
-        self.call_value(callee, args)
+        let result = self.call_value(callee, args);
+        self.release_budget(granted);
+        result
     }
 
     fn call_value(&mut self, callee: Value, args: Vec<Value>) -> Result<Value, JsError> {

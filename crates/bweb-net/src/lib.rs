@@ -43,6 +43,10 @@ impl From<url::ParseError> for WebUrlError {
 pub enum NetworkPolicyError {
     InvalidUrl(WebUrlError),
     Shield(ShieldError),
+    /// The URL resolves to a local or internal address that the policy forbids.
+    ForbiddenAddress(String),
+    /// The hostname could not be resolved to any address.
+    Resolve(String),
 }
 
 impl fmt::Display for NetworkPolicyError {
@@ -50,6 +54,10 @@ impl fmt::Display for NetworkPolicyError {
         match self {
             Self::InvalidUrl(error) => write!(f, "network request rejected: {error}"),
             Self::Shield(error) => write!(f, "network request could not be checked: {error}"),
+            Self::ForbiddenAddress(address) => {
+                write!(f, "network request to local or internal address rejected: {address}")
+            }
+            Self::Resolve(host) => write!(f, "could not resolve network host: {host}"),
         }
     }
 }
@@ -59,6 +67,7 @@ impl Error for NetworkPolicyError {
         match self {
             Self::InvalidUrl(error) => Some(error),
             Self::Shield(error) => Some(error),
+            Self::ForbiddenAddress(_) | Self::Resolve(_) => None,
         }
     }
 }
@@ -84,16 +93,80 @@ pub fn parse_web_url(input: &str) -> Result<Url, WebUrlError> {
     }
 }
 
+/// A hostname together with the addresses pinned for one request.
+pub type ResolvedHost = (String, Vec<SocketAddr>);
+
+/// How a policy treats addresses that are not globally routable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddressPolicy {
+    /// Reject loopback, private, link-local and similar internal addresses.
+    /// This is the safe default for pages loaded from the web.
+    DenyLocal,
+    /// Permit loopback only, still rejecting private and link-local networks.
+    /// Useful for local development and the test suite.
+    AllowLoopback,
+    /// Permit all addresses, including private networks. Use only for explicit
+    /// local-network operation.
+    AllowLocal,
+}
+
 /// Shield-backed policy that must authorize each outgoing web request.
 pub struct NetworkPolicy {
     shield: Shield,
+    address_policy: AddressPolicy,
 }
 
 impl NetworkPolicy {
-    /// Creates a policy using the supplied compiled filter engine.
+    /// Creates a policy using the supplied compiled filter engine and the safe
+    /// address policy that denies local and internal destinations.
     #[must_use]
     pub fn new(shield: Shield) -> Self {
-        Self { shield }
+        Self::with_address_policy(shield, AddressPolicy::DenyLocal)
+    }
+
+    /// Creates a policy with an explicit local-address policy.
+    #[must_use]
+    pub const fn with_address_policy(shield: Shield, address_policy: AddressPolicy) -> Self {
+        Self { shield, address_policy }
+    }
+
+    /// Returns the configured address policy.
+    #[must_use]
+    pub const fn address_policy(&self) -> AddressPolicy {
+        self.address_policy
+    }
+
+    /// Validates the destination address and, for hostnames, resolves it.
+    /// The resolved addresses are returned so the transport can pin them and
+    /// avoid a second DNS lookup (which could be a rebinding attempt).
+    pub fn validate_and_resolve(
+        &self,
+        url: &Url,
+    ) -> Result<Option<ResolvedHost>, NetworkPolicyError> {
+        let host = url.host_str().ok_or_else(|| {
+            NetworkPolicyError::InvalidUrl(WebUrlError::UnsupportedScheme("missing host".into()))
+        })?;
+        // `Url::host_str()` keeps the brackets of IPv6 literals.
+        let host = host.trim_start_matches('[').trim_end_matches(']');
+        if let Ok(ip) = host.parse::<IpAddr>() {
+            if address_forbidden(ip, self.address_policy) {
+                return Err(NetworkPolicyError::ForbiddenAddress(host.to_owned()));
+            }
+            return Ok(None);
+        }
+
+        let mut addresses: Vec<SocketAddr> = (host, 0)
+            .to_socket_addrs()
+            .map_err(|error| NetworkPolicyError::Resolve(format!("{host}: {error}")))?
+            .collect();
+        if addresses.is_empty() {
+            return Err(NetworkPolicyError::Resolve(host.to_owned()));
+        }
+        addresses.dedup();
+        if addresses.iter().any(|address| address_forbidden(address.ip(), self.address_policy)) {
+            return Err(NetworkPolicyError::ForbiddenAddress(host.to_owned()));
+        }
+        Ok(Some((host.to_owned(), addresses)))
     }
 
     /// Checks a resource URL against Shield when the caller already validated URLs.
@@ -107,6 +180,30 @@ impl NetworkPolicy {
         self.shield.check(resource_url, page_url, resource_type, method)
     }
 
+    /// Validates both URLs, checks Shield and resolves/validates the destination
+    /// address in one pass, returning the addresses to pin for the request.
+    pub fn authorize_and_resolve(
+        &self,
+        resource_url: &str,
+        page_url: &str,
+        resource_type: ResourceType,
+        method: &str,
+    ) -> Result<(Decision, Option<ResolvedHost>), NetworkPolicyError> {
+        let resource_url = parse_web_url(resource_url)?;
+        let page_url = parse_web_url(page_url)?;
+
+        // Shield runs first so blocked URLs never incur a DNS lookup.
+        let decision = self
+            .authorize(resource_url.as_str(), page_url.as_str(), resource_type, method)
+            .map_err(NetworkPolicyError::from)?;
+        // A blocked request must never incur a DNS lookup.
+        if matches!(decision, Decision::Block) {
+            return Ok((decision, None));
+        }
+        let resolved = self.validate_and_resolve(&resource_url)?;
+        Ok((decision, resolved))
+    }
+
     /// Validates both URLs and checks the request against Shield.
     pub fn authorize_web_request(
         &self,
@@ -115,11 +212,52 @@ impl NetworkPolicy {
         resource_type: ResourceType,
         method: &str,
     ) -> Result<Decision, NetworkPolicyError> {
-        let resource_url = parse_web_url(resource_url)?;
-        let page_url = parse_web_url(page_url)?;
+        self.authorize_and_resolve(resource_url, page_url, resource_type, method)
+            .map(|(decision, _)| decision)
+    }
+}
 
-        self.authorize(resource_url.as_str(), page_url.as_str(), resource_type, method)
-            .map_err(NetworkPolicyError::from)
+/// True when `ip` must not be contacted under the given policy. IPv4-mapped
+/// IPv6 addresses are reduced to IPv4 so loopback/private forms cannot slip
+/// through the IPv6 spelling.
+fn address_forbidden(ip: IpAddr, policy: AddressPolicy) -> bool {
+    match ip {
+        IpAddr::V4(address) => {
+            let octets = address.octets();
+            if address.is_unspecified() || address.is_multicast() || octets[0] >= 240 {
+                return true;
+            }
+            let private = octets[0] == 10
+                || (octets[0] == 172 && (16..=31).contains(&octets[1]))
+                || (octets[0] == 192 && octets[1] == 168);
+            // 100.64/10 (carrier-grade NAT) and 169.254/16 (link-local, which
+            // includes the cloud metadata endpoint) are internal as well.
+            let internal = private
+                || address.is_link_local()
+                || (octets[0] == 100 && (64..=127).contains(&octets[1]));
+            match policy {
+                AddressPolicy::AllowLocal => false,
+                AddressPolicy::AllowLoopback => !address.is_loopback(),
+                AddressPolicy::DenyLocal => address.is_loopback() || internal,
+            }
+        }
+        IpAddr::V6(address) => {
+            // IPv4-mapped addresses must follow the IPv4 rules.
+            if let Some(mapped) = address.to_ipv4_mapped() {
+                return address_forbidden(IpAddr::V4(mapped), policy);
+            }
+            if address.is_unspecified() || address.is_multicast() {
+                return true;
+            }
+            let first = address.segments()[0];
+            // fc00::/7 unique-local and fe80::/10 link-local.
+            let internal = (first & 0xfe00) == 0xfc00 || (first & 0xffc0) == 0xfe80;
+            match policy {
+                AddressPolicy::AllowLocal => false,
+                AddressPolicy::AllowLoopback => !address.is_loopback(),
+                AddressPolicy::DenyLocal => address.is_loopback() || internal,
+            }
+        }
     }
 }
 
@@ -132,7 +270,12 @@ use reqwest::{
     },
     redirect::Policy,
 };
-use std::{error::Error, fmt, time::Duration};
+use std::{
+    error::Error,
+    fmt,
+    net::{IpAddr, SocketAddr, ToSocketAddrs},
+    time::Duration,
+};
 use url::Url;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -202,19 +345,26 @@ pub struct HttpTransport {
     policy: NetworkPolicy,
 }
 
+/// Builds the guarded client, optionally pinning a hostname to the addresses
+/// already validated by the policy so DNS cannot be resolved a second time.
+fn build_client(resolved: Option<(&str, &[SocketAddr])>) -> Result<Client, reqwest::Error> {
+    let mut builder = Client::builder()
+        .https_only(false)
+        .connect_timeout(CONNECT_TIMEOUT)
+        .timeout(REQUEST_TIMEOUT)
+        .redirect(Policy::none());
+    if let Some((host, addresses)) = resolved {
+        builder = builder.resolve_to_addrs(host, addresses);
+    }
+    builder.build()
+}
+
 impl HttpTransport {
     /// Creates a rustls-backed client and takes ownership of its network policy.
     ///
     /// Automatic redirects, which could bypass per-hop filtering, are disabled.
     pub fn new(policy: NetworkPolicy) -> Result<Self, HttpTransportError> {
-        let client = Client::builder()
-            .https_only(false)
-            .connect_timeout(CONNECT_TIMEOUT)
-            .timeout(REQUEST_TIMEOUT)
-            .redirect(Policy::none())
-            .build()?;
-
-        Ok(Self { client, policy })
+        Ok(Self { client: build_client(None)?, policy })
     }
 
     /// Executes an HTTP(S) request only after a Shield check.
@@ -245,12 +395,32 @@ impl HttpTransport {
         let mut body = body;
 
         for redirect_count in 0..=MAX_REDIRECTS {
-            self.authorize(&current_url, &page_url, resource_type, &method)?;
+            // One pass checks Shield, validates the address and returns the
+            // resolved addresses, so the same result is pinned for the request.
+            let (decision, resolved) = self
+                .policy
+                .authorize_and_resolve(
+                    current_url.as_str(),
+                    page_url.as_str(),
+                    resource_type,
+                    method.as_str(),
+                )
+                .map_err(HttpTransportError::Policy)?;
+            if matches!(decision, Decision::Block) {
+                return Err(HttpTransportError::Blocked { url: current_url.to_string() });
+            }
+            let pinned_client = match &resolved {
+                Some((host, addresses)) => Some(build_client(Some((host, addresses)))?),
+                None => None,
+            };
 
             // Apply the mandatory privacy signals after caller-provided values.
             let request_headers = with_privacy_headers(headers.clone());
-            let mut request =
-                self.client.request(method.clone(), current_url.clone()).headers(request_headers);
+            let mut request = pinned_client
+                .as_ref()
+                .unwrap_or(&self.client)
+                .request(method.clone(), current_url.clone())
+                .headers(request_headers);
 
             if let Some(request_body) = body.as_ref() {
                 request = request.body(request_body.clone());
@@ -296,24 +466,6 @@ impl HttpTransport {
 
         Err(HttpTransportError::TooManyRedirects { limit: MAX_REDIRECTS })
     }
-
-    fn authorize(
-        &self,
-        resource_url: &Url,
-        page_url: &Url,
-        resource_type: ResourceType,
-        method: &Method,
-    ) -> Result<(), HttpTransportError> {
-        match self.policy.authorize_web_request(
-            resource_url.as_str(),
-            page_url.as_str(),
-            resource_type,
-            method.as_str(),
-        )? {
-            Decision::Allow => Ok(()),
-            Decision::Block => Err(HttpTransportError::Blocked { url: resource_url.to_string() }),
-        }
-    }
 }
 
 fn with_privacy_headers(mut headers: HeaderMap) -> HeaderMap {
@@ -344,7 +496,7 @@ mod tests {
     use super::{
         HttpTransport, HttpTransportError, is_redirect, should_switch_to_get, with_privacy_headers,
     };
-    use crate::NetworkPolicy;
+    use crate::{AddressPolicy, NetworkPolicy, NetworkPolicyError, parse_web_url};
     use bweb_shield::{ResourceType, Shield};
     use reqwest::{
         Method, StatusCode,
@@ -416,8 +568,11 @@ mod tests {
                 .expect("write response");
         });
 
-        let transport =
-            HttpTransport::new(NetworkPolicy::new(Shield::empty())).expect("rustls HTTP client");
+        let transport = HttpTransport::new(NetworkPolicy::with_address_policy(
+            Shield::empty(),
+            AddressPolicy::AllowLoopback,
+        ))
+        .expect("rustls HTTP client");
         let response = transport
             .execute(
                 "GET",
@@ -449,7 +604,10 @@ mod tests {
             ).expect("write redirect");
         });
 
-        let policy = NetworkPolicy::new(Shield::from_rules(["||ads.example^"]));
+        let policy = NetworkPolicy::with_address_policy(
+            Shield::from_rules(["||ads.example^"]),
+            AddressPolicy::AllowLoopback,
+        );
         let transport = HttpTransport::new(policy).expect("rustls HTTP client");
         let error = transport
             .execute(
@@ -462,6 +620,96 @@ mod tests {
             )
             .expect_err("redirect destination must be blocked");
         assert!(matches!(error, HttpTransportError::Blocked { .. }));
+        server.join().expect("server thread");
+    }
+
+    #[test]
+    fn local_and_internal_addresses_are_rejected_by_default() {
+        let policy = NetworkPolicy::new(Shield::empty());
+        for url in [
+            "http://127.0.0.1/",
+            "http://127.1.2.3/",
+            "http://10.0.0.1/",
+            "http://172.16.0.1/",
+            "http://192.168.1.1/",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://[::1]/",
+            "http://[::ffff:127.0.0.1]/",
+            "http://[fd00::1]/",
+            "http://[fe80::1]/",
+        ] {
+            let parsed = parse_web_url(url).expect("valid URL");
+            let error = match policy.validate_and_resolve(&parsed) {
+                Err(error) => error,
+                Ok(_) => panic!("{url} must be rejected"),
+            };
+            assert!(
+                matches!(error, NetworkPolicyError::ForbiddenAddress(_)),
+                "{url} was rejected for the wrong reason: {error}"
+            );
+        }
+        // A hostname resolving to loopback must not slip through either.
+        let localhost = parse_web_url("http://localhost/").expect("URL");
+        assert!(matches!(
+            policy.validate_and_resolve(&localhost),
+            Err(NetworkPolicyError::ForbiddenAddress(_))
+        ));
+    }
+
+    #[test]
+    fn address_policy_can_allow_loopback_without_allowing_private_networks() {
+        let policy =
+            NetworkPolicy::with_address_policy(Shield::empty(), AddressPolicy::AllowLoopback);
+        let loopback = parse_web_url("http://127.0.0.1/").expect("URL");
+        assert!(policy.validate_and_resolve(&loopback).expect("loopback allowed").is_none());
+
+        for url in ["http://10.0.0.1/", "http://169.254.169.254/"] {
+            let parsed = parse_web_url(url).expect("URL");
+            assert!(matches!(
+                policy.validate_and_resolve(&parsed),
+                Err(NetworkPolicyError::ForbiddenAddress(_))
+            ));
+        }
+
+        let permissive =
+            NetworkPolicy::with_address_policy(Shield::empty(), AddressPolicy::AllowLocal);
+        let private = parse_web_url("http://10.0.0.1/").expect("URL");
+        assert!(permissive.validate_and_resolve(&private).expect("explicit opt-in").is_none());
+    }
+
+    #[test]
+    fn redirect_to_an_internal_address_is_rejected_before_connecting() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local server");
+        let address = listener.local_addr().expect("address");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut request = [0_u8; 2048];
+            let _ = stream.read(&mut request);
+            stream
+                .write_all(b"HTTP/1.1 302 Found\r\nLocation: http://169.254.169.254/latest/meta-data/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .expect("write redirect");
+        });
+        let policy =
+            NetworkPolicy::with_address_policy(Shield::empty(), AddressPolicy::AllowLoopback);
+        let transport = HttpTransport::new(policy).expect("client");
+        let error = transport
+            .execute(
+                "GET",
+                &format!("http://{address}/redirect"),
+                "https://example.test/",
+                ResourceType::Image,
+                HeaderMap::new(),
+                None,
+            )
+            .expect_err("internal redirect must be rejected");
+        assert!(
+            matches!(error, HttpTransportError::Policy(NetworkPolicyError::ForbiddenAddress(_))),
+            "unexpected error: {error:?}"
+        );
         server.join().expect("server thread");
     }
 }

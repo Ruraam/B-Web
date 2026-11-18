@@ -12,7 +12,7 @@ mod runtime;
 pub use ast::{BinaryOp, Expr, LogicalOp, Stmt, UnaryOp, VarKind};
 pub use lexer::{LexError, Token, TokenKind, tokenize};
 pub use parser::{ParseError, parse};
-pub use runtime::{Env, Host, JsError, NativeFn, Object, Runtime, Value};
+pub use runtime::{Env, Host, JsError, NativeFn, Object, PAGE_INSTRUCTION_BUDGET, Runtime, Value};
 
 /// Explicit status of the JavaScript runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -165,6 +165,46 @@ mod tests {
             "work exceeds the interactive budget"
         );
         assert_eq!(runtime.call(work, vec![]).expect("full budget").display(), "50000");
+    }
+
+    #[test]
+    fn page_budget_is_shared_between_evaluations() {
+        let mut runtime = Runtime::new();
+        runtime.set_page_budget(100);
+        let mut failed = None;
+        for _ in 0..200 {
+            if let Err(error) = runtime.eval("1 + 1") {
+                failed = Some(error.message);
+                break;
+            }
+        }
+        let message = failed.expect("the shared budget must eventually be exhausted");
+        assert!(message.contains("page instruction budget"), "unexpected error: {message}");
+        assert_eq!(runtime.page_budget_remaining(), Some(0));
+
+        // Clearing the page budget restores independent per-evaluation budgets.
+        runtime.clear_page_budget();
+        assert_eq!(runtime.page_budget_remaining(), None);
+        assert_eq!(runtime.eval("1 + 1").expect("eval").display(), "2");
+    }
+
+    #[test]
+    fn page_budget_caps_event_callbacks() {
+        let mut runtime = Runtime::new();
+        runtime.eval("function spin() { while (true) { } }").expect("define handler");
+        let spin = runtime.eval("spin").expect("handler");
+        runtime.set_page_budget(500);
+        let error =
+            runtime.call_event(spin, vec![]).expect_err("page budget must stop the handler");
+        assert!(error.message.contains("budget"), "unexpected error: {}", error.message);
+        assert_eq!(runtime.page_budget_remaining(), Some(0));
+    }
+
+    #[test]
+    fn oversized_scripts_are_rejected_during_parsing() {
+        let source = format!("let x = {};", "1+".repeat(200_001));
+        let error = Runtime::new().eval(&source).expect_err("token limit");
+        assert!(error.message.contains("token count"), "unexpected error: {}", error.message);
     }
 
     #[test]
