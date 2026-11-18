@@ -537,12 +537,12 @@ mod tests {
             _object: &str,
             _property: &str,
             reserve: &mut dyn FnMut(usize) -> bool,
-        ) -> Option<Value> {
+        ) -> Result<Option<Value>, JsError> {
             if !reserve(100 + 24) {
-                return Some(Value::Undefined);
+                return Ok(Some(Value::Undefined));
             }
             self.note();
-            Some(Value::String("x".repeat(100)))
+            Ok(Some(Value::String("x".repeat(100))))
         }
     }
 

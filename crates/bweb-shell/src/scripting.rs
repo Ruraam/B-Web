@@ -6,7 +6,7 @@ use std::{
     rc::{Rc, Weak},
 };
 
-use bweb_html::HtmlDocument;
+use bweb_html::{DomReadError, HtmlDocument};
 use bweb_js::{Host, JsError, MAX_ARRAY_LENGTH, MAX_STRING_BYTES, Object, Value};
 
 /// Converts a host argument to text after checking the single-string limit.
@@ -14,6 +14,22 @@ use bweb_js::{Host, JsError, MAX_ARRAY_LENGTH, MAX_STRING_BYTES, Object, Value};
 /// bridge is invoked; this check prevents an unbounded allocation here.
 fn host_display(value: &Value) -> Result<String, JsError> {
     value.display_limited(MAX_STRING_BYTES)
+}
+
+fn finish_budgeted_read(
+    work_cell: &Rc<Cell<usize>>,
+    remaining: usize,
+    outcome: Result<Option<String>, DomReadError>,
+    reserve: &mut dyn FnMut(usize) -> bool,
+) -> Result<String, JsError> {
+    work_cell.set(remaining);
+    match outcome {
+        Ok(Some(text)) if reserve(text.len() + HOST_STRING_OVERHEAD) => Ok(text),
+        Ok(Some(_)) | Ok(None) | Err(DomReadError::TooLarge) => Ok(String::new()),
+        Err(DomReadError::BudgetExhausted) => {
+            Err(JsError { message: "DOM work budget exhausted".into() })
+        }
+    }
 }
 
 #[derive(Default)]
@@ -240,53 +256,32 @@ impl Host for DomHost {
         object: &str,
         property: &str,
         reserve: &mut dyn FnMut(usize) -> bool,
-    ) -> Option<Value> {
-        let Some(document) = self.document.upgrade() else { return Some(Value::Undefined) };
+    ) -> Result<Option<Value>, JsError> {
+        let Some(document) = self.document.upgrade() else { return Ok(Some(Value::Undefined)) };
         let document = document.borrow();
         if object == "document" && property == "title" {
-            // A title lookup may scan the whole arena; charge the shared work
-            // budget for that scan before materialising the text.
             let mut work = self.work.get();
-            if work == 0 {
-                return Some(Value::String(String::new()));
-            }
-            work = work.saturating_sub(document.node_count());
-            self.work.set(work);
-            let length = document.title_len();
-            if length > MAX_STRING_BYTES || !reserve(length + HOST_STRING_OVERHEAD) {
-                return Some(Value::String(String::new()));
-            }
-            return Some(Value::String(
-                document.title_bounded(MAX_STRING_BYTES).unwrap_or_default(),
-            ));
+            let outcome = document.title_budgeted(MAX_STRING_BYTES, &mut work);
+            let title = finish_budgeted_read(&self.work, work, outcome, reserve)?;
+            return Ok(Some(Value::String(title)));
         }
         if let Some(index) = handle_index(object, "element:") {
-            let Some(id) = document.node_at(index) else { return Some(Value::Undefined) };
+            let Some(id) = document.node_at(index) else { return Ok(Some(Value::Undefined)) };
             match property {
                 "textContent" => {
                     let mut work = self.work.get();
-                    let Some(length) =
-                        document.text_content_len_budgeted(id, MAX_STRING_BYTES, &mut work)
-                    else {
-                        self.work.set(work);
-                        return Some(Value::String(String::new()));
-                    };
-                    self.work.set(work);
-                    if !reserve(length + HOST_STRING_OVERHEAD) {
-                        return Some(Value::String(String::new()));
-                    }
-                    return Some(Value::String(
-                        document.text_content_bounded(id, MAX_STRING_BYTES).unwrap_or_default(),
-                    ));
+                    let outcome = document.text_content_budgeted(id, MAX_STRING_BYTES, &mut work);
+                    let text = finish_budgeted_read(&self.work, work, outcome.map(Some), reserve)?;
+                    return Ok(Some(Value::String(text)));
                 }
                 "id" | "class" | "href" | "src" => {
                     let value = document.attribute(id, property).unwrap_or("");
                     if value.len() > MAX_STRING_BYTES
                         || !reserve(value.len() + HOST_STRING_OVERHEAD)
                     {
-                        return Some(Value::Undefined);
+                        return Ok(Some(Value::Undefined));
                     }
-                    return Some(Value::String(value.to_owned()));
+                    return Ok(Some(Value::String(value.to_owned())));
                 }
                 _ => {}
             }
@@ -298,13 +293,13 @@ impl Host for DomHost {
                     if value.len() > MAX_STRING_BYTES
                         || !reserve(value.len() + HOST_STRING_OVERHEAD)
                     {
-                        return Some(Value::Undefined);
+                        return Ok(Some(Value::Undefined));
                     }
-                    return Some(Value::String(value.to_owned()));
+                    return Ok(Some(Value::String(value.to_owned())));
                 }
             }
         }
-        None
+        Ok(None)
     }
 
     fn set(&mut self, object: &str, property: &str, value: Value) -> Result<(), JsError> {
@@ -897,33 +892,67 @@ mod tests {
 
     #[test]
     fn title_and_text_content_reads_consume_dom_work() {
+        // Measure the exact work a title read costs with a generous allowance.
         let document = Rc::new(RefCell::new(HtmlDocument::parse("<title>hello</title>")));
         let events = Rc::new(RefCell::new(EventRegistry::default()));
         let host = DomHost::new(&document, events);
-        host.set_work_budget(3);
+        host.set_work_budget(1000);
         let work = host.work_cell();
         let mut runtime = Runtime::new();
         runtime.set_host(Box::new(host));
         runtime.define_global("document", Value::Host("document".into()));
         assert_eq!(runtime.eval("document.title").expect("title").display(), "hello");
-        let after_title = work.get();
-        assert!(after_title < 3, "the title search must consume DOM work");
-        assert_eq!(runtime.eval("document.title").expect("title again").display(), "");
-        assert_eq!(work.get(), 0);
+        let title_cost = 1000 - work.get();
+        assert!(title_cost > 0, "the title traversal must consume DOM work");
+        assert_eq!(work.get(), 1000 - title_cost);
 
-        let document = Rc::new(RefCell::new(HtmlDocument::parse("<p id='x'>text</p>")));
-        let events = Rc::new(RefCell::new(EventRegistry::default()));
-        let host = DomHost::new(&document, events);
-        host.set_work_budget(5);
+        // Exactly enough work still succeeds; one unit less is an explicit
+        // error, and the runtime remains usable afterwards.
+        let host = DomHost::new(&document, Rc::new(RefCell::new(EventRegistry::default())));
+        host.set_work_budget(title_cost);
         let work = host.work_cell();
         let mut runtime = Runtime::new();
         runtime.set_host(Box::new(host));
         runtime.define_global("document", Value::Host("document".into()));
-        let empty = runtime
-            .eval("document.getElementById('x').textContent")
-            .expect("textContent must stop when the work budget is gone");
-        assert_eq!(empty.display(), "");
+        assert_eq!(runtime.eval("document.title").expect("exact budget").display(), "hello");
         assert_eq!(work.get(), 0);
+
+        let host = DomHost::new(&document, Rc::new(RefCell::new(EventRegistry::default())));
+        host.set_work_budget(title_cost - 1);
+        let mut runtime = Runtime::new();
+        runtime.set_host(Box::new(host));
+        runtime.define_global("document", Value::Host("document".into()));
+        let error = runtime.eval("document.title").expect_err("insufficient budget");
+        assert!(error.message.contains("DOM work budget"), "unexpected error: {}", error.message);
+        assert_eq!(runtime.eval("1 + 1").expect("runtime still usable").display(), "2");
+
+        // The same single-pass accounting applies to textContent.
+        let document = Rc::new(RefCell::new(HtmlDocument::parse("<p id='x'>text</p>")));
+        let host = DomHost::new(&document, Rc::new(RefCell::new(EventRegistry::default())));
+        host.set_work_budget(1000);
+        let work = host.work_cell();
+        let mut runtime = Runtime::new();
+        runtime.set_host(Box::new(host));
+        runtime.define_global("document", Value::Host("document".into()));
+        assert_eq!(
+            runtime
+                .eval("document.getElementById('x').textContent")
+                .expect("textContent")
+                .display(),
+            "text"
+        );
+        assert!(work.get() < 1000, "the text walk must consume DOM work");
+
+        let host = DomHost::new(&document, Rc::new(RefCell::new(EventRegistry::default())));
+        host.set_work_budget(5);
+        let mut runtime = Runtime::new();
+        runtime.set_host(Box::new(host));
+        runtime.define_global("document", Value::Host("document".into()));
+        let error = runtime
+            .eval("document.getElementById('x').textContent")
+            .expect_err("textContent must report exhaustion instead of a partial value");
+        assert!(error.message.contains("DOM work budget"), "unexpected error: {}", error.message);
+        assert_eq!(runtime.eval("1 + 1").expect("runtime still usable").display(), "2");
     }
 
     #[test]

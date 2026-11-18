@@ -41,6 +41,15 @@ const MAX_TOTAL_RESOURCES: usize = 256;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QueryBudgetExhausted;
 
+/// Reason a budgeted DOM read could not be completed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DomReadError {
+    /// The shared DOM work allowance ran out during the traversal.
+    BudgetExhausted,
+    /// The collected text would exceed the per-value byte limit.
+    TooLarge,
+}
+
 /// Stable index into a document's node arena.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct NodeId(usize);
@@ -219,18 +228,25 @@ impl HtmlDocument {
         (!title.is_empty()).then_some(title)
     }
 
-    /// Budgeted title lookup: the search for the title element and the text
-    /// length check both consume `work`.
-    #[must_use]
-    pub fn title_budgeted(&self, max_bytes: usize, work: &mut usize) -> Option<String> {
+    /// Budgeted title lookup in a single traversal: finding the title element
+    /// and collecting its text both consume the same work allowance, and the
+    /// text is built during that walk rather than measured and re-read.
+    pub fn title_budgeted(
+        &self,
+        max_bytes: usize,
+        work: &mut usize,
+    ) -> Result<Option<String>, DomReadError> {
         if let Some(title) = &self.title_override {
             let title = title.trim();
-            return (!title.is_empty() && title.len() <= max_bytes).then(|| title.to_owned());
+            if title.len() > max_bytes {
+                return Err(DomReadError::TooLarge);
+            }
+            return Ok((!title.is_empty()).then(|| title.to_owned()));
         }
         let mut id = None;
         for (index, node) in self.nodes.iter().enumerate() {
             if *work == 0 {
-                return None;
+                return Err(DomReadError::BudgetExhausted);
             }
             *work -= 1;
             if matches!(&node.kind, NodeKind::Element { tag_name, .. } if tag_name == "title") {
@@ -238,9 +254,12 @@ impl HtmlDocument {
                 break;
             }
         }
-        let text = self.text_content_budgeted(id?, max_bytes, work)?;
+        let Some(id) = id else {
+            return Ok(None);
+        };
+        let text = self.collect_text_budgeted(id, max_bytes, work)?;
         let title = text.trim().to_owned();
-        (!title.is_empty()).then_some(title)
+        Ok((!title.is_empty()).then_some(title))
     }
 
     /// Returns the first `<base href>` value, used to resolve relative URLs.
@@ -404,20 +423,54 @@ impl HtmlDocument {
         Some(text)
     }
 
-    /// Budgeted text read. The length walk stops as soon as `max_bytes` is
-    /// exceeded or the shared work allowance runs out, before the result string
-    /// is built.
-    #[must_use]
+    /// Budgeted text read in a single bounded traversal. The string is built
+    /// as nodes are visited; the walk stops immediately when the work allowance
+    /// runs out or the byte limit is exceeded, so a partial result is never
+    /// returned.
     pub fn text_content_budgeted(
         &self,
         id: NodeId,
         max_bytes: usize,
         work: &mut usize,
-    ) -> Option<String> {
-        self.text_content_len_budgeted(id, max_bytes, work)?;
+    ) -> Result<String, DomReadError> {
+        self.collect_text_budgeted(id, max_bytes, work)
+    }
+
+    fn collect_text_budgeted(
+        &self,
+        id: NodeId,
+        max_bytes: usize,
+        work: &mut usize,
+    ) -> Result<String, DomReadError> {
         let mut text = String::new();
-        self.collect_text(id, &mut text);
-        Some(text)
+        self.collect_text_inner_budgeted(id, max_bytes, work, &mut text)?;
+        Ok(text)
+    }
+
+    fn collect_text_inner_budgeted(
+        &self,
+        id: NodeId,
+        max_bytes: usize,
+        work: &mut usize,
+        output: &mut String,
+    ) -> Result<(), DomReadError> {
+        if *work == 0 {
+            return Err(DomReadError::BudgetExhausted);
+        }
+        *work -= 1;
+        let Some(node) = self.node(id) else {
+            return Ok(());
+        };
+        if let NodeKind::Text(text) = &node.kind {
+            if output.len().saturating_add(text.len()) > max_bytes {
+                return Err(DomReadError::TooLarge);
+            }
+            output.push_str(text);
+        }
+        for child in &node.children {
+            self.collect_text_inner_budgeted(*child, max_bytes, work, output)?;
+        }
+        Ok(())
     }
 
     /// Replaces all children of a node with a single text node.
@@ -2429,8 +2482,8 @@ fn read_bounded(reader: impl Read, limit: usize) -> Result<Vec<u8>, BoundedReadE
 #[cfg(test)]
 mod tests {
     use super::{
-        HtmlDocument, MAX_DOM_DEPTH, MAX_DYNAMIC_NODES, MAX_PARSED_NODES, MAX_STACK_DEPTH, NodeId,
-        NodeKind, QueryBudgetExhausted, ResourceKind, extract_css_urls,
+        DomReadError, HtmlDocument, MAX_DOM_DEPTH, MAX_DYNAMIC_NODES, MAX_PARSED_NODES,
+        MAX_STACK_DEPTH, NodeId, NodeKind, QueryBudgetExhausted, ResourceKind, extract_css_urls,
     };
 
     #[test]
@@ -2645,6 +2698,27 @@ mod tests {
         dom.set_text_content(id, &"x".repeat(4096));
         let mut work = usize::MAX;
         assert_eq!(dom.text_content_len_budgeted(id, 8, &mut work), None);
+    }
+
+    #[test]
+    fn budgeted_text_collection_is_single_pass_and_bounded() {
+        let document = HtmlDocument::parse("<p></p>");
+        let id = document.query_selector("p").expect("paragraph");
+        let mut dom = document.clone();
+        dom.set_text_content(id, &"x".repeat(4096));
+
+        let mut work = 100;
+        assert_eq!(dom.text_content_budgeted(id, 8, &mut work), Err(DomReadError::TooLarge));
+
+        let mut work = 1;
+        assert_eq!(
+            dom.text_content_budgeted(id, 8192, &mut work),
+            Err(DomReadError::BudgetExhausted)
+        );
+        assert_eq!(work, 0);
+
+        let mut work = 2;
+        assert_eq!(dom.text_content_budgeted(id, 8192, &mut work), Ok("x".repeat(4096)));
     }
 
     #[test]

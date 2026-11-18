@@ -204,8 +204,8 @@ pub trait Host {
         _object: &str,
         _property: &str,
         _reserve: &mut dyn FnMut(usize) -> bool,
-    ) -> Option<Value> {
-        None
+    ) -> Result<Option<Value>, JsError> {
+        Ok(None)
     }
 
     fn set(&mut self, _object: &str, _property: &str, _value: Value) -> Result<(), JsError> {
@@ -1018,17 +1018,19 @@ impl Runtime {
                     Some(host) => host.get_with_budget(name, property, &mut |bytes| {
                         self.charge_memory(bytes).is_ok()
                     }),
-                    None => None,
+                    None => Ok(None),
                 };
-                let result = if let Some(value) = budgeted {
-                    Ok(value)
-                } else {
-                    let value =
-                        host.as_ref().map_or(Value::Undefined, |host| host.get(name, property));
-                    match self.charge_host_value(&value) {
-                        Ok(()) => Ok(value),
-                        Err(error) => Err(error),
+                let result = match budgeted {
+                    Ok(Some(value)) => Ok(value),
+                    Ok(None) => {
+                        let value =
+                            host.as_ref().map_or(Value::Undefined, |host| host.get(name, property));
+                        match self.charge_host_value(&value) {
+                            Ok(()) => Ok(value),
+                            Err(error) => Err(error),
+                        }
                     }
+                    Err(error) => Err(error),
                 };
                 self.host = host;
                 result
