@@ -2,7 +2,7 @@
 
 use std::{
     cell::{Cell, RefCell},
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     rc::Rc,
 };
 
@@ -484,7 +484,7 @@ impl Runtime {
     /// objects are untrusted here: their array lengths, property counts and
     /// nested objects are validated with the same limits as script values.
     fn charge_host_value(&mut self, value: &Value) -> Result<(), JsError> {
-        let mut visited = Vec::new();
+        let mut visited = HashSet::new();
         self.charge_host_value_inner(value, 0, &mut visited)
     }
 
@@ -492,7 +492,7 @@ impl Runtime {
         &mut self,
         value: &Value,
         depth: usize,
-        visited: &mut Vec<*const RefCell<Object>>,
+        visited: &mut HashSet<*const RefCell<Object>>,
     ) -> Result<(), JsError> {
         match value {
             Value::String(text) => self.charge_string(text),
@@ -504,10 +504,9 @@ impl Runtime {
                 let pointer = Rc::as_ptr(object);
                 // A cycle or a shared object has already been charged at its
                 // first occurrence; do not bill it again or recurse forever.
-                if visited.contains(&pointer) {
+                if !visited.insert(pointer) {
                     return Ok(());
                 }
-                visited.push(pointer);
                 {
                     let object = object.borrow();
                     if object.is_array {
@@ -551,17 +550,14 @@ impl Runtime {
                     }
                     self.charge_memory(cost)?;
                 }
-                // Recurse after dropping the parent borrow. Cycle detection
-                // above prevents re-entering an object already on the path.
-                let nested: Vec<Value> = object
-                    .borrow()
-                    .properties
-                    .values()
-                    .filter(|value| matches!(value, Value::Object(_)))
-                    .cloned()
-                    .collect();
-                for value in nested {
-                    self.charge_host_value_inner(&value, depth + 1, visited)?;
+                // Cycle detection above prevents re-entering an object already
+                // charged, so the parent's borrow can stay alive here. Iterating
+                // in place avoids building a temporary clone of every nested
+                // value.
+                for value in object.borrow().properties.values() {
+                    if matches!(value, Value::Object(_)) {
+                        self.charge_host_value_inner(value, depth + 1, visited)?;
+                    }
                 }
                 Ok(())
             }
@@ -696,6 +692,12 @@ impl Runtime {
         } else {
             crate::parser::parse(source).map_err(|error| JsError { message: error.message })?
         };
+        // The parser allocates the initial AST before execution; charge it so
+        // a page cannot escape the memory budget by parsing many scripts.
+        let ast_cost = statements
+            .iter()
+            .fold(0usize, |cost, statement| cost.saturating_add(stmt_ast_cost(statement)));
+        self.charge_memory(ast_cost)?;
         let granted = self.reserve_budget(INSTRUCTION_BUDGET)?;
         self.budget = granted;
         self.call_depth = 0;

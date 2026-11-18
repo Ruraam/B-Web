@@ -162,20 +162,42 @@ impl HtmlDocument {
         self.nodes.len()
     }
 
+    /// Returns whether a node is attached to the document tree. Detached nodes
+    /// created by scripts must not participate in document queries.
+    #[must_use]
+    pub fn is_connected(&self, id: NodeId) -> bool {
+        let mut current = id;
+        loop {
+            if current == self.root {
+                return true;
+            }
+            match self.node(current).and_then(|node| node.parent()) {
+                Some(parent) => current = parent,
+                None => return false,
+            }
+        }
+    }
+
     /// Returns the first title element's text content, if present.
     #[must_use]
     pub fn title(&self) -> Option<String> {
+        self.title_bounded(usize::MAX)
+    }
+
+    /// Returns the title only when its text fits in `max_bytes`, checking the
+    /// length before building the returned string.
+    #[must_use]
+    pub fn title_bounded(&self, max_bytes: usize) -> Option<String> {
         if let Some(title) = &self.title_override {
-            let title = title.trim().to_owned();
-            return (!title.is_empty()).then_some(title);
+            let title = title.trim();
+            return (!title.is_empty() && title.len() <= max_bytes).then(|| title.to_owned());
         }
         let title_id =
             self.nodes.iter().enumerate().find_map(|(index, node)| match &node.kind {
                 NodeKind::Element { tag_name, .. } if tag_name == "title" => Some(NodeId(index)),
                 _ => None,
             })?;
-        let mut text = String::new();
-        self.collect_text(title_id, &mut text);
+        let text = self.text_content_bounded(title_id, max_bytes)?;
         let title = text.trim().to_owned();
         (!title.is_empty()).then_some(title)
     }
@@ -254,18 +276,32 @@ impl HtmlDocument {
     /// Finds the first element carrying the given `id` attribute.
     #[must_use]
     pub fn element_by_id(&self, id: &str) -> Option<NodeId> {
-        self.iter().find_map(|(node_id, node)| {
-            if self.is_in_template(node_id) {
+        let mut work = usize::MAX;
+        self.element_by_id_budgeted(id, &mut work)
+    }
+
+    /// Budgeted variant of `element_by_id`, charging one work unit per node
+    /// examined. Detached nodes are skipped.
+    #[must_use]
+    pub fn element_by_id_budgeted(&self, id: &str, work: &mut usize) -> Option<NodeId> {
+        for (node_id, node) in self.iter() {
+            if *work == 0 {
                 return None;
             }
-            match node.kind() {
-                NodeKind::Element { attributes, .. } => attributes
-                    .iter()
-                    .find(|attribute| attribute.name == "id" && attribute.value == id)
-                    .map(|_| node_id),
-                _ => None,
+            *work -= 1;
+            if !self.is_connected(node_id) || self.is_in_template(node_id) {
+                continue;
             }
-        })
+            if let NodeKind::Element { attributes, .. } = node.kind() {
+                if attributes
+                    .iter()
+                    .any(|attribute| attribute.name == "id" && attribute.value == id)
+                {
+                    return Some(node_id);
+                }
+            }
+        }
+        None
     }
 
     /// Returns an element attribute value.
@@ -309,9 +345,19 @@ impl HtmlDocument {
     /// Returns the concatenated text content of a node.
     #[must_use]
     pub fn text_content(&self, id: NodeId) -> String {
+        self.text_content_bounded(id, usize::MAX).unwrap_or_default()
+    }
+
+    /// Returns the text content only when it fits in `max_bytes`. The length is
+    /// summed from the arena before the returned string is allocated.
+    #[must_use]
+    pub fn text_content_bounded(&self, id: NodeId, max_bytes: usize) -> Option<String> {
+        if self.text_content_len(id) > max_bytes {
+            return None;
+        }
         let mut text = String::new();
         self.collect_text(id, &mut text);
-        text
+        Some(text)
     }
 
     /// Replaces all children of a node with a single text node.
@@ -339,7 +385,8 @@ impl HtmlDocument {
     }
 
     fn simple_selector_matches(&self, id: NodeId, node: &Node, selector: &str) -> bool {
-        if self.is_in_template(id) {
+        // Detached nodes created by scripts are not part of the document tree.
+        if !self.is_connected(id) || self.is_in_template(id) {
             return false;
         }
         let NodeKind::Element { tag_name, attributes } = node.kind() else {
@@ -360,19 +407,36 @@ impl HtmlDocument {
     /// Finds the first element matching a simple tag, `#id` or `.class` selector.
     #[must_use]
     pub fn query_selector(&self, selector: &str) -> Option<NodeId> {
+        let mut work = usize::MAX;
+        self.query_selector_budgeted(selector, &mut work)
+    }
+
+    /// Same lookup as `query_selector`, charging one unit of `work` for every
+    /// node examined and stopping when the allowance is exhausted.
+    #[must_use]
+    pub fn query_selector_budgeted(&self, selector: &str, work: &mut usize) -> Option<NodeId> {
         let selector = selector.trim();
-        if selector.is_empty() {
+        if selector.is_empty() || *work == 0 {
             return None;
         }
-        self.iter()
-            .find_map(|(id, node)| self.simple_selector_matches(id, node, selector).then_some(id))
+        for (id, node) in self.iter() {
+            if *work == 0 {
+                return None;
+            }
+            *work -= 1;
+            if self.simple_selector_matches(id, node, selector) {
+                return Some(id);
+            }
+        }
+        None
     }
 
     /// Returns every element matching a simple tag, `#id` or `.class` selector
     /// in document order.
     #[must_use]
     pub fn query_selector_all(&self, selector: &str) -> Vec<NodeId> {
-        self.query_selector_all_limited(selector, usize::MAX)
+        let mut work = usize::MAX;
+        self.query_selector_all_budgeted(selector, usize::MAX, &mut work)
     }
 
     /// Returns at most `limit` matching elements in document order, stopping the
@@ -380,15 +444,58 @@ impl HtmlDocument {
     /// result set is built.
     #[must_use]
     pub fn query_selector_all_limited(&self, selector: &str, limit: usize) -> Vec<NodeId> {
+        let mut work = usize::MAX;
+        self.query_selector_all_budgeted(selector, limit, &mut work)
+    }
+
+    /// Budgeted variant of `query_selector_all_limited`: every node examined
+    /// consumes one unit of `work`, and the search stops when it reaches zero.
+    #[must_use]
+    pub fn query_selector_all_budgeted(
+        &self,
+        selector: &str,
+        limit: usize,
+        work: &mut usize,
+    ) -> Vec<NodeId> {
         let selector = selector.trim();
-        if selector.is_empty() || limit == 0 {
-            return Vec::new();
+        let mut matches = Vec::new();
+        if selector.is_empty() || limit == 0 || *work == 0 {
+            return matches;
         }
-        self.iter()
-            .filter(|(id, node)| self.simple_selector_matches(*id, node, selector))
-            .map(|(id, _)| id)
-            .take(limit)
-            .collect()
+        for (id, node) in self.iter() {
+            if *work == 0 {
+                break;
+            }
+            *work -= 1;
+            if self.simple_selector_matches(id, node, selector) {
+                matches.push(id);
+                if matches.len() >= limit {
+                    break;
+                }
+            }
+        }
+        matches
+    }
+
+    /// Finds the first connected element with a given tag, charging one work
+    /// unit per node examined.
+    #[must_use]
+    pub fn element_by_tag_budgeted(&self, tag: &str, work: &mut usize) -> Option<NodeId> {
+        for (id, node) in self.iter() {
+            if *work == 0 {
+                return None;
+            }
+            *work -= 1;
+            if !self.is_connected(id) || self.is_in_template(id) {
+                continue;
+            }
+            if let NodeKind::Element { tag_name, .. } = node.kind() {
+                if tag_name.eq_ignore_ascii_case(tag) {
+                    return Some(id);
+                }
+            }
+        }
+        None
     }
 
     /// Creates a detached element node with no attributes.
@@ -689,6 +796,20 @@ impl HtmlDocument {
             current = self.node(parent).and_then(|node| node.parent());
         }
         false
+    }
+
+    fn text_content_len(&self, id: NodeId) -> usize {
+        let Some(node) = self.node(id) else {
+            return 0;
+        };
+        let mut length = match &node.kind {
+            NodeKind::Text(text) => text.len(),
+            _ => 0,
+        };
+        for child in &node.children {
+            length = length.saturating_add(self.text_content_len(*child));
+        }
+        length
     }
 
     fn collect_text(&self, id: NodeId, output: &mut String) {
@@ -2348,6 +2469,30 @@ mod tests {
         assert_eq!(document.query_selector_all_limited("i", 0).len(), 0);
         assert_eq!(document.query_selector_all_limited("i", 10).len(), 4);
         assert_eq!(document.query_selector_all_limited(".item", 2).len(), 2);
+    }
+
+    #[test]
+    fn budgeted_selectors_examine_only_the_available_nodes() {
+        let document = HtmlDocument::parse("<main><i></i><i></i><i></i></main>");
+        let mut work = 2;
+        assert!(document.query_selector_budgeted("missing", &mut work).is_none());
+        assert_eq!(work, 0);
+        let mut work = 7;
+        assert_eq!(document.query_selector_all_budgeted("i", 10, &mut work).len(), 2);
+        assert_eq!(work, 0);
+    }
+
+    #[test]
+    fn detached_elements_are_not_selected() {
+        let mut document = HtmlDocument::parse("<div class='item' id='inside'>one</div>");
+        let detached = document.create_element("span");
+        document.set_attribute(detached, "class", "item");
+        document.set_attribute(detached, "id", "outside");
+
+        assert_eq!(document.query_selector_all("span").len(), 0);
+        assert_eq!(document.query_selector("span"), None);
+        assert_eq!(document.element_by_id("outside"), None);
+        assert!(document.element_by_id("inside").is_some());
     }
 
     #[test]

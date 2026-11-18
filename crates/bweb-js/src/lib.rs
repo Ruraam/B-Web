@@ -298,14 +298,20 @@ mod tests {
     }
 
     #[test]
-    fn memory_budget_boundary_allows_scalars_and_rejects_the_next_string() {
+    fn initial_ast_is_charged_to_the_memory_budget() {
         let mut runtime = Runtime::new();
         runtime.set_memory_budget(2000);
         runtime.set_memory_used(2000);
-        // Scalar operations do not allocate and must still work at the limit.
-        assert_eq!(runtime.eval("1 + 1").expect("scalars").display(), "2");
-        let error = runtime.eval("'x'").expect_err("string allocation must fail");
+        // Parsing itself allocates the AST, which must be charged before the
+        // script is allowed to run.
+        let error = runtime.eval("1 + 1").expect_err("AST allocation must fail");
         assert!(error.message.contains("memory budget"), "unexpected error: {}", error.message);
+        assert_eq!(runtime.memory_used(), 2000);
+
+        // Running an already parsed program needs no runtime allocation for
+        // scalar arithmetic, so it still works at the boundary.
+        let statements = super::parse("1 + 1").expect("parse");
+        assert_eq!(runtime.run(&statements).expect("scalars").display(), "2");
     }
 
     #[test]
@@ -460,6 +466,30 @@ mod tests {
         }
     }
 
+    struct DeepHost;
+
+    impl Host for DeepHost {
+        fn get(&self, _object: &str, _property: &str) -> Value {
+            let mut current = Rc::new(RefCell::new(Object::default()));
+            current.borrow_mut().properties.insert("value".into(), Value::Number(1.0));
+            for _ in 0..20 {
+                let parent = Rc::new(RefCell::new(Object::default()));
+                parent.borrow_mut().properties.insert("child".into(), Value::Object(current));
+                current = parent;
+            }
+            Value::Object(current)
+        }
+    }
+
+    #[test]
+    fn deeply_nested_host_objects_are_rejected() {
+        let mut runtime = Runtime::new();
+        runtime.set_host(Box::new(DeepHost));
+        runtime.define_global("host", Value::Host("host".into()));
+        let error = runtime.eval("host.node").expect_err("nesting limit");
+        assert!(error.message.contains("nesting"), "unexpected error: {}", error.message);
+    }
+
     #[test]
     fn nested_host_objects_are_charged_recursively() {
         let mut runtime = Runtime::new();
@@ -504,7 +534,15 @@ mod tests {
         let before = runtime.memory_used();
         runtime.eval("let b = a;").expect("alias the Rc-backed array");
         let delta = runtime.memory_used() - before;
-        assert!(delta <= 64, "aliasing an Rc value cost {delta} bytes");
+
+        // Compare with aliasing a scalar: the only extra cost is the parsed
+        // statement and the variable name, not the array's contents.
+        let mut scalar = Runtime::new();
+        scalar.eval("let a = 1;").expect("create scalar");
+        let before_scalar = scalar.memory_used();
+        scalar.eval("let b = a;").expect("alias the scalar");
+        let scalar_delta = scalar.memory_used() - before_scalar;
+        assert!(delta <= scalar_delta + 16, "aliasing an Rc value cost {delta} bytes");
     }
 
     #[test]

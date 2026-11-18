@@ -1,7 +1,7 @@
 //! DOM host bridge and event dispatch for the Rust JavaScript runtime.
 
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::HashMap,
     rc::{Rc, Weak},
 };
@@ -51,16 +51,36 @@ impl EventRegistry {
     }
 }
 
+/// Maximum number of DOM nodes a document's scripts may examine before the
+/// bridge stops answering selector queries for that document.
+pub const DOM_WORK_BUDGET: usize = 1_000_000;
+
 /// Exposes a document to scripts through the `document` host object.
 pub struct DomHost {
     document: Weak<RefCell<HtmlDocument>>,
     events: Rc<RefCell<EventRegistry>>,
+    /// Shared by every script and callback of one document.
+    work: Rc<Cell<usize>>,
 }
 
 impl DomHost {
     #[must_use]
     pub fn new(document: &Rc<RefCell<HtmlDocument>>, events: Rc<RefCell<EventRegistry>>) -> Self {
-        Self { document: Rc::downgrade(document), events }
+        Self {
+            document: Rc::downgrade(document),
+            events,
+            work: Rc::new(Cell::new(DOM_WORK_BUDGET)),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_work_budget(&self, budget: usize) {
+        self.work.set(budget);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn work_cell(&self) -> Rc<Cell<usize>> {
+        self.work.clone()
     }
 }
 
@@ -75,15 +95,21 @@ fn host_handle(value: &Value) -> Option<String> {
     }
 }
 
-fn style_value(style: &str, property: &str) -> Option<String> {
+fn style_value_bounded(style: &str, property: &str, max_bytes: usize) -> Option<String> {
     style.split(';').find_map(|declaration| {
         let (name, value) = declaration.split_once(':')?;
-        (name.trim() == property).then(|| value.trim().to_owned())
+        let value = value.trim();
+        (name.trim() == property && value.len() <= max_bytes).then(|| value.to_owned())
     })
 }
 
-fn with_style(document: &mut HtmlDocument, index: usize, property: &str, value: Option<&str>) {
-    let Some(id) = document.node_at(index) else { return };
+fn with_style(
+    document: &mut HtmlDocument,
+    index: usize,
+    property: &str,
+    value: Option<&str>,
+) -> Result<(), JsError> {
+    let Some(id) = document.node_at(index) else { return Ok(()) };
     let style = document.attribute(id, "style").unwrap_or("").to_owned();
     let mut declarations: Vec<(String, String)> = style
         .split(';')
@@ -101,7 +127,11 @@ fn with_style(document: &mut HtmlDocument, index: usize, property: &str, value: 
         .map(|(name, value)| format!("{name}: {value}"))
         .collect::<Vec<_>>()
         .join("; ");
+    if style.len() > MAX_STRING_BYTES {
+        return Err(JsError { message: "maximum string length exceeded".into() });
+    }
     document.set_attribute(id, "style", &style);
+    Ok(())
 }
 
 impl Host for DomHost {
@@ -110,17 +140,17 @@ impl Host for DomHost {
         let document = document.borrow();
         if object == "document" {
             return match property {
-                "title" => Value::String(document.title().unwrap_or_default()),
-                "body" | "documentElement" => document
-                    .iter()
-                    .find_map(|(id, node)| {
-                        let tag = match node.kind() {
-                            bweb_html::NodeKind::Element { tag_name, .. } => tag_name.as_str(),
-                            _ => return None,
-                        };
-                        (tag == property).then_some(Value::Host(format!("element:{}", id.index())))
+                "title" => {
+                    Value::String(document.title_bounded(MAX_STRING_BYTES).unwrap_or_default())
+                }
+                "body" | "documentElement" => {
+                    let mut work = self.work.get();
+                    let found = document.element_by_tag_budgeted(property, &mut work);
+                    self.work.set(work);
+                    found.map_or(Value::Undefined, |id| {
+                        Value::Host(format!("element:{}", id.index()))
                     })
-                    .unwrap_or(Value::Undefined),
+                }
                 _ => Value::Undefined,
             };
         }
@@ -128,10 +158,17 @@ impl Host for DomHost {
             let Some(id) = document.node_at(index) else { return Value::Undefined };
             return match property {
                 "style" => Value::Host(format!("style:{index}")),
-                "textContent" => Value::String(document.text_content(id)),
+                "textContent" => Value::String(
+                    document.text_content_bounded(id, MAX_STRING_BYTES).unwrap_or_default(),
+                ),
                 "classList" => Value::Host(format!("classlist:{index}")),
                 "id" | "class" | "href" | "src" => {
-                    Value::String(document.attribute(id, property).unwrap_or("").to_owned())
+                    let value = document.attribute(id, property).unwrap_or("");
+                    if value.len() > MAX_STRING_BYTES {
+                        Value::Undefined
+                    } else {
+                        Value::String(value.to_owned())
+                    }
                 }
                 _ => Value::Undefined,
             };
@@ -139,7 +176,8 @@ impl Host for DomHost {
         if let Some(index) = handle_index(object, "style:") {
             if let Some(id) = document.node_at(index) {
                 let style = document.attribute(id, "style").unwrap_or("");
-                return style_value(style, property).map_or(Value::Undefined, Value::String);
+                return style_value_bounded(style, property, MAX_STRING_BYTES)
+                    .map_or(Value::Undefined, Value::String);
             }
         }
         if let Some(index) = handle_index(object, "classlist:") {
@@ -179,7 +217,7 @@ impl Host for DomHost {
             return Ok(());
         }
         if let Some(index) = handle_index(object, "style:") {
-            with_style(&mut document, index, property, Some(&text));
+            with_style(&mut document, index, property, Some(&text))?;
         }
         Ok(())
     }
@@ -281,9 +319,15 @@ impl Host for DomHost {
                         return Ok(Value::Undefined);
                     };
                     let document = document.borrow();
-                    // The DOM traversal stops at the limit, so the full result
-                    // set is never collected into an intermediate vector.
-                    let nodes = document.query_selector_all_limited(&selector, MAX_ARRAY_LENGTH);
+                    // Every examined node consumes the document's shared DOM
+                    // work budget; an exhausted budget returns no results.
+                    let mut work = self.work.get();
+                    let nodes = document.query_selector_all_budgeted(
+                        &selector,
+                        MAX_ARRAY_LENGTH,
+                        &mut work,
+                    );
+                    self.work.set(work);
                     let visible = nodes.len();
                     let mut properties = HashMap::with_capacity(visible.saturating_add(1));
                     for (index, node) in nodes.iter().enumerate() {
@@ -317,11 +361,13 @@ impl Host for DomHost {
                         return Ok(Value::Undefined);
                     };
                     let document = document.borrow();
+                    let mut work = self.work.get();
                     let found = if method == "getElementById" {
-                        document.element_by_id(&selector)
+                        document.element_by_id_budgeted(&selector, &mut work)
                     } else {
-                        document.query_selector(&selector)
+                        document.query_selector_budgeted(&selector, &mut work)
                     };
+                    self.work.set(work);
                     return Ok(found.map_or(Value::Null, |node| {
                         Value::Host(format!("element:{}", node.index()))
                     }));
@@ -345,10 +391,9 @@ impl Host for DomHost {
                         return Ok(Value::Undefined);
                     };
                     let mut document = document.borrow_mut();
-                    let body = document.iter().find_map(|(id, node)| {
-                        matches!(node.kind(), bweb_html::NodeKind::Element { tag_name, .. } if tag_name == "body")
-                            .then_some(id)
-                    });
+                    let mut work = self.work.get();
+                    let body = document.element_by_tag_budgeted("body", &mut work);
+                    self.work.set(work);
                     if let Some(body) = body {
                         document.set_text_content(body, &text);
                     }
@@ -607,5 +652,59 @@ mod tests {
         let value = Value::String("x".repeat(MAX_STRING_BYTES + 1));
         let error = super::host_display(&value).expect_err("conversion must be refused");
         assert!(error.message.contains("string length"), "unexpected error: {}", error.message);
+    }
+
+    #[test]
+    fn dom_work_budget_is_shared_and_stops_repeated_selectors() {
+        let document = Rc::new(RefCell::new(HtmlDocument::parse("<span></span>".repeat(100))));
+        let events = Rc::new(RefCell::new(EventRegistry::default()));
+        let host = DomHost::new(&document, events);
+        host.set_work_budget(10);
+        let work = host.work_cell();
+        let mut runtime = Runtime::new();
+        runtime.set_host(Box::new(host));
+        runtime.define_global("document", Value::Host("document".into()));
+
+        // A selector with no matches still examines nodes; the shared work
+        // allowance must run out and stop further scans.
+        let empty =
+            runtime.eval("document.querySelectorAll('missing').length").expect("first query");
+        assert_eq!(empty.display(), "0");
+        assert_eq!(work.get(), 0);
+        let again = runtime.eval("document.querySelectorAll('span').length").expect("second query");
+        assert_eq!(again.display(), "0", "an exhausted budget must return no matches");
+    }
+
+    #[test]
+    fn oversized_dom_reads_are_rejected_before_returning_strings() {
+        let document = Rc::new(RefCell::new(HtmlDocument::parse("<p id='x'>x</p>")));
+        let oversized = "x".repeat(MAX_STRING_BYTES + 1);
+        {
+            let mut dom = document.borrow_mut();
+            let id = dom.element_by_id("x").expect("paragraph");
+            dom.set_text_content(id, &oversized);
+            dom.set_title(&oversized);
+            dom.set_attribute(id, "style", &format!("color: {oversized}"));
+        }
+        let events = Rc::new(RefCell::new(EventRegistry::default()));
+        let mut runtime = Runtime::new();
+        runtime.set_host(Box::new(DomHost::new(&document, events)));
+        runtime.define_global("document", Value::Host("document".into()));
+        assert_eq!(runtime.eval("document.title").expect("title").display(), "");
+        assert_eq!(
+            runtime
+                .eval("document.getElementById('x').textContent")
+                .expect("textContent")
+                .display(),
+            ""
+        );
+        assert_eq!(
+            runtime
+                .eval("document.getElementById('x').style.color")
+                .expect("style value")
+                .display(),
+            "undefined"
+        );
+        assert!(runtime.memory_used() < 5000, "oversized DOM text must not be charged as retained");
     }
 }
