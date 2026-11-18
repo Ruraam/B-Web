@@ -187,6 +187,17 @@ pub(crate) fn tokenize_with_limit(source: &str, limit: usize) -> Result<Vec<Toke
             push_token(&mut tokens, Token { kind, text }, limit)?;
             continue;
         }
+        let three = if index + 2 < chars.len() {
+            Some([chars[index], chars[index + 1], chars[index + 2]])
+        } else {
+            None
+        };
+        if matches!(three, Some(['=', '=', '=']) | Some(['!', '=', '='])) {
+            let text: String = three.expect("three-char operator").iter().collect();
+            index += 3;
+            push_token(&mut tokens, Token { kind: TokenKind::Operator, text }, limit)?;
+            continue;
+        }
         let two =
             if index + 1 < chars.len() { Some([chars[index], chars[index + 1]]) } else { None };
         if matches!(
@@ -210,7 +221,7 @@ pub(crate) fn tokenize_with_limit(source: &str, limit: usize) -> Result<Vec<Toke
             push_token(&mut tokens, Token { kind: TokenKind::Operator, text }, limit)?;
             continue;
         }
-        if matches!(ch, '+' | '-' | '*' | '/' | '%' | '=' | '<' | '>' | '!' | '&' | '|') {
+        if matches!(ch, '+' | '-' | '*' | '/' | '%' | '=' | '<' | '>' | '!' | '&' | '|' | '?') {
             push_token(
                 &mut tokens,
                 Token { kind: TokenKind::Operator, text: ch.to_string() },
@@ -253,5 +264,17 @@ mod tests {
         assert_eq!(tokens[0].text, "let");
         assert!(tokens.iter().any(|token| token.text == "=="));
         assert!(tokens.iter().any(|token| token.kind == TokenKind::String && token.text == "hi"));
+    }
+
+    #[test]
+    fn tokenizes_strict_equality_and_ternary() {
+        let tokens = tokenize("a === b !== c ? 1 : 2").expect("tokens");
+        let operators: Vec<&str> = tokens
+            .iter()
+            .filter(|token| token.kind == TokenKind::Operator)
+            .map(|token| token.text.as_str())
+            .collect();
+        assert_eq!(operators, ["===", "!==", "?"]);
+        assert!(tokens.iter().any(|token| token.text == ":"));
     }
 }

@@ -679,4 +679,41 @@ mod tests {
         assert_eq!(runtime.memory_budget(), 512);
         runtime.eval("let t = '0123456789';").expect("second document");
     }
+
+    #[test]
+    fn strict_equality_and_conditional_expressions_work() {
+        let mut runtime = Runtime::new();
+        assert_eq!(runtime.eval("1 === 1").expect("strict equal").display(), "true");
+        assert_eq!(runtime.eval("1 === '1'").expect("strict types differ").display(), "false");
+        assert_eq!(runtime.eval("1 !== 2").expect("strict not equal").display(), "true");
+        assert_eq!(runtime.eval("true ? 1 : 2").expect("ternary then").display(), "1");
+        assert_eq!(runtime.eval("false ? 1 : 2").expect("ternary else").display(), "2");
+        assert_eq!(
+            runtime.eval("let x = 1; x === 1 ? 'yes' : 'no'").expect("nested ternary").display(),
+            "yes"
+        );
+    }
+
+    #[test]
+    fn string_equality_compares_values() {
+        let mut runtime = Runtime::new();
+        assert_eq!(runtime.eval("'a' == 'a'").expect("equal strings").display(), "true");
+        assert_eq!(runtime.eval("'a' == 'b'").expect("different strings").display(), "false");
+        assert_eq!(runtime.eval("'a' != 'a'").expect("not equal").display(), "false");
+        assert_eq!(runtime.eval("'5' == 5").expect("numeric string").display(), "true");
+    }
+
+    #[test]
+    fn typeof_reports_functions_as_functions() {
+        let mut runtime = Runtime::new();
+        assert_eq!(
+            runtime.eval("typeof function() {}").expect("function expression").display(),
+            "function"
+        );
+        assert_eq!(
+            runtime.eval("typeof Math.floor").expect("native function").display(),
+            "function"
+        );
+        assert_eq!(runtime.eval("typeof {}").expect("object").display(), "object");
+    }
 }

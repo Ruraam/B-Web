@@ -420,11 +420,15 @@ impl Parser {
 
     fn parse_unary(&mut self) -> Result<Expr, ParseError> {
         let _depth = self.enter()?;
-        let op = match self.operator() {
-            "-" => Some(UnaryOp::Negate),
-            "!" => Some(UnaryOp::Not),
-            "typeof" => Some(UnaryOp::TypeOf),
-            _ => None,
+        let op = {
+            let token = self.peek();
+            let text = token.text.as_str();
+            match text {
+                "-" if token.kind == TokenKind::Operator => Some(UnaryOp::Negate),
+                "!" if token.kind == TokenKind::Operator => Some(UnaryOp::Not),
+                "typeof" if token.kind == TokenKind::Keyword => Some(UnaryOp::TypeOf),
+                _ => None,
+            }
         };
         if let Some(op) = op {
             self.position += 1;

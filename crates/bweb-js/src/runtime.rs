@@ -97,7 +97,8 @@ impl Value {
             Self::Bool(_) => "boolean",
             Self::Number(_) => "number",
             Self::String(_) => "string",
-            Self::Object(_) | Self::Function(_) | Self::Native(_) | Self::Host(_) => "object",
+            Self::Function(_) | Self::Native(_) => "function",
+            Self::Object(_) | Self::Host(_) => "object",
         }
     }
 
@@ -1480,6 +1481,9 @@ fn strict_equals(left: &Value, right: &Value) -> bool {
 fn loose_equals(left: &Value, right: &Value) -> bool {
     match (left, right) {
         (Value::Null, Value::Undefined) | (Value::Undefined, Value::Null) => true,
+        // Two strings compare by value; coercing both to numbers would make
+        // any non-numeric pair (e.g. "a" == "a") incorrectly false.
+        (Value::String(a), Value::String(b)) => a == b,
         (
             Value::Number(_) | Value::String(_) | Value::Bool(_),
             Value::Number(_) | Value::String(_) | Value::Bool(_),
