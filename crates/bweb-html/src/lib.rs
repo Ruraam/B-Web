@@ -1055,13 +1055,14 @@ impl HtmlDocument {
         Ok(())
     }
 
-    /// Removes a direct child and returns it, preserving its subtree and id.
-    pub fn remove_child_budgeted(
-        &mut self,
+    /// Validates a child removal and returns the sibling position to remove.
+    /// No link is changed here, so callers may reserve memory before applying.
+    pub fn plan_remove_child_budgeted(
+        &self,
         parent: NodeId,
         child: NodeId,
         work: &mut usize,
-    ) -> Result<NodeId, DomMutationError> {
+    ) -> Result<usize, DomMutationError> {
         self.validate_parent_budgeted(parent, work)?;
         Self::mutation_work(work)?;
         if child == self.root || self.node(child).is_none() {
@@ -1074,9 +1075,52 @@ impl HtmlDocument {
             return Err(DomMutationError::BudgetExhausted);
         }
         *work -= shifts;
-        self.nodes[parent.0].children.remove(position);
+        Ok(position)
+    }
+
+    /// Applies a removal previously validated by `plan_remove_child_budgeted`.
+    pub fn apply_remove_child(&mut self, parent: NodeId, position: usize) {
+        let child = self.nodes[parent.0].children.remove(position);
         self.nodes[child.0].parent = None;
+    }
+
+    /// Removes a direct child and returns it, preserving its subtree and id.
+    pub fn remove_child_budgeted(
+        &mut self,
+        parent: NodeId,
+        child: NodeId,
+        work: &mut usize,
+    ) -> Result<NodeId, DomMutationError> {
+        let position = self.plan_remove_child_budgeted(parent, child, work)?;
+        self.apply_remove_child(parent, position);
         Ok(child)
+    }
+
+    /// Validates a child replacement and returns the position to overwrite.
+    /// No link is changed here, so callers may reserve memory before applying.
+    pub fn plan_replace_child_budgeted(
+        &self,
+        parent: NodeId,
+        new_child: NodeId,
+        old_child: NodeId,
+        work: &mut usize,
+    ) -> Result<usize, DomMutationError> {
+        let parent_depth = self.validate_parent_budgeted(parent, work)?;
+        let height = self.validate_detached_budgeted(parent, new_child, work)?;
+        Self::check_depth(parent_depth, height)?;
+        Self::mutation_work(work)?;
+        if old_child == self.root || self.node(old_child).is_none() {
+            return Err(DomMutationError::InvalidNode);
+        }
+        self.child_position_budgeted(parent, old_child, work)
+    }
+
+    /// Applies a replacement previously validated by `plan_replace_child_budgeted`.
+    pub fn apply_replace_child(&mut self, parent: NodeId, position: usize, new_child: NodeId) {
+        let old_child = self.nodes[parent.0].children[position];
+        self.nodes[parent.0].children[position] = new_child;
+        self.nodes[new_child.0].parent = Some(parent);
+        self.nodes[old_child.0].parent = None;
     }
 
     /// Replaces a direct child with a detached node and returns the old child.
@@ -1088,17 +1132,8 @@ impl HtmlDocument {
         old_child: NodeId,
         work: &mut usize,
     ) -> Result<NodeId, DomMutationError> {
-        let parent_depth = self.validate_parent_budgeted(parent, work)?;
-        let height = self.validate_detached_budgeted(parent, new_child, work)?;
-        Self::check_depth(parent_depth, height)?;
-        Self::mutation_work(work)?;
-        if old_child == self.root || self.node(old_child).is_none() {
-            return Err(DomMutationError::InvalidNode);
-        }
-        let position = self.child_position_budgeted(parent, old_child, work)?;
-        self.nodes[parent.0].children[position] = new_child;
-        self.nodes[new_child.0].parent = Some(parent);
-        self.nodes[old_child.0].parent = None;
+        let position = self.plan_replace_child_budgeted(parent, new_child, old_child, work)?;
+        self.apply_replace_child(parent, position, new_child);
         Ok(old_child)
     }
 
