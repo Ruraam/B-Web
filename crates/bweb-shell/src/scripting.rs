@@ -20,14 +20,16 @@ fn finish_budgeted_read(
     work_cell: &Rc<Cell<usize>>,
     remaining: usize,
     outcome: Result<Option<String>, DomReadError>,
-    reserve: &mut dyn FnMut(usize) -> bool,
 ) -> Result<String, JsError> {
     work_cell.set(remaining);
     match outcome {
-        Ok(Some(text)) if reserve(text.len() + HOST_STRING_OVERHEAD) => Ok(text),
-        Ok(Some(_)) | Ok(None) | Err(DomReadError::TooLarge) => Ok(String::new()),
+        Ok(Some(text)) => Ok(text),
+        Ok(None) | Err(DomReadError::TooLarge) => Ok(String::new()),
         Err(DomReadError::BudgetExhausted) => {
             Err(JsError { message: "DOM work budget exhausted".into() })
+        }
+        Err(DomReadError::ReservationFailed) => {
+            Err(JsError { message: "script memory budget exceeded".into() })
         }
     }
 }
@@ -201,7 +203,7 @@ impl Host for DomHost {
                     let mut work = self.work.get();
                     let found = document.element_by_tag_budgeted(property, &mut work);
                     self.work.set(work);
-                    found.map_or(Value::Undefined, |id| {
+                    found.unwrap_or(None).map_or(Value::Undefined, |id| {
                         Value::Host(format!("element:{}", id.index()))
                     })
                 }
@@ -261,8 +263,8 @@ impl Host for DomHost {
         let document = document.borrow();
         if object == "document" && property == "title" {
             let mut work = self.work.get();
-            let outcome = document.title_budgeted(MAX_STRING_BYTES, &mut work);
-            let title = finish_budgeted_read(&self.work, work, outcome, reserve)?;
+            let outcome = document.title_budgeted(MAX_STRING_BYTES, &mut work, reserve);
+            let title = finish_budgeted_read(&self.work, work, outcome)?;
             return Ok(Some(Value::String(title)));
         }
         if let Some(index) = handle_index(object, "element:") {
@@ -270,8 +272,9 @@ impl Host for DomHost {
             match property {
                 "textContent" => {
                     let mut work = self.work.get();
-                    let outcome = document.text_content_budgeted(id, MAX_STRING_BYTES, &mut work);
-                    let text = finish_budgeted_read(&self.work, work, outcome.map(Some), reserve)?;
+                    let outcome =
+                        document.text_content_budgeted(id, MAX_STRING_BYTES, &mut work, reserve);
+                    let text = finish_budgeted_read(&self.work, work, outcome.map(Some))?;
                     return Ok(Some(Value::String(text)));
                 }
                 "id" | "class" | "href" | "src" => {
@@ -472,6 +475,8 @@ impl Host for DomHost {
                         document.query_selector_budgeted(&selector, &mut work)
                     };
                     self.work.set(work);
+                    let found = found
+                        .map_err(|_| JsError { message: "DOM work budget exhausted".into() })?;
                     return Ok(found.map_or(Value::Null, |node| {
                         Value::Host(format!("element:{}", node.index()))
                     }));
@@ -498,6 +503,8 @@ impl Host for DomHost {
                     let mut work = self.work.get();
                     let body = document.element_by_tag_budgeted("body", &mut work);
                     self.work.set(work);
+                    let body =
+                        body.map_err(|_| JsError { message: "DOM work budget exhausted".into() })?;
                     if let Some(body) = body {
                         document.set_text_content(body, &text);
                     }
@@ -532,6 +539,26 @@ impl Host for DomHost {
                 }
                 return Ok(Some(Value::Null));
             }
+        }
+        if object == "document" && (method == "querySelector" || method == "getElementById") {
+            let selector = match args.first() {
+                Some(value) => value.display_limited(MAX_STRING_BYTES)?,
+                None => String::new(),
+            };
+            let Some(document) = self.document.upgrade() else { return Ok(Some(Value::Null)) };
+            let document = document.borrow();
+            let mut work = self.work.get();
+            let found = if method == "getElementById" {
+                document.element_by_id_budgeted(&selector, &mut work)
+            } else {
+                document.query_selector_budgeted(&selector, &mut work)
+            };
+            self.work.set(work);
+            let found =
+                found.map_err(|_| JsError { message: "DOM work budget exhausted".into() })?;
+            return Ok(Some(
+                found.map_or(Value::Null, |node| Value::Host(format!("element:{}", node.index()))),
+            ));
         }
         if object == "document" && method == "querySelectorAll" {
             let selector = match args.first() {
@@ -999,5 +1026,101 @@ mod tests {
             .eval("document.getElementById('x').style.color = 'red';")
             .expect_err("style rebuilding must be refused before allocating");
         assert!(error.message.contains("string length"), "unexpected error: {}", error.message);
+    }
+
+    #[test]
+    fn title_and_text_content_reserve_memory_before_materialising() {
+        let document = Rc::new(RefCell::new(HtmlDocument::parse("<title>hello</title>")));
+        let events = Rc::new(RefCell::new(EventRegistry::default()));
+        let mut runtime = Runtime::new();
+        runtime.set_host(Box::new(DomHost::new(&document, events)));
+        runtime.define_global("document", Value::Host("document".into()));
+        runtime.set_memory_budget(1_000_000);
+        assert_eq!(runtime.eval("document.title").expect("title").display(), "hello");
+        let exact = runtime.memory_used();
+
+        let mut runtime = Runtime::new();
+        runtime.set_host(Box::new(DomHost::new(
+            &document,
+            Rc::new(RefCell::new(EventRegistry::default())),
+        )));
+        runtime.define_global("document", Value::Host("document".into()));
+        runtime.set_memory_budget(exact);
+        assert_eq!(runtime.eval("document.title").expect("exact title budget").display(), "hello");
+
+        let mut runtime = Runtime::new();
+        runtime.set_host(Box::new(DomHost::new(
+            &document,
+            Rc::new(RefCell::new(EventRegistry::default())),
+        )));
+        runtime.define_global("document", Value::Host("document".into()));
+        runtime.set_memory_budget(exact - 1);
+        let error = runtime.eval("document.title").expect_err("title must not be materialised");
+        assert!(error.message.contains("memory budget"), "unexpected error: {}", error.message);
+
+        let document = Rc::new(RefCell::new(HtmlDocument::parse("<p id='x'>text</p>")));
+        let mut runtime = Runtime::new();
+        runtime.set_host(Box::new(DomHost::new(
+            &document,
+            Rc::new(RefCell::new(EventRegistry::default())),
+        )));
+        runtime.define_global("document", Value::Host("document".into()));
+        runtime.set_memory_budget(1_000_000);
+        assert_eq!(
+            runtime
+                .eval("document.getElementById('x').textContent")
+                .expect("textContent")
+                .display(),
+            "text"
+        );
+        let exact = runtime.memory_used();
+
+        let mut runtime = Runtime::new();
+        runtime.set_host(Box::new(DomHost::new(
+            &document,
+            Rc::new(RefCell::new(EventRegistry::default())),
+        )));
+        runtime.define_global("document", Value::Host("document".into()));
+        runtime.set_memory_budget(exact);
+        assert_eq!(
+            runtime
+                .eval("document.getElementById('x').textContent")
+                .expect("exact textContent budget")
+                .display(),
+            "text"
+        );
+
+        let mut runtime = Runtime::new();
+        runtime.set_host(Box::new(DomHost::new(
+            &document,
+            Rc::new(RefCell::new(EventRegistry::default())),
+        )));
+        runtime.define_global("document", Value::Host("document".into()));
+        runtime.set_memory_budget(exact - 1);
+        let error = runtime
+            .eval("document.getElementById('x').textContent")
+            .expect_err("textContent must not be materialised");
+        assert!(error.message.contains("memory budget"), "unexpected error: {}", error.message);
+    }
+
+    #[test]
+    fn single_element_selectors_report_budget_exhaustion() {
+        let document = Rc::new(RefCell::new(HtmlDocument::parse("<p id='x'>text</p>")));
+        let events = Rc::new(RefCell::new(EventRegistry::default()));
+        let host = DomHost::new(&document, events);
+        host.set_work_budget(1);
+        let mut runtime = Runtime::new();
+        runtime.set_host(Box::new(host));
+        runtime.define_global("document", Value::Host("document".into()));
+
+        for source in ["document.querySelector('p')", "document.getElementById('x')"] {
+            let error = runtime.eval(source).expect_err("exhaustion must not look like null");
+            assert!(
+                error.message.contains("DOM work budget"),
+                "unexpected error: {}",
+                error.message
+            );
+        }
+        assert_eq!(runtime.eval("1 + 1").expect("runtime still usable").display(), "2");
     }
 }

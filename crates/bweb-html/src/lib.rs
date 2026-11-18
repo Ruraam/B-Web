@@ -41,6 +41,13 @@ const MAX_TOTAL_RESOURCES: usize = 256;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QueryBudgetExhausted;
 
+/// Result of one budgeted ancestor walk used by script-visible selectors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NodeContext {
+    connected: bool,
+    in_template: bool,
+}
+
 /// Reason a budgeted DOM read could not be completed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DomReadError {
@@ -48,6 +55,8 @@ pub enum DomReadError {
     BudgetExhausted,
     /// The collected text would exceed the per-value byte limit.
     TooLarge,
+    /// The cumulative memory budget could not cover an allocation.
+    ReservationFailed,
 }
 
 /// Stable index into a document's node arena.
@@ -193,6 +202,35 @@ impl HtmlDocument {
         }
     }
 
+    /// Connectivity and template membership computed in one budgeted ancestor
+    /// walk, so selectors do not traverse the same chain twice.
+    fn node_context_budgeted(
+        &self,
+        id: NodeId,
+        work: &mut usize,
+    ) -> Result<NodeContext, DomReadError> {
+        let mut current = Some(id);
+        let mut connected = false;
+        let mut in_template = false;
+        while let Some(node_id) = current {
+            if *work == 0 {
+                return Err(DomReadError::BudgetExhausted);
+            }
+            *work -= 1;
+            if node_id == self.root {
+                connected = true;
+            }
+            let Some(node) = self.node(node_id) else {
+                break;
+            };
+            if node_id != id && matches!(node.kind(), NodeKind::TemplateContent) {
+                in_template = true;
+            }
+            current = node.parent();
+        }
+        Ok(NodeContext { connected, in_template })
+    }
+
     /// Returns the first title element's text content, if present.
     #[must_use]
     pub fn title(&self) -> Option<String> {
@@ -235,11 +273,15 @@ impl HtmlDocument {
         &self,
         max_bytes: usize,
         work: &mut usize,
+        reserve: &mut dyn FnMut(usize) -> bool,
     ) -> Result<Option<String>, DomReadError> {
         if let Some(title) = &self.title_override {
             let title = title.trim();
             if title.len() > max_bytes {
                 return Err(DomReadError::TooLarge);
+            }
+            if !reserve(title.len().saturating_add(24)) {
+                return Err(DomReadError::ReservationFailed);
             }
             return Ok((!title.is_empty()).then(|| title.to_owned()));
         }
@@ -257,7 +299,7 @@ impl HtmlDocument {
         let Some(id) = id else {
             return Ok(None);
         };
-        let text = self.collect_text_budgeted(id, max_bytes, work)?;
+        let text = self.collect_text_budgeted(id, max_bytes, work, reserve)?;
         let title = text.trim().to_owned();
         Ok((!title.is_empty()).then_some(title))
     }
@@ -337,34 +379,38 @@ impl HtmlDocument {
     #[must_use]
     pub fn element_by_id(&self, id: &str) -> Option<NodeId> {
         let mut work = usize::MAX;
-        self.element_by_id_budgeted(id, &mut work)
+        self.element_by_id_budgeted(id, &mut work).ok().flatten()
     }
 
-    /// Budgeted variant of `element_by_id`, charging one work unit per node
-    /// examined. Detached nodes are skipped.
-    #[must_use]
-    pub fn element_by_id_budgeted(&self, id: &str, work: &mut usize) -> Option<NodeId> {
+    /// Budgeted variant of `element_by_id`, charging one work unit per node and
+    /// ancestor examined. Detached nodes are skipped.
+    pub fn element_by_id_budgeted(
+        &self,
+        id: &str,
+        work: &mut usize,
+    ) -> Result<Option<NodeId>, DomReadError> {
         for (node_id, node) in self.iter() {
             if *work == 0 {
-                return None;
+                return Err(DomReadError::BudgetExhausted);
             }
             *work -= 1;
-            if !self.is_connected(node_id) || self.is_in_template(node_id) {
+            let context = self.node_context_budgeted(node_id, work)?;
+            if !context.connected || context.in_template {
                 continue;
             }
             if let NodeKind::Element { attributes, .. } = node.kind() {
-                if attributes.iter().any(|attribute| {
+                for attribute in attributes {
                     if *work == 0 {
-                        return false;
+                        return Err(DomReadError::BudgetExhausted);
                     }
                     *work -= 1;
-                    attribute.name == "id" && attribute.value == id
-                }) {
-                    return Some(node_id);
+                    if attribute.name == "id" && attribute.value == id {
+                        return Ok(Some(node_id));
+                    }
                 }
             }
         }
-        None
+        Ok(None)
     }
 
     /// Returns an element attribute value.
@@ -432,8 +478,9 @@ impl HtmlDocument {
         id: NodeId,
         max_bytes: usize,
         work: &mut usize,
+        reserve: &mut dyn FnMut(usize) -> bool,
     ) -> Result<String, DomReadError> {
-        self.collect_text_budgeted(id, max_bytes, work)
+        self.collect_text_budgeted(id, max_bytes, work, reserve)
     }
 
     fn collect_text_budgeted(
@@ -441,9 +488,10 @@ impl HtmlDocument {
         id: NodeId,
         max_bytes: usize,
         work: &mut usize,
+        reserve: &mut dyn FnMut(usize) -> bool,
     ) -> Result<String, DomReadError> {
         let mut text = String::new();
-        self.collect_text_inner_budgeted(id, max_bytes, work, &mut text)?;
+        self.collect_text_inner_budgeted(id, max_bytes, work, reserve, &mut text)?;
         Ok(text)
     }
 
@@ -452,6 +500,7 @@ impl HtmlDocument {
         id: NodeId,
         max_bytes: usize,
         work: &mut usize,
+        reserve: &mut dyn FnMut(usize) -> bool,
         output: &mut String,
     ) -> Result<(), DomReadError> {
         if *work == 0 {
@@ -465,10 +514,16 @@ impl HtmlDocument {
             if output.len().saturating_add(text.len()) > max_bytes {
                 return Err(DomReadError::TooLarge);
             }
+            // Reserve before growing the String's capacity, then commit the
+            // exact allocation. No content is materialised on failure.
+            if !reserve(text.len().saturating_add(24)) {
+                return Err(DomReadError::ReservationFailed);
+            }
+            output.reserve_exact(text.len());
             output.push_str(text);
         }
         for child in &node.children {
-            self.collect_text_inner_budgeted(*child, max_bytes, work, output)?;
+            self.collect_text_inner_budgeted(*child, max_bytes, work, reserve, output)?;
         }
         Ok(())
     }
@@ -505,37 +560,45 @@ impl HtmlDocument {
         node: &Node,
         selector: &str,
         work: &mut usize,
-    ) -> bool {
+    ) -> Result<bool, DomReadError> {
         if *work == 0 {
-            return false;
+            return Err(DomReadError::BudgetExhausted);
         }
         *work -= 1;
-        // Detached nodes created by scripts are not part of the document tree.
-        if !self.is_connected(id) || self.is_in_template(id) {
-            return false;
+        // One ancestor walk computes both flags, charging every step.
+        let context = self.node_context_budgeted(id, work)?;
+        if !context.connected || context.in_template {
+            return Ok(false);
         }
         let NodeKind::Element { tag_name, attributes } = node.kind() else {
-            return false;
+            return Ok(false);
         };
         if let Some(name) = selector.strip_prefix('#') {
-            attributes.iter().any(|attribute| {
+            for attribute in attributes {
                 if *work == 0 {
-                    return false;
+                    return Err(DomReadError::BudgetExhausted);
                 }
                 *work -= 1;
-                attribute.name == "id" && attribute.value == name
-            })
+                if attribute.name == "id" && attribute.value == name {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
         } else if let Some(name) = selector.strip_prefix('.') {
-            attributes.iter().any(|attribute| {
+            for attribute in attributes {
                 if *work == 0 {
-                    return false;
+                    return Err(DomReadError::BudgetExhausted);
                 }
                 *work -= 1;
-                attribute.name == "class"
+                if attribute.name == "class"
                     && attribute.value.split_ascii_whitespace().any(|part| part == name)
-            })
+                {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
         } else {
-            tag_name.eq_ignore_ascii_case(selector)
+            Ok(tag_name.eq_ignore_ascii_case(selector))
         }
     }
 
@@ -543,26 +606,29 @@ impl HtmlDocument {
     #[must_use]
     pub fn query_selector(&self, selector: &str) -> Option<NodeId> {
         let mut work = usize::MAX;
-        self.query_selector_budgeted(selector, &mut work)
+        self.query_selector_budgeted(selector, &mut work).ok().flatten()
     }
 
     /// Same lookup as `query_selector`, charging one unit of `work` for every
-    /// node examined and stopping when the allowance is exhausted.
-    #[must_use]
-    pub fn query_selector_budgeted(&self, selector: &str, work: &mut usize) -> Option<NodeId> {
+    /// node and ancestor examined. Exhaustion is reported explicitly.
+    pub fn query_selector_budgeted(
+        &self,
+        selector: &str,
+        work: &mut usize,
+    ) -> Result<Option<NodeId>, DomReadError> {
         let selector = selector.trim();
         if selector.is_empty() || *work == 0 {
-            return None;
+            return Err(DomReadError::BudgetExhausted);
         }
         for (id, node) in self.iter() {
             if *work == 0 {
-                return None;
+                return Err(DomReadError::BudgetExhausted);
             }
-            if self.simple_selector_matches_budgeted(id, node, selector, work) {
-                return Some(id);
+            if self.simple_selector_matches_budgeted(id, node, selector, work)? {
+                return Ok(Some(id));
             }
         }
-        None
+        Ok(None)
     }
 
     /// Returns every element matching a simple tag, `#id` or `.class` selector
@@ -570,7 +636,7 @@ impl HtmlDocument {
     #[must_use]
     pub fn query_selector_all(&self, selector: &str) -> Vec<NodeId> {
         let mut work = usize::MAX;
-        self.query_selector_all_budgeted(selector, usize::MAX, &mut work)
+        self.query_selector_all_budgeted(selector, usize::MAX, &mut work).unwrap_or_default()
     }
 
     /// Returns at most `limit` matching elements in document order, stopping the
@@ -579,35 +645,34 @@ impl HtmlDocument {
     #[must_use]
     pub fn query_selector_all_limited(&self, selector: &str, limit: usize) -> Vec<NodeId> {
         let mut work = usize::MAX;
-        self.query_selector_all_budgeted(selector, limit, &mut work)
+        self.query_selector_all_budgeted(selector, limit, &mut work).unwrap_or_default()
     }
 
-    /// Budgeted variant of `query_selector_all_limited`: every node examined
-    /// consumes one unit of `work`, and the search stops when it reaches zero.
-    #[must_use]
+    /// Budgeted variant of `query_selector_all_limited`: every node, ancestor
+    /// and attribute examined consumes one unit of `work`.
     pub fn query_selector_all_budgeted(
         &self,
         selector: &str,
         limit: usize,
         work: &mut usize,
-    ) -> Vec<NodeId> {
+    ) -> Result<Vec<NodeId>, DomReadError> {
         let selector = selector.trim();
         let mut matches = Vec::new();
         if selector.is_empty() || limit == 0 || *work == 0 {
-            return matches;
+            return Err(DomReadError::BudgetExhausted);
         }
         for (id, node) in self.iter() {
             if *work == 0 {
-                break;
+                return Err(DomReadError::BudgetExhausted);
             }
-            if self.simple_selector_matches_budgeted(id, node, selector, work) {
+            if self.simple_selector_matches_budgeted(id, node, selector, work)? {
                 matches.push(id);
                 if matches.len() >= limit {
-                    break;
+                    return Ok(matches);
                 }
             }
         }
-        matches
+        Ok(matches)
     }
 
     /// Like `query_selector_all_budgeted`, but reports an exhausted traversal
@@ -618,44 +683,35 @@ impl HtmlDocument {
         limit: usize,
         work: &mut usize,
     ) -> Result<Vec<NodeId>, QueryBudgetExhausted> {
-        let selector = selector.trim();
-        let mut matches = Vec::new();
-        if selector.is_empty() || limit == 0 {
-            return Ok(matches);
-        }
-        for (id, node) in self.iter() {
-            if *work == 0 {
-                return Err(QueryBudgetExhausted);
-            }
-            if self.simple_selector_matches_budgeted(id, node, selector, work) {
-                matches.push(id);
-                if matches.len() >= limit {
-                    return Ok(matches);
-                }
-            }
-        }
-        Ok(matches)
+        self.query_selector_all_budgeted(selector, limit, work).map_err(|error| match error {
+            DomReadError::BudgetExhausted | DomReadError::ReservationFailed => QueryBudgetExhausted,
+            DomReadError::TooLarge => QueryBudgetExhausted,
+        })
     }
 
-    /// Finds the first connected element with a given tag, charging one work
-    /// unit per node examined.
-    #[must_use]
-    pub fn element_by_tag_budgeted(&self, tag: &str, work: &mut usize) -> Option<NodeId> {
+    /// Finds the first connected element with a given tag, charging every node
+    /// and ancestor step to the shared work budget.
+    pub fn element_by_tag_budgeted(
+        &self,
+        tag: &str,
+        work: &mut usize,
+    ) -> Result<Option<NodeId>, DomReadError> {
         for (id, node) in self.iter() {
             if *work == 0 {
-                return None;
+                return Err(DomReadError::BudgetExhausted);
             }
             *work -= 1;
-            if !self.is_connected(id) || self.is_in_template(id) {
+            let context = self.node_context_budgeted(id, work)?;
+            if !context.connected || context.in_template {
                 continue;
             }
             if let NodeKind::Element { tag_name, .. } = node.kind() {
                 if tag_name.eq_ignore_ascii_case(tag) {
-                    return Some(id);
+                    return Ok(Some(id));
                 }
             }
         }
-        None
+        Ok(None)
     }
 
     /// Creates a detached element node with no attributes.
@@ -2672,11 +2728,12 @@ mod tests {
     fn budgeted_selectors_examine_only_the_available_nodes() {
         let document = HtmlDocument::parse("<main><i></i><i></i><i></i></main>");
         let mut work = 2;
-        assert!(document.query_selector_budgeted("missing", &mut work).is_none());
+        assert!(document.query_selector_budgeted("missing", &mut work).is_err());
         assert_eq!(work, 0);
-        let mut work = 7;
-        assert_eq!(document.query_selector_all_budgeted("i", 10, &mut work).len(), 2);
-        assert_eq!(work, 0);
+        let mut work = 100;
+        let nodes = document.query_selector_all_budgeted("i", 10, &mut work).expect("work");
+        assert_eq!(nodes.len(), 3);
+        assert!(work < 100, "ancestor walks must consume DOM work");
     }
 
     #[test]
@@ -2707,18 +2764,32 @@ mod tests {
         let mut dom = document.clone();
         dom.set_text_content(id, &"x".repeat(4096));
 
+        let mut reserve = |_bytes: usize| true;
         let mut work = 100;
-        assert_eq!(dom.text_content_budgeted(id, 8, &mut work), Err(DomReadError::TooLarge));
+        assert_eq!(
+            dom.text_content_budgeted(id, 8, &mut work, &mut reserve),
+            Err(DomReadError::TooLarge)
+        );
 
         let mut work = 1;
         assert_eq!(
-            dom.text_content_budgeted(id, 8192, &mut work),
+            dom.text_content_budgeted(id, 8192, &mut work, &mut reserve),
             Err(DomReadError::BudgetExhausted)
         );
         assert_eq!(work, 0);
 
         let mut work = 2;
-        assert_eq!(dom.text_content_budgeted(id, 8192, &mut work), Ok("x".repeat(4096)));
+        assert_eq!(
+            dom.text_content_budgeted(id, 8192, &mut work, &mut reserve),
+            Ok("x".repeat(4096))
+        );
+
+        let mut work = 2;
+        let mut reject = |_bytes: usize| false;
+        assert_eq!(
+            dom.text_content_budgeted(id, 8192, &mut work, &mut reject),
+            Err(DomReadError::ReservationFailed)
+        );
     }
 
     #[test]
