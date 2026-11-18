@@ -20,6 +20,35 @@ const MAX_PARSE_DEPTH: usize = 64;
 /// compounds recursively, so an unbounded chain of combinators is as dangerous
 /// as unbounded `:not()` nesting.
 const MAX_SELECTOR_COMPOUNDS: usize = 64;
+/// Work units allowed for selector matching during one style computation.
+/// This bounds the total cost of descendant/sibling backtracking, which the
+/// per-selector compound limit alone cannot cap.
+const MATCH_WORK_BUDGET: u64 = 1_000_000;
+
+/// Shared counter limiting selector-matching work for one computation.
+#[derive(Debug, Clone)]
+struct MatchBudget {
+    remaining: u64,
+}
+
+impl MatchBudget {
+    fn new(limit: u64) -> Self {
+        Self { remaining: limit }
+    }
+
+    fn exhausted(&self) -> bool {
+        self.remaining == 0
+    }
+
+    /// Consumes one unit; returns false when no work is left.
+    fn tick(&mut self) -> bool {
+        if self.remaining == 0 {
+            return false;
+        }
+        self.remaining -= 1;
+        true
+    }
+}
 
 /// A token emitted by the CSS lexer.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1172,6 +1201,45 @@ impl StyleEngine {
         viewport_width: f32,
         viewport_height: f32,
     ) -> ComputedStyleMap {
+        self.compute_with_match_budget(
+            document,
+            stylesheets,
+            viewport_width,
+            viewport_height,
+            MATCH_WORK_BUDGET,
+        )
+    }
+
+    /// Computes styles with an explicit selector-matching work budget.
+    /// Exhausting the budget stops further matching; declarations already
+    /// applied remain, so the caller always receives a usable style map.
+    #[must_use]
+    pub fn compute_with_match_budget(
+        &self,
+        document: &HtmlDocument,
+        stylesheets: &[Stylesheet],
+        viewport_width: f32,
+        viewport_height: f32,
+        match_budget: u64,
+    ) -> ComputedStyleMap {
+        let mut budget = MatchBudget::new(match_budget);
+        self.compute_with_viewport_inner(
+            document,
+            stylesheets,
+            viewport_width,
+            viewport_height,
+            &mut budget,
+        )
+    }
+
+    fn compute_with_viewport_inner(
+        &self,
+        document: &HtmlDocument,
+        stylesheets: &[Stylesheet],
+        viewport_width: f32,
+        viewport_height: f32,
+        budget: &mut MatchBudget,
+    ) -> ComputedStyleMap {
         let mut layer_order: HashMap<String, usize> = HashMap::new();
         for sheet in stylesheets {
             for rule in &sheet.rules {
@@ -1213,7 +1281,13 @@ impl StyleEngine {
                     );
                 }
                 for (sheet_index, sheet) in stylesheets.iter().enumerate() {
+                    if budget.exhausted() {
+                        break;
+                    }
                     for rule in &sheet.rules {
+                        if budget.exhausted() {
+                            break;
+                        }
                         if rule.media.as_ref().is_some_and(|media| {
                             !media_matches(media, viewport_width, viewport_height)
                         }) {
@@ -1223,8 +1297,9 @@ impl StyleEngine {
                             .selectors
                             .iter()
                             .filter(|selector| {
-                                selector.pseudo_element.is_none()
-                                    && matches_selector(document, id, selector)
+                                !budget.exhausted()
+                                    && selector.pseudo_element.is_none()
+                                    && matches_selector(document, id, selector, budget)
                             })
                             .map(|selector| selector.specificity)
                             .max();
@@ -1288,8 +1363,16 @@ impl StyleEngine {
         viewport_width: f32,
         viewport_height: f32,
     ) -> (ComputedStyleMap, HashMap<(NodeId, PseudoElement), ComputedStyle>) {
-        let base =
-            self.compute_with_viewport(document, stylesheets, viewport_width, viewport_height);
+        // One budget is shared by the ordinary and generated passes, so an
+        // expensive stylesheet cannot double the allowed work.
+        let mut budget = MatchBudget::new(MATCH_WORK_BUDGET);
+        let base = self.compute_with_viewport_inner(
+            document,
+            stylesheets,
+            viewport_width,
+            viewport_height,
+            &mut budget,
+        );
         let mut layer_order: HashMap<String, usize> = HashMap::new();
         for sheet in stylesheets {
             for rule in &sheet.rules {
@@ -1310,7 +1393,13 @@ impl StyleEngine {
                 continue;
             }
             for (sheet_index, sheet) in stylesheets.iter().enumerate() {
+                if budget.exhausted() {
+                    break;
+                }
                 for rule in &sheet.rules {
+                    if budget.exhausted() {
+                        break;
+                    }
                     if rule
                         .media
                         .as_ref()
@@ -1321,7 +1410,9 @@ impl StyleEngine {
                     let mut best: HashMap<PseudoElement, Specificity> = HashMap::new();
                     for selector in &rule.selectors {
                         if let Some(pseudo) = selector.pseudo_element {
-                            if matches_selector(document, id, selector) {
+                            if !budget.exhausted()
+                                && matches_selector(document, id, selector, &mut budget)
+                            {
                                 best.entry(pseudo)
                                     .and_modify(|current| {
                                         *current = (*current).max(selector.specificity)
@@ -1842,11 +1933,16 @@ fn parse_inline_declarations(source: &str) -> Result<Vec<Declaration>, CssError>
     Ok(parse_declarations(&tokens))
 }
 
-fn matches_selector(document: &HtmlDocument, id: NodeId, selector: &ComplexSelector) -> bool {
+fn matches_selector(
+    document: &HtmlDocument,
+    id: NodeId,
+    selector: &ComplexSelector,
+    budget: &mut MatchBudget,
+) -> bool {
     let Some(last) = selector.compounds.len().checked_sub(1) else {
         return false;
     };
-    matches_from_right(document, id, selector, last)
+    matches_from_right(document, id, selector, last, budget)
 }
 
 fn matches_from_right(
@@ -1854,14 +1950,15 @@ fn matches_from_right(
     id: NodeId,
     selector: &ComplexSelector,
     compound_index: usize,
+    budget: &mut MatchBudget,
 ) -> bool {
-    // Defensive bound even for a selector built programmatically: never walk
-    // more compounds than the parser would ever produce.
-    if compound_index >= MAX_SELECTOR_COMPOUNDS {
+    // Each recursive step and each compound check consumes work. Once the
+    // budget is gone, matching fails closed instead of running unbounded.
+    if compound_index >= MAX_SELECTOR_COMPOUNDS || !budget.tick() {
         return false;
     }
     let Some(node) = document.node(id) else { return false };
-    if !matches_compound(document, id, node.kind(), &selector.compounds[compound_index]) {
+    if !matches_compound(document, id, node.kind(), &selector.compounds[compound_index], budget) {
         return false;
     }
     if compound_index == 0 {
@@ -1869,12 +1966,15 @@ fn matches_from_right(
     }
     match selector.combinators[compound_index - 1] {
         Combinator::Child => node.parent().is_some_and(|parent| {
-            matches_from_right(document, parent, selector, compound_index - 1)
+            matches_from_right(document, parent, selector, compound_index - 1, budget)
         }),
         Combinator::Descendant => {
             let mut parent = node.parent();
             while let Some(parent_id) = parent {
-                if matches_from_right(document, parent_id, selector, compound_index - 1) {
+                if budget.exhausted() {
+                    return false;
+                }
+                if matches_from_right(document, parent_id, selector, compound_index - 1, budget) {
                     return true;
                 }
                 parent = document.node(parent_id).and_then(|parent_node| parent_node.parent());
@@ -1883,13 +1983,16 @@ fn matches_from_right(
         }
         Combinator::AdjacentSibling => {
             previous_element_sibling(document, id).is_some_and(|sibling| {
-                matches_from_right(document, sibling, selector, compound_index - 1)
+                matches_from_right(document, sibling, selector, compound_index - 1, budget)
             })
         }
         Combinator::GeneralSibling => {
             let mut sibling = previous_element_sibling(document, id);
             while let Some(id) = sibling {
-                if matches_from_right(document, id, selector, compound_index - 1) {
+                if budget.exhausted() {
+                    return false;
+                }
+                if matches_from_right(document, id, selector, compound_index - 1, budget) {
                     return true;
                 }
                 sibling = previous_element_sibling(document, id);
@@ -1913,7 +2016,11 @@ fn matches_compound(
     id: NodeId,
     kind: &NodeKind,
     selector: &CompoundSelector,
+    budget: &mut MatchBudget,
 ) -> bool {
+    if !budget.tick() {
+        return false;
+    }
     let NodeKind::Element { tag_name, attributes } = kind else {
         return false;
     };
@@ -2002,7 +2109,7 @@ fn matches_compound(
         }
         PseudoClass::NthLastChild(nth) => sibling_position(document, id, None)
             .is_some_and(|(index, total)| nth.matches(total - index + 1)),
-        PseudoClass::Not(inner) => !matches_compound(document, id, kind, inner),
+        PseudoClass::Not(inner) => !matches_compound(document, id, kind, inner, budget),
     })
 }
 
@@ -2033,10 +2140,11 @@ fn sibling_position(
 #[cfg(test)]
 mod tests {
     use super::{
-        ComputedStyle, MAX_SELECTOR_COMPOUNDS, Specificity, StyleEngine, Stylesheet, TokenKind,
-        tokenize,
+        ComputedStyle, MATCH_WORK_BUDGET, MAX_SELECTOR_COMPOUNDS, Specificity, StyleEngine,
+        Stylesheet, TokenKind, tokenize,
     };
     use bweb_html::{HtmlDocument, NodeKind};
+    use std::time::{Duration, Instant};
 
     #[test]
     fn lexer_recognizes_comments_strings_and_css_punctuation() {
@@ -2450,6 +2558,43 @@ mod tests {
         }
         let error = Stylesheet::parse(&layers).expect_err("deep @layer must fail");
         assert!(error.message.contains("nesting depth"), "unexpected error: {}", error.message);
+    }
+
+    #[test]
+    fn match_budget_bounds_expensive_selector_work() {
+        let mut document = HtmlDocument::parse("<main id='root'></main>");
+        let mut deepest = document.element_by_id("root").expect("root");
+        for _ in 0..120 {
+            let child = document.create_element("div");
+            assert!(document.append_child(deepest, child));
+            deepest = child;
+        }
+        // 64 descendants whose first component never matches: the matcher
+        // backtracks over every ancestor at every node.
+        let sheet = Stylesheet::parse(&format!("{} div {{ color: red }}", "div ".repeat(63)))
+            .expect("64-compound selector");
+
+        // A one-unit budget stops matching immediately; no declaration is applied.
+        let starved = StyleEngine::new().compute_with_match_budget(
+            &document,
+            std::slice::from_ref(&sheet),
+            800.0,
+            600.0,
+            1,
+        );
+        assert_ne!(starved.styles.get(&deepest).and_then(|s| s.get("color")), Some("red"));
+
+        // A normal budget keeps the computation bounded even on the deep DOM.
+        let start = Instant::now();
+        let normal = StyleEngine::new().compute_with_match_budget(
+            &document,
+            &[sheet],
+            800.0,
+            600.0,
+            MATCH_WORK_BUDGET,
+        );
+        assert!(start.elapsed() < Duration::from_secs(3), "matching took too long");
+        assert!(normal.styles.contains_key(&deepest));
     }
 
     #[test]
