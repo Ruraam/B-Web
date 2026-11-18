@@ -102,6 +102,16 @@ fn reserve_handle(
     }
 }
 
+fn read_error(error: DomReadError) -> JsError {
+    let message = match error {
+        DomReadError::BudgetExhausted => "DOM work budget exhausted",
+        DomReadError::ReservationFailed => "script memory budget exceeded",
+        DomReadError::InvalidNode => "invalid element handle",
+        DomReadError::TooLarge => "maximum string length exceeded",
+    };
+    JsError { message: message.into() }
+}
+
 fn mutation_error(error: DomMutationError) -> JsError {
     let message = match error {
         DomMutationError::InvalidNode => "invalid element handle",
@@ -112,6 +122,103 @@ fn mutation_error(error: DomMutationError) -> JsError {
         DomMutationError::LimitExceeded => "DOM structure limit exceeded",
     };
     JsError { message: message.into() }
+}
+
+fn valid_class_token(token: &str) -> bool {
+    !token.is_empty() && !token.chars().any(char::is_whitespace)
+}
+
+fn valid_attribute_name(name: &str) -> bool {
+    !name.is_empty() && !name.chars().any(char::is_whitespace)
+}
+
+fn apply_class_tokens(
+    document: &mut HtmlDocument,
+    id: NodeId,
+    tokens: &[String],
+    work: &mut usize,
+    reserve: &mut dyn FnMut(usize) -> bool,
+) -> Result<(), JsError> {
+    let total = tokens
+        .iter()
+        .map(String::len)
+        .sum::<usize>()
+        .saturating_add(tokens.len().saturating_sub(1));
+    if !reserve(total.saturating_add(HOST_STRING_OVERHEAD)) {
+        return Err(JsError { message: "script memory budget exceeded".into() });
+    }
+    let mut text = String::with_capacity(total);
+    for (index, token) in tokens.iter().enumerate() {
+        if index > 0 {
+            text.push(' ');
+        }
+        text.push_str(token);
+    }
+    document.set_class_prereserved(id, text, work, reserve).map_err(read_error)
+}
+
+fn value_truthy(value: &Value) -> bool {
+    match value {
+        Value::Undefined | Value::Null => false,
+        Value::Bool(value) => *value,
+        Value::Number(value) => *value != 0.0 && !value.is_nan(),
+        Value::String(value) => !value.is_empty(),
+        _ => true,
+    }
+}
+
+fn dataset_attribute(key: &str, reserve: &mut dyn FnMut(usize) -> bool) -> Result<String, JsError> {
+    if key.is_empty() || key.contains('-') || key.chars().any(char::is_whitespace) {
+        return Err(JsError { message: "invalid dataset key".into() });
+    }
+    let mut length = "data-".len();
+    for (index, character) in key.chars().enumerate() {
+        length +=
+            if character.is_ascii_uppercase() && index > 0 { 2 } else { character.len_utf8() };
+    }
+    if !reserve(length.saturating_add(HOST_STRING_OVERHEAD)) {
+        return Err(JsError { message: "script memory budget exceeded".into() });
+    }
+    let mut name = String::with_capacity(length);
+    name.push_str("data-");
+    for (index, character) in key.chars().enumerate() {
+        if character.is_ascii_uppercase() {
+            if index > 0 {
+                name.push('-');
+            }
+            name.push(character.to_ascii_lowercase());
+        } else {
+            name.push(character);
+        }
+    }
+    Ok(name)
+}
+
+fn dataset_key(name: &str, reserve: &mut dyn FnMut(usize) -> bool) -> Result<String, JsError> {
+    let Some(rest) = name.strip_prefix("data-") else {
+        return Err(JsError { message: "invalid dataset attribute".into() });
+    };
+    if rest.is_empty() {
+        return Err(JsError { message: "invalid dataset attribute".into() });
+    }
+    if !reserve(rest.len().saturating_add(HOST_STRING_OVERHEAD)) {
+        return Err(JsError { message: "script memory budget exceeded".into() });
+    }
+    let mut key = String::with_capacity(rest.len());
+    let mut uppercase = false;
+    for character in rest.chars() {
+        if character == '-' {
+            uppercase = true;
+        } else if uppercase {
+            for upper in character.to_uppercase() {
+                key.push(upper);
+            }
+            uppercase = false;
+        } else {
+            key.push(character);
+        }
+    }
+    Ok(key)
 }
 
 fn argument_node(document: &HtmlDocument, value: &Value) -> Result<NodeId, JsError> {
@@ -337,6 +444,10 @@ impl Host for DomHost {
                     let text = finish_budgeted_read(&self.work, work, outcome.map(Some))?;
                     return Ok(Some(Value::String(text)));
                 }
+                "dataset" => {
+                    reserve_handle(reserve, "dataset:", index)?;
+                    return Ok(Some(Value::Host(format!("dataset:{index}"))));
+                }
                 "id" | "class" | "href" | "src" => {
                     let value = document.attribute(id, property).unwrap_or("");
                     if value.len() > MAX_STRING_BYTES
@@ -361,6 +472,68 @@ impl Host for DomHost {
                     return Ok(Some(Value::String(value.to_owned())));
                 }
             }
+        }
+        if let Some(index) = handle_index(object, "classlist:") {
+            let Some(id) = document.node_at(index) else {
+                return Err(JsError { message: "invalid element handle".into() });
+            };
+            let mut work = self.work.get();
+            let outcome = document.class_tokens_budgeted(id, &mut work, reserve);
+            self.work.set(work);
+            let tokens = outcome.map_err(read_error)?;
+            if property == "length" {
+                return Ok(Some(Value::Number(tokens.len() as f64)));
+            }
+            if property == "value" {
+                if !reserve(
+                    tokens
+                        .iter()
+                        .map(String::len)
+                        .sum::<usize>()
+                        .saturating_add(tokens.len().saturating_sub(1))
+                        .saturating_add(HOST_STRING_OVERHEAD),
+                ) {
+                    return Err(JsError { message: "script memory budget exceeded".into() });
+                }
+                return Ok(Some(Value::String(tokens.join(" "))));
+            }
+            if let Ok(position) = property.parse::<usize>() {
+                if let Some(token) = tokens.get(position) {
+                    if !reserve(token.len().saturating_add(HOST_STRING_OVERHEAD)) {
+                        return Err(JsError { message: "script memory budget exceeded".into() });
+                    }
+                    return Ok(Some(Value::String(token.clone())));
+                }
+                return Ok(Some(Value::Undefined));
+            }
+            return Ok(Some(Value::Bool(tokens.iter().any(|token| token == property))));
+        }
+        if let Some(index) = handle_index(object, "dataset:") {
+            let Some(id) = document.node_at(index) else {
+                return Err(JsError { message: "invalid element handle".into() });
+            };
+            if property == "length" || property.parse::<usize>().is_ok() {
+                let mut work = self.work.get();
+                let outcome = document.attribute_names_budgeted(id, &mut work, reserve);
+                self.work.set(work);
+                let names = outcome.map_err(read_error)?;
+                let keys: Vec<String> =
+                    names.into_iter().filter(|name| name.starts_with("data-")).collect();
+                if property == "length" {
+                    return Ok(Some(Value::Number(keys.len() as f64)));
+                }
+                let position = property.parse::<usize>().unwrap_or(usize::MAX);
+                if let Some(name) = keys.get(position) {
+                    return Ok(Some(Value::String(dataset_key(name, reserve)?)));
+                }
+                return Ok(Some(Value::Undefined));
+            }
+            let name = dataset_attribute(property, reserve)?;
+            let mut work = self.work.get();
+            let outcome = document.attribute_budgeted(id, &name, &mut work, reserve);
+            self.work.set(work);
+            let value = outcome.map_err(read_error)?;
+            return Ok(Some(value.map_or(Value::Undefined, Value::String)));
         }
         Ok(None)
     }
@@ -388,6 +561,36 @@ impl Host for DomHost {
             with_style(&mut document, index, property, Some(&text))?;
         }
         Ok(())
+    }
+
+    fn set_with_budget(
+        &mut self,
+        object: &str,
+        property: &str,
+        value: Value,
+        reserve: &mut dyn FnMut(usize) -> bool,
+    ) -> Result<Option<()>, JsError> {
+        let Some(index) = handle_index(object, "dataset:") else {
+            return Ok(None);
+        };
+        let name = dataset_attribute(property, reserve)?;
+        let hint = value.display_size_hint();
+        if hint > MAX_STRING_BYTES || !reserve(hint.saturating_add(HOST_STRING_OVERHEAD)) {
+            return Err(JsError { message: "script memory budget exceeded".into() });
+        }
+        let text = value.display_limited(MAX_STRING_BYTES)?;
+        let Some(document) = self.document.upgrade() else {
+            return Err(JsError { message: "invalid element handle".into() });
+        };
+        let mut document = document.borrow_mut();
+        let Some(id) = document.node_at(index) else {
+            return Err(JsError { message: "invalid element handle".into() });
+        };
+        let mut work = self.work.get();
+        let outcome = document.set_attribute_prereserved(id, &name, text, &mut work, reserve);
+        self.work.set(work);
+        outcome.map_err(read_error)?;
+        Ok(Some(()))
     }
 
     fn call(&mut self, object: &str, method: &str, args: &[Value]) -> Result<Value, JsError> {
@@ -607,6 +810,238 @@ impl Host for DomHost {
         args: &[Value],
         reserve: &mut dyn FnMut(usize) -> bool,
     ) -> Result<Option<Value>, JsError> {
+        if let Some(index) = handle_index(object, "classlist:") {
+            if matches!(method, "add" | "remove" | "toggle" | "replace" | "contains" | "item") {
+                let Some(document) = self.document.upgrade() else {
+                    return Err(JsError { message: "invalid element handle".into() });
+                };
+                let mut document = document.borrow_mut();
+                let Some(id) = document.node_at(index) else {
+                    return Err(JsError { message: "invalid element handle".into() });
+                };
+                let mut work = self.work.get();
+                let outcome = document.class_tokens_budgeted(id, &mut work, reserve);
+                let result: Result<Value, JsError> = match outcome {
+                    Err(error) => Err(read_error(error)),
+                    Ok(mut tokens) => {
+                        for argument in args {
+                            if let Value::String(text) = argument {
+                                if !valid_class_token(text) {
+                                    self.work.set(work);
+                                    return Err(JsError { message: "invalid class token".into() });
+                                }
+                            }
+                        }
+                        if !reserve(
+                            args.len()
+                                .saturating_mul(std::mem::size_of::<String>())
+                                .saturating_add(HOST_STRING_OVERHEAD),
+                        ) {
+                            self.work.set(work);
+                            return Err(JsError {
+                                message: "script memory budget exceeded".into(),
+                            });
+                        }
+                        let mut arguments = Vec::with_capacity(args.len());
+                        for argument in args {
+                            let text = match host_display(argument) {
+                                Ok(text) => text,
+                                Err(error) => {
+                                    self.work.set(work);
+                                    return Err(error);
+                                }
+                            };
+                            if !valid_class_token(&text) {
+                                self.work.set(work);
+                                return Err(JsError { message: "invalid class token".into() });
+                            }
+                            arguments.push(text);
+                        }
+                        let minimum = match method {
+                            "toggle" => 1,
+                            "replace" => 2,
+                            _ => 0,
+                        };
+                        if arguments.len() < minimum {
+                            self.work.set(work);
+                            return Err(JsError { message: "invalid class token".into() });
+                        }
+                        match method {
+                            "add" => {
+                                if arguments.is_empty() {
+                                    Ok(Value::Undefined)
+                                } else {
+                                    for token in &arguments {
+                                        if !tokens.iter().any(|existing| existing == token) {
+                                            tokens.push(token.clone());
+                                        }
+                                    }
+                                    apply_class_tokens(
+                                        &mut document,
+                                        id,
+                                        &tokens,
+                                        &mut work,
+                                        reserve,
+                                    )
+                                    .map(|()| Value::Undefined)
+                                }
+                            }
+                            "remove" => {
+                                if arguments.is_empty() {
+                                    Ok(Value::Undefined)
+                                } else {
+                                    tokens
+                                        .retain(|token| !arguments.iter().any(|arg| arg == token));
+                                    apply_class_tokens(
+                                        &mut document,
+                                        id,
+                                        &tokens,
+                                        &mut work,
+                                        reserve,
+                                    )
+                                    .map(|()| Value::Undefined)
+                                }
+                            }
+                            "toggle" => {
+                                let token = &arguments[0];
+                                let enabled = args.get(1).is_none_or(value_truthy);
+                                let present = tokens.iter().any(|existing| existing == token);
+                                if enabled && !present {
+                                    tokens.push(token.clone());
+                                    apply_class_tokens(
+                                        &mut document,
+                                        id,
+                                        &tokens,
+                                        &mut work,
+                                        reserve,
+                                    )
+                                    .map(|()| Value::Bool(enabled))
+                                } else if !enabled && present {
+                                    tokens.retain(|existing| existing != token);
+                                    apply_class_tokens(
+                                        &mut document,
+                                        id,
+                                        &tokens,
+                                        &mut work,
+                                        reserve,
+                                    )
+                                    .map(|()| Value::Bool(enabled))
+                                } else {
+                                    Ok(Value::Bool(enabled))
+                                }
+                            }
+                            "replace" => {
+                                let old = &arguments[0];
+                                let new = &arguments[1];
+                                if !tokens.iter().any(|existing| existing == old) {
+                                    Ok(Value::Bool(false))
+                                } else {
+                                    for token in &mut tokens {
+                                        if token == old {
+                                            *token = new.clone();
+                                        }
+                                    }
+                                    tokens.dedup();
+                                    apply_class_tokens(
+                                        &mut document,
+                                        id,
+                                        &tokens,
+                                        &mut work,
+                                        reserve,
+                                    )
+                                    .map(|()| Value::Bool(true))
+                                }
+                            }
+                            "contains" => Ok(Value::Bool(
+                                arguments
+                                    .first()
+                                    .is_some_and(|token| tokens.iter().any(|t| t == token)),
+                            )),
+                            "item" => {
+                                let index =
+                                    arguments.first().and_then(|value| value.parse::<usize>().ok());
+                                Ok(index
+                                    .and_then(|index| tokens.get(index).cloned())
+                                    .map_or(Value::Undefined, Value::String))
+                            }
+                            _ => unreachable!("method was checked above"),
+                        }
+                    }
+                };
+                self.work.set(work);
+                return result.map(Some);
+            }
+        }
+        if let Some(index) = handle_index(object, "element:") {
+            if matches!(
+                method,
+                "setAttribute" | "removeAttribute" | "hasAttribute" | "toggleAttribute"
+            ) {
+                let Some(document) = self.document.upgrade() else {
+                    return Err(JsError { message: "invalid element handle".into() });
+                };
+                let mut document = document.borrow_mut();
+                let Some(id) = document.node_at(index) else {
+                    return Err(JsError { message: "invalid element handle".into() });
+                };
+                let mut work = self.work.get();
+                let name = match args.first() {
+                    Some(value) => match host_display(value) {
+                        Ok(name) => name,
+                        Err(error) => {
+                            self.work.set(work);
+                            return Err(error);
+                        }
+                    },
+                    None => {
+                        self.work.set(work);
+                        return Err(JsError { message: "invalid attribute name".into() });
+                    }
+                };
+                if !valid_attribute_name(&name) {
+                    self.work.set(work);
+                    return Err(JsError { message: "invalid attribute name".into() });
+                }
+                let result: Result<Value, JsError> = match method {
+                    "setAttribute" => {
+                        let hint = args.get(1).map_or(0, Value::display_size_hint);
+                        if hint > MAX_STRING_BYTES
+                            || !reserve(hint.saturating_add(HOST_STRING_OVERHEAD))
+                        {
+                            self.work.set(work);
+                            return Err(JsError {
+                                message: "script memory budget exceeded".into(),
+                            });
+                        }
+                        let value = args.get(1).map_or(String::new(), |value| {
+                            value.display_limited(MAX_STRING_BYTES).unwrap_or_default()
+                        });
+                        document
+                            .set_attribute_prereserved(id, &name, value, &mut work, reserve)
+                            .map(|()| Value::Undefined)
+                            .map_err(read_error)
+                    }
+                    "removeAttribute" => document
+                        .remove_attribute_budgeted(id, &name, &mut work)
+                        .map(|_| Value::Undefined)
+                        .map_err(read_error),
+                    "hasAttribute" => document
+                        .has_attribute_budgeted(id, &name, &mut work)
+                        .map(Value::Bool)
+                        .map_err(read_error),
+                    "toggleAttribute" => {
+                        let force = args.get(1).map(value_truthy);
+                        document
+                            .toggle_attribute_budgeted(id, &name, force, &mut work, reserve)
+                            .map(Value::Bool)
+                            .map_err(read_error)
+                    }
+                    _ => unreachable!("method was checked above"),
+                };
+                self.work.set(work);
+                return result.map(Some);
+            }
+        }
         if let Some(index) = handle_index(object, "element:") {
             if matches!(method, "append" | "prepend" | "removeChild" | "replaceChild") {
                 let Some(document) = self.document.upgrade() else {
@@ -619,6 +1054,15 @@ impl Host for DomHost {
                 let mut work = self.work.get();
                 let outcome = match method {
                     "append" | "prepend" => {
+                        if !reserve(
+                            args.len()
+                                .saturating_mul(std::mem::size_of::<NodeId>())
+                                .saturating_add(HOST_STRING_OVERHEAD),
+                        ) {
+                            return Err(JsError {
+                                message: "script memory budget exceeded".into(),
+                            });
+                        }
                         let mut nodes = Vec::with_capacity(args.len());
                         let mut conversion = Ok(());
                         for arg in args {
@@ -1651,5 +2095,109 @@ mod tests {
             delta_ok2 > delta_bad2,
             "a failed replaceChild must not reserve the handle ({delta_bad2} vs {delta_ok2})"
         );
+    }
+
+    #[test]
+    fn class_list_supports_multi_arguments_and_strict_tokens() {
+        let document = Rc::new(RefCell::new(HtmlDocument::parse("<html><body></body></html>")));
+        let events = Rc::new(RefCell::new(EventRegistry::default()));
+        let mut runtime = Runtime::new();
+        runtime.set_host(Box::new(DomHost::new(&document, events)));
+        runtime.define_global("document", Value::Host("document".into()));
+        runtime
+            .eval("let el = document.createElement('div'); document.body.appendChild(el);")
+            .expect("setup");
+
+        runtime.eval("el.classList.add('a', 'a', 'b');").expect("duplicates");
+        assert_eq!(runtime.eval("el.getAttribute('class')").expect("class").display(), "a b");
+        runtime.eval("el.classList.remove('a', 'missing');").expect("remove");
+        assert_eq!(runtime.eval("el.getAttribute('class')").expect("class").display(), "b");
+        assert_eq!(
+            runtime.eval("el.classList.toggle('c', true)").expect("toggle on").display(),
+            "true"
+        );
+        assert_eq!(runtime.eval("el.getAttribute('class')").expect("class").display(), "b c");
+        assert_eq!(
+            runtime.eval("el.classList.toggle('c', false)").expect("toggle off").display(),
+            "false"
+        );
+        assert_eq!(runtime.eval("el.getAttribute('class')").expect("class").display(), "b");
+        assert_eq!(
+            runtime.eval("el.classList.replace('b', 'd')").expect("replace").display(),
+            "true"
+        );
+        assert_eq!(runtime.eval("el.classList.value").expect("value").display(), "d");
+        assert_eq!(runtime.eval("el.classList.length").expect("length").display(), "1");
+        assert_eq!(runtime.eval("el.classList.item(0)").expect("item").display(), "d");
+
+        let error = runtime.eval("el.classList.add('ok', 'bad token')").unwrap_err();
+        assert!(error.message.contains("invalid class token"), "{}", error.message);
+        assert_eq!(runtime.eval("el.getAttribute('class')").expect("intact").display(), "d");
+        let error = runtime.eval("el.classList.add('')").unwrap_err();
+        assert!(error.message.contains("invalid class token"), "{}", error.message);
+        assert_eq!(runtime.eval("el.getAttribute('class')").expect("intact").display(), "d");
+    }
+
+    #[test]
+    fn dataset_converts_both_directions_and_rejects_bad_keys() {
+        let document = Rc::new(RefCell::new(HtmlDocument::parse("<html><body></body></html>")));
+        let events = Rc::new(RefCell::new(EventRegistry::default()));
+        let mut runtime = Runtime::new();
+        runtime.set_host(Box::new(DomHost::new(&document, events)));
+        runtime.define_global("document", Value::Host("document".into()));
+        runtime
+            .eval("let el = document.createElement('div'); document.body.appendChild(el);")
+            .expect("setup");
+
+        runtime.eval("el.dataset.fooBar = 'v';").expect("dataset write");
+        assert_eq!(
+            runtime.eval("el.getAttribute('data-foo-bar')").expect("attribute").display(),
+            "v"
+        );
+        assert_eq!(runtime.eval("el.dataset.fooBar").expect("dataset read").display(), "v");
+        assert_eq!(runtime.eval("el.dataset.length").expect("dataset length").display(), "1");
+        assert_eq!(runtime.eval("el.dataset[0]").expect("dataset key").display(), "fooBar");
+
+        runtime.eval("el.dataset.URL = 'x';").expect("uppercase key");
+        assert_eq!(
+            runtime.eval("el.getAttribute('data-u-r-l')").expect("attribute").display(),
+            "x"
+        );
+
+        let error = runtime.eval("el.dataset['bad-key'] = 'x'").unwrap_err();
+        assert!(error.message.contains("invalid dataset key"), "{}", error.message);
+        let error = runtime.eval("el.dataset['']").unwrap_err();
+        assert!(error.message.contains("invalid dataset key"), "{}", error.message);
+        assert_eq!(
+            runtime.eval("el.getAttribute('data-bad-key')").expect("no write").display(),
+            "null"
+        );
+    }
+
+    #[test]
+    fn class_and_dataset_mutations_honor_budgets() {
+        let document = Rc::new(RefCell::new(HtmlDocument::parse("<html><body></body></html>")));
+        let events = Rc::new(RefCell::new(EventRegistry::default()));
+        let host = DomHost::new(&document, events);
+        let work = host.work_cell();
+        let mut runtime = Runtime::new();
+        runtime.set_host(Box::new(host));
+        runtime.define_global("document", Value::Host("document".into()));
+        runtime.eval("let el = document.createElement('div'); document.body.appendChild(el); el.classList.add('a');").expect("setup");
+
+        work.set(0);
+        let statements = parse("el.classList.add('x')").expect("parse");
+        let error = runtime.run(&statements).unwrap_err();
+        assert!(error.message.contains("DOM work budget"), "{}", error.message);
+        work.set(1_000_000);
+        assert_eq!(runtime.eval("el.getAttribute('class')").expect("intact").display(), "a");
+
+        runtime.set_memory_budget(runtime.memory_used());
+        let statements = parse("el.classList.add('x')").expect("parse");
+        let error = runtime.run(&statements).unwrap_err();
+        assert!(error.message.contains("memory budget"), "{}", error.message);
+        runtime.set_memory_budget(1_000_000);
+        assert_eq!(runtime.eval("el.getAttribute('class')").expect("intact").display(), "a");
+        assert_eq!(runtime.eval("1 + 1").expect("runtime usable").display(), "2");
     }
 }

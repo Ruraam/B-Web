@@ -137,6 +137,13 @@ impl Node {
         &self.kind
     }
 
+    fn attributes_mut(&mut self) -> Option<&mut Vec<Attribute>> {
+        match &mut self.kind {
+            NodeKind::Element { attributes, .. } => Some(attributes),
+            _ => None,
+        }
+    }
+
     #[must_use]
     pub const fn parent(&self) -> Option<NodeId> {
         self.parent
@@ -1196,6 +1203,231 @@ impl HtmlDocument {
         self.nodes[parent.0].children.remove(position);
         self.nodes[id.0].parent = None;
         Ok(Some(RemoveOutcome::Removed))
+    }
+
+    fn read_work(work: &mut usize) -> Result<(), DomReadError> {
+        if *work == 0 {
+            return Err(DomReadError::BudgetExhausted);
+        }
+        *work -= 1;
+        Ok(())
+    }
+
+    fn attribute_position_budgeted(
+        &self,
+        id: NodeId,
+        name: &str,
+        work: &mut usize,
+    ) -> Result<Option<usize>, DomReadError> {
+        Self::read_work(work)?;
+        let Some(node) = self.node(id) else {
+            return Err(DomReadError::InvalidNode);
+        };
+        let NodeKind::Element { attributes, .. } = node.kind() else {
+            return Ok(None);
+        };
+        for (index, attribute) in attributes.iter().enumerate() {
+            Self::read_work(work)?;
+            if attribute.name == name {
+                return Ok(Some(index));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Budgeted enumeration of attribute names, reserved before cloning.
+    pub fn attribute_names_budgeted(
+        &self,
+        id: NodeId,
+        work: &mut usize,
+        reserve: &mut dyn FnMut(usize) -> bool,
+    ) -> Result<Vec<String>, DomReadError> {
+        Self::read_work(work)?;
+        let Some(node) = self.node(id) else {
+            return Err(DomReadError::InvalidNode);
+        };
+        let NodeKind::Element { attributes, .. } = node.kind() else {
+            return Ok(Vec::new());
+        };
+        if !reserve(
+            attributes.len().saturating_mul(std::mem::size_of::<String>()).saturating_add(24),
+        ) {
+            return Err(DomReadError::ReservationFailed);
+        }
+        let mut names = Vec::with_capacity(attributes.len());
+        for attribute in attributes {
+            Self::read_work(work)?;
+            if !reserve(attribute.name.len().saturating_add(24)) {
+                return Err(DomReadError::ReservationFailed);
+            }
+            names.push(attribute.name.clone());
+        }
+        Ok(names)
+    }
+
+    /// Budgeted class token extraction. Each token is reserved before it is
+    /// materialised, so the bridge never allocates an uncharged string.
+    pub fn class_tokens_budgeted(
+        &self,
+        id: NodeId,
+        work: &mut usize,
+        reserve: &mut dyn FnMut(usize) -> bool,
+    ) -> Result<Vec<String>, DomReadError> {
+        Self::read_work(work)?;
+        let value = self.attribute(id, "class").unwrap_or("");
+        let mut tokens = Vec::new();
+        for part in value.split_ascii_whitespace() {
+            Self::read_work(work)?;
+            if tokens.iter().any(|token| token == part) {
+                continue;
+            }
+            if !reserve(part.len().saturating_add(24)) {
+                return Err(DomReadError::ReservationFailed);
+            }
+            tokens.push(part.to_owned());
+        }
+        Ok(tokens)
+    }
+
+    /// Budgeted attribute read with reservation before the value is cloned.
+    pub fn attribute_budgeted(
+        &self,
+        id: NodeId,
+        name: &str,
+        work: &mut usize,
+        reserve: &mut dyn FnMut(usize) -> bool,
+    ) -> Result<Option<String>, DomReadError> {
+        let position = self.attribute_position_budgeted(id, name, work)?;
+        let Some(position) = position else {
+            return Ok(None);
+        };
+        let value = match self.node(id).map(|node| node.kind()) {
+            Some(NodeKind::Element { attributes, .. }) => &attributes[position].value,
+            _ => return Ok(None),
+        };
+        if !reserve(value.len().saturating_add(24)) {
+            return Err(DomReadError::ReservationFailed);
+        }
+        Ok(Some(value.clone()))
+    }
+
+    /// Budgeted attribute presence check.
+    pub fn has_attribute_budgeted(
+        &self,
+        id: NodeId,
+        name: &str,
+        work: &mut usize,
+    ) -> Result<bool, DomReadError> {
+        Ok(self.attribute_position_budgeted(id, name, work)?.is_some())
+    }
+
+    /// Budgeted attribute write. The name and value are reserved before any
+    /// attribute entry is created or replaced.
+    pub fn set_attribute_budgeted(
+        &mut self,
+        id: NodeId,
+        name: &str,
+        value: &str,
+        work: &mut usize,
+        reserve: &mut dyn FnMut(usize) -> bool,
+    ) -> Result<(), DomReadError> {
+        let position = self.attribute_position_budgeted(id, name, work)?;
+        if position.is_none() && !reserve(name.len().saturating_add(24)) {
+            return Err(DomReadError::ReservationFailed);
+        }
+        if !reserve(value.len().saturating_add(24)) {
+            return Err(DomReadError::ReservationFailed);
+        }
+        let attribute = Attribute { name: name.to_owned(), value: value.to_owned() };
+        match position {
+            Some(index) => self.nodes[id.0].attributes_mut().expect("element")[index] = attribute,
+            None => self.nodes[id.0].attributes_mut().expect("element").push(attribute),
+        }
+        Ok(())
+    }
+
+    /// Applies an already reserved attribute value.
+    pub fn set_attribute_prereserved(
+        &mut self,
+        id: NodeId,
+        name: &str,
+        value: String,
+        work: &mut usize,
+        reserve: &mut dyn FnMut(usize) -> bool,
+    ) -> Result<(), DomReadError> {
+        let position = self.attribute_position_budgeted(id, name, work)?;
+        if position.is_none() && !reserve(name.len().saturating_add(24)) {
+            return Err(DomReadError::ReservationFailed);
+        }
+        let attribute = Attribute { name: name.to_owned(), value };
+        match position {
+            Some(index) => self.nodes[id.0].attributes_mut().expect("element")[index] = attribute,
+            None => self.nodes[id.0].attributes_mut().expect("element").push(attribute),
+        }
+        Ok(())
+    }
+
+    /// Applies an already reserved and pre-built class value.
+    pub fn set_class_prereserved(
+        &mut self,
+        id: NodeId,
+        value: String,
+        work: &mut usize,
+        reserve: &mut dyn FnMut(usize) -> bool,
+    ) -> Result<(), DomReadError> {
+        let position = self.attribute_position_budgeted(id, "class", work)?;
+        if position.is_none() && !reserve("class".len().saturating_add(24)) {
+            return Err(DomReadError::ReservationFailed);
+        }
+        let attribute = Attribute { name: "class".to_owned(), value };
+        match position {
+            Some(index) => self.nodes[id.0].attributes_mut().expect("element")[index] = attribute,
+            None => self.nodes[id.0].attributes_mut().expect("element").push(attribute),
+        }
+        Ok(())
+    }
+
+    /// Budgeted attribute removal; a missing attribute is a no-op.
+    pub fn remove_attribute_budgeted(
+        &mut self,
+        id: NodeId,
+        name: &str,
+        work: &mut usize,
+    ) -> Result<bool, DomReadError> {
+        let Some(position) = self.attribute_position_budgeted(id, name, work)? else {
+            return Ok(false);
+        };
+        let attributes = &mut self.nodes[id.0].attributes_mut().expect("element");
+        let shifted = attributes.len().saturating_sub(position).saturating_sub(1);
+        if *work < shifted {
+            *work = 0;
+            return Err(DomReadError::BudgetExhausted);
+        }
+        *work -= shifted;
+        attributes.remove(position);
+        Ok(true)
+    }
+
+    /// Budgeted toggle of a boolean attribute; `force` matches the DOM API.
+    pub fn toggle_attribute_budgeted(
+        &mut self,
+        id: NodeId,
+        name: &str,
+        force: Option<bool>,
+        work: &mut usize,
+        reserve: &mut dyn FnMut(usize) -> bool,
+    ) -> Result<bool, DomReadError> {
+        let present = self.has_attribute_budgeted(id, name, work)?;
+        let enabled = force.unwrap_or(!present);
+        if enabled == present {
+            return Ok(enabled);
+        }
+        if enabled {
+            self.set_attribute_budgeted(id, name, "", work, reserve)?;
+        } else {
+            self.remove_attribute_budgeted(id, name, work)?;
+        }
+        Ok(enabled)
     }
 
     /// Returns whether an element's `class` attribute contains a class token.
@@ -3951,7 +4183,7 @@ mod tests {
 
 #[cfg(test)]
 mod resource_budget_tests {
-    use super::{DocumentLoader, ResourceLimits};
+    use super::{DocumentLoader, DomReadError, HtmlDocument, ResourceLimits};
     use bweb_net::{HttpTransport, NetworkPolicy};
     use bweb_shield::Shield;
     use std::{
@@ -4201,5 +4433,53 @@ mod resource_budget_tests {
         let hits = hits.lock().expect("hits");
         assert_eq!(hits.get("/"), Some(&1));
         assert_eq!(hits.get("/a.png"), None, "no resources fetched after a rejected document");
+    }
+
+    #[test]
+    fn class_and_attribute_helpers_are_budgeted() {
+        let mut document = HtmlDocument::parse("<div id='x' class='a b'></div>");
+        let id = document.element_by_id("x").expect("element");
+        let mut reserve = |_bytes: usize| true;
+
+        let mut work = 100;
+        assert_eq!(
+            document.class_tokens_budgeted(id, &mut work, &mut reserve).expect("tokens"),
+            vec!["a".to_owned(), "b".to_owned()]
+        );
+        assert!(work < 100, "token extraction must consume DOM work");
+
+        let before = document.attribute(id, "class").expect("class").to_owned();
+        let mut tiny = 0;
+        assert_eq!(
+            document.class_tokens_budgeted(id, &mut tiny, &mut reserve),
+            Err(DomReadError::BudgetExhausted)
+        );
+        let mut reject = |_bytes: usize| false;
+        let mut work = 100;
+        assert_eq!(
+            document.class_tokens_budgeted(id, &mut work, &mut reject),
+            Err(DomReadError::ReservationFailed)
+        );
+        assert_eq!(document.attribute(id, "class"), Some(before.as_str()));
+
+        let mut work = 100;
+        document
+            .set_class_prereserved(id, "a b c".to_owned(), &mut work, &mut reserve)
+            .expect("set class");
+        assert_eq!(document.attribute(id, "class"), Some("a b c"));
+
+        let mut work = 100;
+        assert!(document.has_attribute_budgeted(id, "id", &mut work).expect("has id"));
+        let mut work = 100;
+        assert!(
+            document
+                .toggle_attribute_budgeted(id, "hidden", None, &mut work, &mut reserve)
+                .expect("toggle")
+        );
+        let mut work = 100;
+        assert!(document.remove_attribute_budgeted(id, "hidden", &mut work).expect("remove"));
+        let mut work = 100;
+        assert!(!document.has_attribute_budgeted(id, "hidden", &mut work).expect("has"));
+        assert_eq!(document.attribute(id, "class"), Some("a b c"));
     }
 }

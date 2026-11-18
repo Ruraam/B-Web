@@ -213,6 +213,18 @@ pub trait Host {
         Ok(())
     }
 
+    /// Budgeted counterpart of `set`. Returning `Some(())` means the write was
+    /// handled and any memory was reserved by the implementation.
+    fn set_with_budget(
+        &mut self,
+        _object: &str,
+        _property: &str,
+        _value: Value,
+        _reserve: &mut dyn FnMut(usize) -> bool,
+    ) -> Result<Option<()>, JsError> {
+        Ok(None)
+    }
+
     fn call(&mut self, _object: &str, _method: &str, _args: &[Value]) -> Result<Value, JsError> {
         Ok(Value::Undefined)
     }
@@ -1082,10 +1094,26 @@ impl Runtime {
                 match object {
                     Value::Host(name) => {
                         self.charge_host_display(&value)?;
-                        match self.host.as_mut() {
-                            Some(host) => host.set(&name, &property, value),
-                            None => Ok(()),
-                        }
+                        let mut host = self.host.take();
+                        let budgeted = match host.as_mut() {
+                            Some(host) => host.set_with_budget(
+                                &name,
+                                &property,
+                                value.clone(),
+                                &mut |bytes| self.charge_memory(bytes).is_ok(),
+                            ),
+                            None => Ok(None),
+                        };
+                        let result = match budgeted {
+                            Ok(Some(())) => Ok(()),
+                            Ok(None) => match host.as_mut() {
+                                Some(host) => host.set(&name, &property, value),
+                                None => Ok(()),
+                            },
+                            Err(error) => Err(error),
+                        };
+                        self.host = host;
+                        result
                     }
                     Value::Object(object) => {
                         if object.borrow().is_array && property == "length" {
