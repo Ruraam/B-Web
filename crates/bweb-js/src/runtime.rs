@@ -133,12 +133,24 @@ impl Env {
         self.0.borrow_mut().values.insert(name.to_owned(), (value, mutable));
     }
 
-    fn get(&self, name: &str) -> Option<Value> {
-        let data = self.0.borrow();
-        if let Some((value, _)) = data.values.get(name) {
-            return Some(value.clone());
+    /// Looks up a variable, charging the clone before it is made.
+    fn get_checked(
+        &self,
+        name: &str,
+        charge: &mut impl FnMut(&Value) -> Result<(), JsError>,
+    ) -> Result<Option<Value>, JsError> {
+        let parent = {
+            let data = self.0.borrow();
+            if let Some((value, _)) = data.values.get(name) {
+                charge(value)?;
+                return Ok(Some(value.clone()));
+            }
+            data.parent.clone()
+        };
+        match parent {
+            Some(parent) => parent.get_checked(name, charge),
+            None => Ok(None),
         }
-        data.parent.as_ref().and_then(|parent| parent.get(name))
     }
 
     fn assign(&self, name: &str, value: Value) -> Result<(), JsError> {
@@ -194,12 +206,12 @@ const MAX_CALL_DEPTH: usize = 64;
 /// Cumulative allocation budget for one document. It is shared by every script
 /// and event callback and bounds both retained data and allocation churn.
 pub const PAGE_MEMORY_BUDGET: usize = 64 * 1024 * 1024;
-/// Maximum size of a single string produced by a script.
-const MAX_STRING_BYTES: usize = 4 * 1024 * 1024;
-/// Maximum number of elements in a script-created array.
-const MAX_ARRAY_LENGTH: usize = 100_000;
-/// Maximum number of own properties on a plain script object.
-const MAX_OBJECT_PROPERTIES: usize = 10_000;
+/// Maximum size of a single string produced by a script or host value.
+pub const MAX_STRING_BYTES: usize = 4 * 1024 * 1024;
+/// Maximum number of elements in a script-created or host-created array.
+pub const MAX_ARRAY_LENGTH: usize = 100_000;
+/// Maximum number of own properties on a plain script or host object.
+pub const MAX_OBJECT_PROPERTIES: usize = 10_000;
 /// Fixed accounting cost of one heap allocation (string, property slot, value
 /// clone or AST node).
 const ALLOCATION_OVERHEAD: usize = 24;
@@ -302,6 +314,33 @@ impl Runtime {
         self.page_parse_budget = None;
     }
 
+    /// Replaces the JavaScript context with a fresh one containing only the
+    /// built-ins. Globals, functions, output, accumulated memory usage and the
+    /// shared budgets are dropped; the host bridge and configured memory limits
+    /// are kept. Call `set_host` for a new document and `set_page_budget` to
+    /// enable its shared allowances.
+    pub fn reset_context(&mut self) {
+        let host = self.host.take();
+        let memory_budget = self.memory_budget;
+        let max_string_bytes = self.max_string_bytes;
+        let max_array_length = self.max_array_length;
+        let max_object_properties = self.max_object_properties;
+        let fresh = Self::new();
+        self.global = fresh.global;
+        self.output = fresh.output;
+        self.completion = fresh.completion;
+        self.budget = fresh.budget;
+        self.call_depth = fresh.call_depth;
+        self.page_budget = fresh.page_budget;
+        self.page_parse_budget = fresh.page_parse_budget;
+        self.memory_used = fresh.memory_used;
+        self.host = host;
+        self.memory_budget = memory_budget;
+        self.max_string_bytes = max_string_bytes;
+        self.max_array_length = max_array_length;
+        self.max_object_properties = max_object_properties;
+    }
+
     /// Returns the remaining shared page instruction budget, if one is active.
     #[must_use]
     pub const fn page_budget_remaining(&self) -> Option<u64> {
@@ -351,65 +390,117 @@ impl Runtime {
         self.memory_used = used;
     }
 
-    /// Charges a cumulative allocation, aborting once the document budget is
-    /// exhausted.
-    fn charge_memory(&mut self, bytes: usize) -> Result<(), JsError> {
+    /// Verifies that an allocation of `bytes` fits the remaining budget without
+    /// committing it, so callers can check before building a large value.
+    fn ensure_memory(&self, bytes: usize) -> Result<(), JsError> {
         let used = self.memory_used.saturating_add(bytes);
         if used > self.memory_budget {
             return Err(JsError { message: "script memory budget exceeded".into() });
         }
-        self.memory_used = used;
         Ok(())
+    }
+
+    /// Charges a cumulative allocation, aborting once the document budget is
+    /// exhausted.
+    fn charge_memory(&mut self, bytes: usize) -> Result<(), JsError> {
+        self.ensure_memory(bytes)?;
+        self.memory_used = self.memory_used.saturating_add(bytes);
+        Ok(())
+    }
+
+    /// Verifies that a string of `length` bytes is allowed before allocating it.
+    fn ensure_string_len(&self, length: usize) -> Result<(), JsError> {
+        if length > self.max_string_bytes {
+            return Err(JsError { message: "maximum string length exceeded".into() });
+        }
+        self.ensure_memory(length.saturating_add(ALLOCATION_OVERHEAD))
+    }
+
+    /// Reserves the cost of a string before it is built.
+    fn charge_string_len(&mut self, length: usize) -> Result<(), JsError> {
+        self.ensure_string_len(length)?;
+        self.charge_memory(length.saturating_add(ALLOCATION_OVERHEAD))
     }
 
     /// Charges a newly created string and enforces the single-value limit.
     fn charge_string(&mut self, value: &str) -> Result<(), JsError> {
-        if value.len() > self.max_string_bytes {
-            return Err(JsError { message: "maximum string length exceeded".into() });
-        }
-        self.charge_memory(value.len().saturating_add(ALLOCATION_OVERHEAD))
+        self.charge_string_len(value.len())
     }
 
-    /// Converts a value to text and charges the allocation.
+    /// Upper bound on the byte length of `Value::display`, without allocating.
+    /// Exact for strings and host handles; a small conservative bound for the
+    /// numeric and fixed representations.
+    fn display_size_hint(value: &Value) -> usize {
+        match value {
+            Value::String(text) => text.len(),
+            Value::Host(name) => name.len().saturating_add(8),
+            _ => 64,
+        }
+    }
+
+    /// Converts a value to text, reserving the budget before the allocation.
     fn display_charged(&mut self, value: &Value) -> Result<String, JsError> {
-        let text = value.display();
-        self.charge_string(&text)?;
-        Ok(text)
-    }
-
-    /// Appends text while enforcing the single-string size limit.
-    fn push_checked(&self, target: &mut String, part: &str) -> Result<(), JsError> {
-        if target.len().saturating_add(part.len()) > self.max_string_bytes {
-            return Err(JsError { message: "maximum string length exceeded".into() });
-        }
-        target.push_str(part);
-        Ok(())
+        self.charge_string_len(Self::display_size_hint(value))?;
+        Ok(value.display())
     }
 
     /// Charges the copy performed when a value is cloned. Scalar values do not
     /// allocate; strings and host handles duplicate their payload.
-    fn charge_value_clone(&mut self, value: &Value) -> Result<(), JsError> {
+    fn value_clone_cost(value: &Value) -> usize {
         match value {
-            Value::String(text) => self.charge_string(text),
-            Value::Host(name) => self.charge_memory(name.len().saturating_add(ALLOCATION_OVERHEAD)),
-            _ => Ok(()),
+            Value::String(text) => text.len().saturating_add(ALLOCATION_OVERHEAD),
+            Value::Host(name) => name.len().saturating_add(ALLOCATION_OVERHEAD),
+            _ => 0,
         }
     }
 
-    /// Charges values built by the host bridge and returned to scripts.
+    fn charge_value_clone(&mut self, value: &Value) -> Result<(), JsError> {
+        match value {
+            Value::String(text) => self.charge_string(text),
+            _ => self.charge_memory(Self::value_clone_cost(value)),
+        }
+    }
+
+    /// Charges values built by the host bridge and returned to scripts. Host
+    /// objects are untrusted here: their array lengths and property counts are
+    /// validated with the same limits applied to script values.
     fn charge_host_value(&mut self, value: &Value) -> Result<(), JsError> {
         match value {
             Value::String(text) => self.charge_string(text),
             Value::Host(name) => self.charge_memory(name.len().saturating_add(ALLOCATION_OVERHEAD)),
             Value::Object(object) => {
                 let object = object.borrow();
+                if object.is_array {
+                    let length = object.properties.get("length").map_or(0.0, Value::number);
+                    if !length.is_finite()
+                        || length < 0.0
+                        || length > self.max_array_length as f64
+                        || object.properties.len() > self.max_array_length.saturating_add(1)
+                    {
+                        return Err(JsError { message: "maximum array length exceeded".into() });
+                    }
+                } else if object.properties.len() > self.max_object_properties {
+                    return Err(JsError {
+                        message: "maximum object property count exceeded".into(),
+                    });
+                }
                 let mut cost = ALLOCATION_OVERHEAD
                     .saturating_mul(2)
                     .saturating_add(object.properties.len().saturating_mul(ALLOCATION_OVERHEAD));
                 for (key, value) in &object.properties {
+                    if key.len() > self.max_string_bytes {
+                        return Err(JsError { message: "maximum string length exceeded".into() });
+                    }
                     cost = cost.saturating_add(key.len());
                     match value {
-                        Value::String(text) => cost = cost.saturating_add(text.len()),
+                        Value::String(text) => {
+                            if text.len() > self.max_string_bytes {
+                                return Err(JsError {
+                                    message: "maximum string length exceeded".into(),
+                                });
+                            }
+                            cost = cost.saturating_add(text.len());
+                        }
                         Value::Host(name) => cost = cost.saturating_add(name.len()),
                         _ => {}
                     }
@@ -515,9 +606,19 @@ impl Runtime {
         match self.exec_statements(statements, &mut env)? {
             Flow::Return(value) => Ok(value),
             _ => {
-                let value = self.completion.clone();
-                self.charge_value_clone(&value)?;
-                Ok(value)
+                let cost = {
+                    let value = &self.completion;
+                    if let Value::String(text) = value {
+                        if text.len() > self.max_string_bytes {
+                            return Err(JsError {
+                                message: "maximum string length exceeded".into(),
+                            });
+                        }
+                    }
+                    Self::value_clone_cost(value)
+                };
+                self.charge_memory(cost)?;
+                Ok(self.completion.clone())
             }
         }
     }
@@ -677,20 +778,27 @@ impl Runtime {
                 Ok(Value::String(value.clone()))
             }
             Expr::Template(parts) => {
-                let mut text = String::new();
+                self.charge_memory(parts.len().saturating_mul(std::mem::size_of::<String>()))?;
+                let mut rendered = Vec::with_capacity(parts.len());
+                let mut total = 0usize;
                 for part in parts {
                     let value = self.eval_expr(part, env)?;
-                    let part = self.display_charged(&value)?;
-                    self.push_checked(&mut text, &part)?;
+                    let text = self.display_charged(&value)?;
+                    total = total.saturating_add(text.len());
+                    rendered.push(text);
                 }
-                self.charge_string(&text)?;
+                self.ensure_string_len(total)?;
+                let mut text = String::with_capacity(total);
+                for part in rendered {
+                    text.push_str(&part);
+                }
+                self.charge_string_len(total)?;
                 Ok(Value::String(text))
             }
             Expr::Identifier(name) => {
                 let value = env
-                    .get(name)
+                    .get_checked(name, &mut |value| self.charge_value_clone(value))?
                     .ok_or_else(|| JsError { message: format!("'{name}' is not defined") })?;
-                self.charge_value_clone(&value)?;
                 Ok(value)
             }
             Expr::Array(values) => {
@@ -806,9 +914,14 @@ impl Runtime {
                 Ok(value)
             }
             Value::Object(object) => {
-                let value =
-                    object.borrow().properties.get(property).cloned().unwrap_or(Value::Undefined);
-                self.charge_value_clone(&value)?;
+                let value = {
+                    let object = object.borrow();
+                    let Some(value) = object.properties.get(property) else {
+                        return Ok(Value::Undefined);
+                    };
+                    self.charge_value_clone(value)?;
+                    value.clone()
+                };
                 Ok(value)
             }
             Value::String(value) if property == "length" => {
@@ -901,8 +1014,13 @@ impl Runtime {
                 self.charge_memory(ENV_MEMORY_COST)?;
                 let mut env = Env::child(&function.env);
                 for (index, param) in function.params.iter().enumerate() {
-                    let value = args.get(index).cloned().unwrap_or(Value::Undefined);
-                    self.charge_value_clone(&value)?;
+                    let value = match args.get(index) {
+                        Some(value) => {
+                            self.charge_value_clone(value)?;
+                            value.clone()
+                        }
+                        None => Value::Undefined,
+                    };
                     self.charge_memory(param.len().saturating_add(ALLOCATION_OVERHEAD))?;
                     env.define(param, value, true);
                 }
@@ -923,10 +1041,12 @@ impl Runtime {
                 if matches!(&left, Value::String(_)) || matches!(&right, Value::String(_)) {
                     let left_text = self.display_charged(&left)?;
                     let right_text = self.display_charged(&right)?;
-                    let mut text = String::new();
-                    self.push_checked(&mut text, &left_text)?;
-                    self.push_checked(&mut text, &right_text)?;
-                    self.charge_string(&text)?;
+                    let total = left_text.len().saturating_add(right_text.len());
+                    self.ensure_string_len(total)?;
+                    let mut text = String::with_capacity(total);
+                    text.push_str(&left_text);
+                    text.push_str(&right_text);
+                    self.charge_string_len(total)?;
                     Value::String(text)
                 } else {
                     Value::Number(left.number() + right.number())
@@ -950,15 +1070,26 @@ impl Runtime {
 }
 
 fn native_print(runtime: &mut Runtime, args: Vec<Value>) -> Result<Value, JsError> {
-    let mut text = String::new();
-    for (index, arg) in args.iter().enumerate() {
-        if index > 0 {
-            runtime.push_checked(&mut text, " ")?;
-        }
+    runtime.charge_memory(args.len().saturating_mul(std::mem::size_of::<String>()))?;
+    let mut parts = Vec::with_capacity(args.len());
+    let mut total = 0usize;
+    for arg in &args {
         let part = runtime.display_charged(arg)?;
-        runtime.push_checked(&mut text, &part)?;
+        total = total.saturating_add(part.len());
+        parts.push(part);
     }
-    runtime.charge_string(&text)?;
+    if args.len() > 1 {
+        total = total.saturating_add(args.len() - 1);
+    }
+    runtime.ensure_string_len(total)?;
+    let mut text = String::with_capacity(total);
+    for (index, part) in parts.into_iter().enumerate() {
+        if index > 0 {
+            text.push(' ');
+        }
+        text.push_str(&part);
+    }
+    runtime.charge_string_len(total)?;
     runtime.output.push(text);
     Ok(Value::Undefined)
 }
@@ -1034,6 +1165,25 @@ fn string_method(
     method: &str,
     args: &[Value],
 ) -> Result<Value, JsError> {
+    // Compute the exact byte length of the result before building it, so an
+    // over-budget conversion is refused without allocating the large string.
+    let planned_len = match method {
+        "toUpperCase" => value.chars().flat_map(char::to_uppercase).map(char::len_utf8).sum(),
+        "toLowerCase" => value.chars().flat_map(char::to_lowercase).map(char::len_utf8).sum(),
+        "trim" => value.trim().len(),
+        "charAt" => {
+            let index = args.first().map_or(0.0, Value::number).max(0.0) as usize;
+            value.chars().nth(index).map_or(0, char::len_utf8)
+        }
+        "slice" => {
+            let start = args.first().map_or(0.0, Value::number).max(0.0) as usize;
+            let end =
+                args.get(1).map_or(value.chars().count(), |value| value.number().max(0.0) as usize);
+            value.chars().skip(start).take(end.saturating_sub(start)).map(char::len_utf8).sum()
+        }
+        _ => 0,
+    };
+    runtime.ensure_string_len(planned_len)?;
     let result = match method {
         "toUpperCase" => Value::String(value.to_uppercase()),
         "toLowerCase" => Value::String(value.to_lowercase()),
@@ -1073,8 +1223,13 @@ fn array_method(
 ) -> Result<Value, JsError> {
     match method {
         "push" => {
-            let value = args.first().cloned().unwrap_or(Value::Undefined);
-            runtime.charge_value_clone(&value)?;
+            let value = match args.first() {
+                Some(value) => {
+                    runtime.charge_value_clone(value)?;
+                    value.clone()
+                }
+                None => Value::Undefined,
+            };
             let length = runtime.array_length(array)?;
             if length >= runtime.max_array_length {
                 return Err(JsError { message: "maximum array length exceeded".into() });
@@ -1095,13 +1250,16 @@ fn array_method(
             let mut values = Vec::with_capacity(length);
             let mut total = 0usize;
             for index in 0..length {
-                let item = array
-                    .borrow()
-                    .properties
-                    .get(&index.to_string())
-                    .cloned()
-                    .unwrap_or(Value::Undefined);
-                runtime.charge_value_clone(&item)?;
+                let item = {
+                    let array = array.borrow();
+                    match array.properties.get(&index.to_string()) {
+                        Some(item) => {
+                            runtime.charge_value_clone(item)?;
+                            item.clone()
+                        }
+                        None => Value::Undefined,
+                    }
+                };
                 let text = runtime.display_charged(&item)?;
                 total = total.saturating_add(text.len());
                 values.push(text);
@@ -1109,15 +1267,19 @@ fn array_method(
             if length > 1 {
                 total = total.saturating_add(separator.len().saturating_mul(length - 1));
             }
-            if total > runtime.max_string_bytes {
-                return Err(JsError { message: "maximum string length exceeded".into() });
-            }
+            runtime.ensure_string_len(total)?;
             let joined = values.join(&separator);
-            runtime.charge_string(&joined)?;
+            runtime.charge_string_len(total)?;
             Ok(Value::String(joined))
         }
         "forEach" | "map" => {
-            let callback = args.first().cloned().unwrap_or(Value::Undefined);
+            let callback = match args.first() {
+                Some(value) => {
+                    runtime.charge_value_clone(value)?;
+                    value.clone()
+                }
+                None => Value::Undefined,
+            };
             let length = runtime.array_length(array)?;
             let output = if method == "map" {
                 runtime.charge_memory(ALLOCATION_OVERHEAD)?;
@@ -1128,13 +1290,16 @@ fn array_method(
                 None
             };
             for index in 0..length {
-                let item = array
-                    .borrow()
-                    .properties
-                    .get(&index.to_string())
-                    .cloned()
-                    .unwrap_or(Value::Undefined);
-                runtime.charge_value_clone(&item)?;
+                let item = {
+                    let array = array.borrow();
+                    match array.properties.get(&index.to_string()) {
+                        Some(item) => {
+                            runtime.charge_value_clone(item)?;
+                            item.clone()
+                        }
+                        None => Value::Undefined,
+                    }
+                };
                 let result = runtime.call_value(
                     callback.clone(),
                     vec![item, Value::Number(index as f64), Value::Object(array.clone())],

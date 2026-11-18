@@ -13,8 +13,8 @@ pub use ast::{BinaryOp, Expr, LogicalOp, Stmt, UnaryOp, VarKind};
 pub use lexer::{LexError, Token, TokenKind, tokenize};
 pub use parser::{ParseError, parse};
 pub use runtime::{
-    Env, Host, JsError, NativeFn, Object, PAGE_INSTRUCTION_BUDGET, PAGE_MEMORY_BUDGET,
-    PAGE_PARSE_TOKEN_BUDGET, Runtime, Value,
+    Env, Host, JsError, MAX_ARRAY_LENGTH, MAX_OBJECT_PROPERTIES, MAX_STRING_BYTES, NativeFn,
+    Object, PAGE_INSTRUCTION_BUDGET, PAGE_MEMORY_BUDGET, PAGE_PARSE_TOKEN_BUDGET, Runtime, Value,
 };
 
 /// Explicit status of the JavaScript runtime.
@@ -26,7 +26,8 @@ pub enum RuntimeStatus {
 
 #[cfg(test)]
 mod tests {
-    use super::{Host, PAGE_INSTRUCTION_BUDGET, PAGE_MEMORY_BUDGET, Runtime, Value};
+    use super::{Host, Object, PAGE_INSTRUCTION_BUDGET, PAGE_MEMORY_BUDGET, Runtime, Value};
+    use std::{cell::RefCell, rc::Rc};
 
     #[test]
     fn evaluates_arithmetic_and_variables() {
@@ -383,6 +384,95 @@ mod tests {
         runtime.define_global("host", Value::Host("host".into()));
         let error = runtime.eval("host.value").expect_err("host string too large");
         assert!(error.message.contains("string length"), "unexpected error: {}", error.message);
+    }
+
+    struct HostArray;
+
+    impl Host for HostArray {
+        fn get(&self, _object: &str, _property: &str) -> Value {
+            let object = Rc::new(RefCell::new(Object { is_array: true, ..Object::default() }));
+            object.borrow_mut().properties.insert("length".into(), Value::Number(10.0));
+            Value::Object(object)
+        }
+    }
+
+    struct HostObject;
+
+    impl Host for HostObject {
+        fn get(&self, _object: &str, _property: &str) -> Value {
+            let object = Rc::new(RefCell::new(Object::default()));
+            for name in ["a", "b", "c", "d"] {
+                object.borrow_mut().properties.insert(name.into(), Value::Number(1.0));
+            }
+            Value::Object(object)
+        }
+    }
+
+    #[test]
+    fn host_arrays_and_objects_respect_the_limits() {
+        let mut runtime = Runtime::new();
+        runtime.set_allocation_limits(1_000_000, 3, 100);
+        runtime.set_host(Box::new(HostArray));
+        runtime.define_global("host", Value::Host("host".into()));
+        let error = runtime.eval("host.items").expect_err("host array too long");
+        assert!(error.message.contains("array length"), "unexpected error: {}", error.message);
+
+        let mut runtime = Runtime::new();
+        runtime.set_allocation_limits(1_000_000, 100, 3);
+        runtime.set_host(Box::new(HostObject));
+        runtime.define_global("host", Value::Host("host".into()));
+        let error = runtime.eval("host.data").expect_err("host object too large");
+        assert!(error.message.contains("object property"), "unexpected error: {}", error.message);
+    }
+
+    #[test]
+    fn rc_backed_values_are_not_double_charged() {
+        let mut runtime = Runtime::new();
+        runtime.eval("let a = [1, 2, 3];").expect("create array");
+        let before = runtime.memory_used();
+        runtime.eval("let b = a;").expect("alias the Rc-backed array");
+        let delta = runtime.memory_used() - before;
+        assert!(delta <= 64, "aliasing an Rc value cost {delta} bytes");
+    }
+
+    #[test]
+    fn rejected_allocations_do_not_change_memory_usage() {
+        let mut runtime = Runtime::new();
+        runtime.set_memory_budget(1_000);
+        runtime.set_memory_used(950);
+        let before = runtime.memory_used();
+        let error = runtime
+            .eval("'0123456789012345678901234567890123456789'")
+            .expect_err("string allocation must fail");
+        assert!(error.message.contains("memory budget"), "unexpected error: {}", error.message);
+        assert_eq!(runtime.memory_used(), before);
+    }
+
+    #[test]
+    fn reset_context_discards_old_globals_and_keeps_builtins_and_host() {
+        let mut runtime = Runtime::new();
+        runtime
+            .eval("let secret = 'old'; function oldFn() { return 1; } print('old output');")
+            .expect("first document");
+        assert!(runtime.eval("secret").is_ok());
+        assert!(runtime.memory_used() > 0);
+
+        // The bridge is preserved by the reset; the shell then installs the
+        // new document's host with set_host.
+        runtime.set_host(Box::new(LargeStringHost));
+        runtime.reset_context();
+
+        assert_eq!(runtime.memory_used(), 0);
+        assert!(runtime.output().is_empty());
+        assert!(runtime.eval("secret").is_err(), "old global survived the reset");
+        assert!(runtime.eval("oldFn").is_err(), "old function survived the reset");
+        assert_eq!(runtime.eval("1 + 1").expect("built-ins").display(), "2");
+        assert_eq!(runtime.eval("Math.floor(1.9)").expect("Math").display(), "1");
+        runtime.define_global("host", Value::Host("host".into()));
+        assert_eq!(
+            runtime.eval("host.value").expect("host bridge preserved").display(),
+            "x".repeat(128)
+        );
     }
 
     #[test]

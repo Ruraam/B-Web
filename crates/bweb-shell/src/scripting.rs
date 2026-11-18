@@ -7,7 +7,7 @@ use std::{
 };
 
 use bweb_html::HtmlDocument;
-use bweb_js::{Host, JsError, Object, Value};
+use bweb_js::{Host, JsError, MAX_ARRAY_LENGTH, Object, Value};
 
 #[derive(Default)]
 pub struct EventRegistry {
@@ -261,14 +261,17 @@ impl Host for DomHost {
                     };
                     let document = document.borrow();
                     let nodes = document.query_selector_all(&selector);
-                    let mut properties = HashMap::new();
-                    for (index, node) in nodes.iter().enumerate() {
+                    // Cap the host-side object before building it, so the DOM
+                    // bridge cannot allocate an array the runtime would reject.
+                    let visible = nodes.len().min(MAX_ARRAY_LENGTH);
+                    let mut properties = HashMap::with_capacity(visible.saturating_add(1));
+                    for (index, node) in nodes.iter().take(visible).enumerate() {
                         properties.insert(
                             index.to_string(),
                             Value::Host(format!("element:{}", node.index())),
                         );
                     }
-                    properties.insert("length".into(), Value::Number(nodes.len() as f64));
+                    properties.insert("length".into(), Value::Number(visible as f64));
                     return Ok(Value::Object(Rc::new(RefCell::new(Object {
                         properties,
                         is_array: true,
@@ -327,7 +330,7 @@ impl Host for DomHost {
 mod tests {
     use super::{DomHost, EventRegistry};
     use bweb_html::{HtmlDocument, NodeKind};
-    use bweb_js::{Runtime, Value};
+    use bweb_js::{MAX_ARRAY_LENGTH, Runtime, Value};
     use std::{cell::RefCell, rc::Rc};
 
     #[test]
@@ -549,5 +552,19 @@ mod tests {
             events.borrow().callbacks(&format!("element:{}", paragraph.index()), "click").len(),
             1
         );
+    }
+
+    #[test]
+    fn query_selector_all_is_capped_to_the_array_limit() {
+        let document =
+            Rc::new(RefCell::new(HtmlDocument::parse("<i></i>".repeat(MAX_ARRAY_LENGTH + 1))));
+        let events = Rc::new(RefCell::new(EventRegistry::default()));
+        let mut runtime = Runtime::new();
+        runtime.set_host(Box::new(DomHost::new(&document, events)));
+        runtime.define_global("document", Value::Host("document".into()));
+        let length = runtime
+            .eval("document.querySelectorAll('i').length")
+            .expect("querySelectorAll must stay within the array limit");
+        assert_eq!(length.display(), MAX_ARRAY_LENGTH.to_string());
     }
 }
