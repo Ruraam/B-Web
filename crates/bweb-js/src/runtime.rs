@@ -69,6 +69,27 @@ impl Value {
         }
     }
 
+    /// Upper bound on the byte length of `display`, without allocating. Exact
+    /// for strings and host handles; a small conservative bound for the numeric
+    /// and fixed representations.
+    #[must_use]
+    pub fn display_size_hint(&self) -> usize {
+        match self {
+            Self::String(text) => text.len(),
+            Self::Host(name) => name.len().saturating_add(8),
+            _ => 64,
+        }
+    }
+
+    /// Converts to text only after checking the single-string size limit, so a
+    /// host bridge cannot allocate an unbounded conversion.
+    pub fn display_limited(&self, max_bytes: usize) -> Result<String, JsError> {
+        if self.display_size_hint() > max_bytes {
+            return Err(JsError { message: "maximum string length exceeded".into() });
+        }
+        Ok(self.display())
+    }
+
     fn type_name(&self) -> &'static str {
         match self {
             Self::Undefined => "undefined",
@@ -219,6 +240,8 @@ const ALLOCATION_OVERHEAD: usize = 24;
 const ENV_MEMORY_COST: usize = 64;
 /// Accounting cost of one AST node, independent of its payload.
 const AST_NODE_MEMORY_COST: usize = 48;
+/// Maximum nesting depth followed when charging objects returned by the host.
+const MAX_HOST_VALUE_DEPTH: usize = 16;
 
 /// A JavaScript interpreter instance.
 pub struct Runtime {
@@ -427,20 +450,9 @@ impl Runtime {
         self.charge_string_len(value.len())
     }
 
-    /// Upper bound on the byte length of `Value::display`, without allocating.
-    /// Exact for strings and host handles; a small conservative bound for the
-    /// numeric and fixed representations.
-    fn display_size_hint(value: &Value) -> usize {
-        match value {
-            Value::String(text) => text.len(),
-            Value::Host(name) => name.len().saturating_add(8),
-            _ => 64,
-        }
-    }
-
     /// Converts a value to text, reserving the budget before the allocation.
     fn display_charged(&mut self, value: &Value) -> Result<String, JsError> {
-        self.charge_string_len(Self::display_size_hint(value))?;
+        self.charge_string_len(value.display_size_hint())?;
         Ok(value.display())
     }
 
@@ -461,51 +473,97 @@ impl Runtime {
         }
     }
 
+    /// Reserves the cost of a display conversion that the host bridge will
+    /// perform on an argument. The bridge itself is not given the `Runtime`, so
+    /// the charge is made here before handing the value over.
+    pub fn charge_host_display(&mut self, value: &Value) -> Result<(), JsError> {
+        self.charge_string_len(value.display_size_hint())
+    }
+
     /// Charges values built by the host bridge and returned to scripts. Host
-    /// objects are untrusted here: their array lengths and property counts are
-    /// validated with the same limits applied to script values.
+    /// objects are untrusted here: their array lengths, property counts and
+    /// nested objects are validated with the same limits as script values.
     fn charge_host_value(&mut self, value: &Value) -> Result<(), JsError> {
+        let mut visited = Vec::new();
+        self.charge_host_value_inner(value, 0, &mut visited)
+    }
+
+    fn charge_host_value_inner(
+        &mut self,
+        value: &Value,
+        depth: usize,
+        visited: &mut Vec<*const RefCell<Object>>,
+    ) -> Result<(), JsError> {
         match value {
             Value::String(text) => self.charge_string(text),
             Value::Host(name) => self.charge_memory(name.len().saturating_add(ALLOCATION_OVERHEAD)),
             Value::Object(object) => {
-                let object = object.borrow();
-                if object.is_array {
-                    let length = object.properties.get("length").map_or(0.0, Value::number);
-                    if !length.is_finite()
-                        || length < 0.0
-                        || length > self.max_array_length as f64
-                        || object.properties.len() > self.max_array_length.saturating_add(1)
-                    {
-                        return Err(JsError { message: "maximum array length exceeded".into() });
-                    }
-                } else if object.properties.len() > self.max_object_properties {
-                    return Err(JsError {
-                        message: "maximum object property count exceeded".into(),
-                    });
+                if depth >= MAX_HOST_VALUE_DEPTH {
+                    return Err(JsError { message: "host value nesting limit exceeded".into() });
                 }
-                let mut cost = ALLOCATION_OVERHEAD
-                    .saturating_mul(2)
-                    .saturating_add(object.properties.len().saturating_mul(ALLOCATION_OVERHEAD));
-                for (key, value) in &object.properties {
-                    if key.len() > self.max_string_bytes {
-                        return Err(JsError { message: "maximum string length exceeded".into() });
-                    }
-                    cost = cost.saturating_add(key.len());
-                    match value {
-                        Value::String(text) => {
-                            if text.len() > self.max_string_bytes {
-                                return Err(JsError {
-                                    message: "maximum string length exceeded".into(),
-                                });
-                            }
-                            cost = cost.saturating_add(text.len());
+                let pointer = Rc::as_ptr(object);
+                // A cycle or a shared object has already been charged at its
+                // first occurrence; do not bill it again or recurse forever.
+                if visited.contains(&pointer) {
+                    return Ok(());
+                }
+                visited.push(pointer);
+                {
+                    let object = object.borrow();
+                    if object.is_array {
+                        let length = object.properties.get("length").map_or(0.0, Value::number);
+                        if !length.is_finite()
+                            || length < 0.0
+                            || length > self.max_array_length as f64
+                            || object.properties.len() > self.max_array_length.saturating_add(1)
+                        {
+                            return Err(JsError {
+                                message: "maximum array length exceeded".into(),
+                            });
                         }
-                        Value::Host(name) => cost = cost.saturating_add(name.len()),
-                        _ => {}
+                    } else if object.properties.len() > self.max_object_properties {
+                        return Err(JsError {
+                            message: "maximum object property count exceeded".into(),
+                        });
                     }
+                    let mut cost = ALLOCATION_OVERHEAD.saturating_mul(2).saturating_add(
+                        object.properties.len().saturating_mul(ALLOCATION_OVERHEAD),
+                    );
+                    for (key, value) in &object.properties {
+                        if key.len() > self.max_string_bytes {
+                            return Err(JsError {
+                                message: "maximum string length exceeded".into(),
+                            });
+                        }
+                        cost = cost.saturating_add(key.len());
+                        match value {
+                            Value::String(text) => {
+                                if text.len() > self.max_string_bytes {
+                                    return Err(JsError {
+                                        message: "maximum string length exceeded".into(),
+                                    });
+                                }
+                                cost = cost.saturating_add(text.len());
+                            }
+                            Value::Host(name) => cost = cost.saturating_add(name.len()),
+                            _ => {}
+                        }
+                    }
+                    self.charge_memory(cost)?;
                 }
-                self.charge_memory(cost)
+                // Recurse after dropping the parent borrow. Cycle detection
+                // above prevents re-entering an object already on the path.
+                let nested: Vec<Value> = object
+                    .borrow()
+                    .properties
+                    .values()
+                    .filter(|value| matches!(value, Value::Object(_)))
+                    .cloned()
+                    .collect();
+                for value in nested {
+                    self.charge_host_value_inner(&value, depth + 1, visited)?;
+                }
+                Ok(())
             }
             _ => Ok(()),
         }
@@ -939,10 +997,13 @@ impl Runtime {
                 let property = self.eval_expr(property, env)?;
                 let property = self.display_charged(&property)?;
                 match object {
-                    Value::Host(name) => match self.host.as_mut() {
-                        Some(host) => host.set(&name, &property, value),
-                        None => Ok(()),
-                    },
+                    Value::Host(name) => {
+                        self.charge_host_display(&value)?;
+                        match self.host.as_mut() {
+                            Some(host) => host.set(&name, &property, value),
+                            None => Ok(()),
+                        }
+                    }
                     Value::Object(object) => {
                         if object.borrow().is_array && property == "length" {
                             let length = value.number();
@@ -965,6 +1026,11 @@ impl Runtime {
     }
 
     fn call_host(&mut self, host: &str, method: &str, args: &[Value]) -> Result<Value, JsError> {
+        // A host bridge converts its arguments with `Value::display` internally;
+        // reserve that cost before it can allocate the converted strings.
+        for argument in args {
+            self.charge_host_display(argument)?;
+        }
         let value = match self.host.as_mut() {
             Some(bridge) => bridge.call(host, method, args)?,
             None => return Ok(Value::Undefined),

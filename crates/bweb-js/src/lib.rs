@@ -425,6 +425,78 @@ mod tests {
         assert!(error.message.contains("object property"), "unexpected error: {}", error.message);
     }
 
+    struct NestedHost;
+
+    impl Host for NestedHost {
+        fn get(&self, _object: &str, _property: &str) -> Value {
+            let inner = Rc::new(RefCell::new(Object::default()));
+            inner.borrow_mut().properties.insert("data".into(), Value::String("x".repeat(100)));
+            let outer = Rc::new(RefCell::new(Object::default()));
+            outer.borrow_mut().properties.insert("inner".into(), Value::Object(inner));
+            Value::Object(outer)
+        }
+    }
+
+    struct CyclicHost;
+
+    impl Host for CyclicHost {
+        fn get(&self, _object: &str, _property: &str) -> Value {
+            let object = Rc::new(RefCell::new(Object::default()));
+            object.borrow_mut().properties.insert("self".into(), Value::Object(object.clone()));
+            Value::Object(object)
+        }
+    }
+
+    struct SharedHost;
+
+    impl Host for SharedHost {
+        fn get(&self, _object: &str, _property: &str) -> Value {
+            let shared = Rc::new(RefCell::new(Object::default()));
+            shared.borrow_mut().properties.insert("data".into(), Value::String("x".repeat(100)));
+            let outer = Rc::new(RefCell::new(Object::default()));
+            outer.borrow_mut().properties.insert("a".into(), Value::Object(shared.clone()));
+            outer.borrow_mut().properties.insert("b".into(), Value::Object(shared));
+            Value::Object(outer)
+        }
+    }
+
+    #[test]
+    fn nested_host_objects_are_charged_recursively() {
+        let mut runtime = Runtime::new();
+        runtime.set_memory_budget(200);
+        runtime.set_host(Box::new(NestedHost));
+        runtime.define_global("host", Value::Host("host".into()));
+        let error = runtime.eval("host.data").expect_err("nested object must exhaust the budget");
+        assert!(error.message.contains("memory budget"), "unexpected error: {}", error.message);
+    }
+
+    #[test]
+    fn cyclic_and_shared_host_objects_are_bounded() {
+        let mut runtime = Runtime::new();
+        runtime.set_host(Box::new(CyclicHost));
+        runtime.define_global("host", Value::Host("host".into()));
+        runtime.eval("host.node").expect("a cycle must not recurse forever");
+
+        let mut runtime = Runtime::new();
+        runtime.set_memory_budget(1500);
+        runtime.set_host(Box::new(SharedHost));
+        runtime.define_global("host", Value::Host("host".into()));
+        runtime.eval("host.node").expect("a shared object must be charged once");
+        assert!(runtime.memory_used() <= 1500);
+    }
+
+    #[test]
+    fn host_display_reserves_the_budget_before_conversion() {
+        let mut runtime = Runtime::new();
+        runtime.set_memory_budget(100);
+        runtime.set_memory_used(90);
+        let error = runtime
+            .charge_host_display(&Value::String("x".repeat(50)))
+            .expect_err("conversion must be refused before allocation");
+        assert!(error.message.contains("memory budget"), "unexpected error: {}", error.message);
+        assert_eq!(runtime.memory_used(), 90);
+    }
+
     #[test]
     fn rc_backed_values_are_not_double_charged() {
         let mut runtime = Runtime::new();

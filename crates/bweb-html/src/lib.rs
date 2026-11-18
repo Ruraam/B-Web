@@ -338,6 +338,25 @@ impl HtmlDocument {
         self.nodes[id.0].children.push(child);
     }
 
+    fn simple_selector_matches(&self, id: NodeId, node: &Node, selector: &str) -> bool {
+        if self.is_in_template(id) {
+            return false;
+        }
+        let NodeKind::Element { tag_name, attributes } = node.kind() else {
+            return false;
+        };
+        if let Some(name) = selector.strip_prefix('#') {
+            attributes.iter().any(|attribute| attribute.name == "id" && attribute.value == name)
+        } else if let Some(name) = selector.strip_prefix('.') {
+            attributes.iter().any(|attribute| {
+                attribute.name == "class"
+                    && attribute.value.split_ascii_whitespace().any(|part| part == name)
+            })
+        } else {
+            tag_name.eq_ignore_ascii_case(selector)
+        }
+    }
+
     /// Finds the first element matching a simple tag, `#id` or `.class` selector.
     #[must_use]
     pub fn query_selector(&self, selector: &str) -> Option<NodeId> {
@@ -345,57 +364,30 @@ impl HtmlDocument {
         if selector.is_empty() {
             return None;
         }
-        self.iter().find_map(|(id, node)| {
-            if self.is_in_template(id) {
-                return None;
-            }
-            let NodeKind::Element { tag_name, attributes } = node.kind() else {
-                return None;
-            };
-            let matches = if let Some(name) = selector.strip_prefix('#') {
-                attributes.iter().any(|attribute| attribute.name == "id" && attribute.value == name)
-            } else if let Some(name) = selector.strip_prefix('.') {
-                attributes.iter().any(|attribute| {
-                    attribute.name == "class"
-                        && attribute.value.split_ascii_whitespace().any(|part| part == name)
-                })
-            } else {
-                tag_name.eq_ignore_ascii_case(selector)
-            };
-            matches.then_some(id)
-        })
+        self.iter()
+            .find_map(|(id, node)| self.simple_selector_matches(id, node, selector).then_some(id))
     }
 
     /// Returns every element matching a simple tag, `#id` or `.class` selector
     /// in document order.
     #[must_use]
     pub fn query_selector_all(&self, selector: &str) -> Vec<NodeId> {
+        self.query_selector_all_limited(selector, usize::MAX)
+    }
+
+    /// Returns at most `limit` matching elements in document order, stopping the
+    /// traversal as soon as the limit is reached. No collection of the full
+    /// result set is built.
+    #[must_use]
+    pub fn query_selector_all_limited(&self, selector: &str, limit: usize) -> Vec<NodeId> {
         let selector = selector.trim();
-        if selector.is_empty() {
+        if selector.is_empty() || limit == 0 {
             return Vec::new();
         }
         self.iter()
-            .filter(|(id, node)| {
-                if self.is_in_template(*id) {
-                    return false;
-                }
-                let NodeKind::Element { tag_name, attributes } = node.kind() else {
-                    return false;
-                };
-                if let Some(name) = selector.strip_prefix('#') {
-                    attributes
-                        .iter()
-                        .any(|attribute| attribute.name == "id" && attribute.value == name)
-                } else if let Some(name) = selector.strip_prefix('.') {
-                    attributes.iter().any(|attribute| {
-                        attribute.name == "class"
-                            && attribute.value.split_ascii_whitespace().any(|part| part == name)
-                    })
-                } else {
-                    tag_name.eq_ignore_ascii_case(selector)
-                }
-            })
+            .filter(|(id, node)| self.simple_selector_matches(*id, node, selector))
             .map(|(id, _)| id)
+            .take(limit)
             .collect()
     }
 
@@ -2344,6 +2336,18 @@ mod tests {
             document.node(main).is_some_and(|node| node.children().contains(&child)),
             "existing children must survive a rejected set_text_content"
         );
+    }
+
+    #[test]
+    fn query_selector_all_limited_stops_at_the_limit() {
+        let document = HtmlDocument::parse(
+            "<main><i class='item'></i><i class='item'></i><i class='item'></i><i></i></main>",
+        );
+        assert_eq!(document.query_selector_all("i").len(), 4);
+        assert_eq!(document.query_selector_all_limited("i", 2).len(), 2);
+        assert_eq!(document.query_selector_all_limited("i", 0).len(), 0);
+        assert_eq!(document.query_selector_all_limited("i", 10).len(), 4);
+        assert_eq!(document.query_selector_all_limited(".item", 2).len(), 2);
     }
 
     #[test]

@@ -7,7 +7,14 @@ use std::{
 };
 
 use bweb_html::HtmlDocument;
-use bweb_js::{Host, JsError, MAX_ARRAY_LENGTH, Object, Value};
+use bweb_js::{Host, JsError, MAX_ARRAY_LENGTH, MAX_STRING_BYTES, Object, Value};
+
+/// Converts a host argument to text after checking the single-string limit.
+/// The runtime reserves the cumulative budget for this conversion before the
+/// bridge is invoked; this check prevents an unbounded allocation here.
+fn host_display(value: &Value) -> Result<String, JsError> {
+    value.display_limited(MAX_STRING_BYTES)
+}
 
 #[derive(Default)]
 pub struct EventRegistry {
@@ -153,32 +160,36 @@ impl Host for DomHost {
     }
 
     fn set(&mut self, object: &str, property: &str, value: Value) -> Result<(), JsError> {
+        let text = host_display(&value)?;
         let Some(document) = self.document.upgrade() else { return Ok(()) };
         let mut document = document.borrow_mut();
         if object == "document" && property == "title" {
-            document.set_title(value.display());
+            document.set_title(text);
             return Ok(());
         }
         if let Some(index) = handle_index(object, "element:") {
             let Some(id) = document.node_at(index) else { return Ok(()) };
             match property {
-                "textContent" => document.set_text_content(id, &value.display()),
+                "textContent" => document.set_text_content(id, &text),
                 "id" | "class" | "href" | "src" | "style" => {
-                    document.set_attribute(id, property, &value.display());
+                    document.set_attribute(id, property, &text);
                 }
                 _ => {}
             }
             return Ok(());
         }
         if let Some(index) = handle_index(object, "style:") {
-            with_style(&mut document, index, property, Some(&value.display()));
+            with_style(&mut document, index, property, Some(&text));
         }
         Ok(())
     }
 
     fn call(&mut self, object: &str, method: &str, args: &[Value]) -> Result<Value, JsError> {
         if let Some(index) = handle_index(object, "classlist:") {
-            let class = args.first().map_or(String::new(), Value::display);
+            let class = match args.first() {
+                Some(value) => host_display(value)?,
+                None => String::new(),
+            };
             let Some(document) = self.document.upgrade() else { return Ok(Value::Undefined) };
             let mut document = document.borrow_mut();
             let Some(id) = document.node_at(index) else { return Ok(Value::Undefined) };
@@ -201,7 +212,10 @@ impl Host for DomHost {
             };
         }
         if method == "addEventListener" {
-            let event = args.first().map_or(String::new(), Value::display);
+            let event = match args.first() {
+                Some(value) => host_display(value)?,
+                None => String::new(),
+            };
             if let Some(callback) = args.get(1).cloned() {
                 self.events.borrow_mut().add(object, &event, callback);
             }
@@ -218,13 +232,20 @@ impl Host for DomHost {
             return match method {
                 "setAttribute" => {
                     if let Some(name) = args.first() {
-                        let value = args.get(1).map_or(String::new(), Value::display);
-                        document.set_attribute(id, &name.display(), &value);
+                        let name = host_display(name)?;
+                        let value = match args.get(1) {
+                            Some(value) => host_display(value)?,
+                            None => String::new(),
+                        };
+                        document.set_attribute(id, &name, &value);
                     }
                     Ok(Value::Undefined)
                 }
                 "getAttribute" => {
-                    let name = args.first().map_or(String::new(), Value::display);
+                    let name = match args.first() {
+                        Some(value) => host_display(value)?,
+                        None => String::new(),
+                    };
                     Ok(document
                         .attribute(id, &name)
                         .map_or(Value::Null, |v| Value::String(v.to_owned())))
@@ -250,7 +271,7 @@ impl Host for DomHost {
         if object == "document" {
             match method {
                 "querySelectorAll" => {
-                    let Some(selector) = args.first().map(Value::display) else {
+                    let Some(selector) = args.first().map(host_display).transpose()? else {
                         return Ok(Value::Object(Rc::new(RefCell::new(Object {
                             properties: HashMap::from([("length".into(), Value::Number(0.0))]),
                             is_array: true,
@@ -260,12 +281,12 @@ impl Host for DomHost {
                         return Ok(Value::Undefined);
                     };
                     let document = document.borrow();
-                    let nodes = document.query_selector_all(&selector);
-                    // Cap the host-side object before building it, so the DOM
-                    // bridge cannot allocate an array the runtime would reject.
-                    let visible = nodes.len().min(MAX_ARRAY_LENGTH);
+                    // The DOM traversal stops at the limit, so the full result
+                    // set is never collected into an intermediate vector.
+                    let nodes = document.query_selector_all_limited(&selector, MAX_ARRAY_LENGTH);
+                    let visible = nodes.len();
                     let mut properties = HashMap::with_capacity(visible.saturating_add(1));
-                    for (index, node) in nodes.iter().take(visible).enumerate() {
+                    for (index, node) in nodes.iter().enumerate() {
                         properties.insert(
                             index.to_string(),
                             Value::Host(format!("element:{}", node.index())),
@@ -278,7 +299,7 @@ impl Host for DomHost {
                     }))));
                 }
                 "createElement" => {
-                    let Some(tag) = args.first().map(Value::display) else {
+                    let Some(tag) = args.first().map(host_display).transpose()? else {
                         return Ok(Value::Null);
                     };
                     let Some(document) = self.document.upgrade() else {
@@ -289,7 +310,7 @@ impl Host for DomHost {
                     return Ok(Value::Host(format!("element:{}", node.index())));
                 }
                 "getElementById" | "querySelector" => {
-                    let Some(selector) = args.first().map(Value::display) else {
+                    let Some(selector) = args.first().map(host_display).transpose()? else {
                         return Ok(Value::Null);
                     };
                     let Some(document) = self.document.upgrade() else {
@@ -306,7 +327,20 @@ impl Host for DomHost {
                     }));
                 }
                 "write" => {
-                    let text = args.iter().map(Value::display).collect::<Vec<_>>().join(" ");
+                    let mut parts = Vec::with_capacity(args.len());
+                    let mut total = 0usize;
+                    for argument in args {
+                        let part = host_display(argument)?;
+                        total = total.saturating_add(part.len());
+                        parts.push(part);
+                    }
+                    if args.len() > 1 {
+                        total = total.saturating_add(args.len() - 1);
+                    }
+                    if total > MAX_STRING_BYTES {
+                        return Err(JsError { message: "maximum string length exceeded".into() });
+                    }
+                    let text = parts.join(" ");
                     let Some(document) = self.document.upgrade() else {
                         return Ok(Value::Undefined);
                     };
@@ -330,7 +364,7 @@ impl Host for DomHost {
 mod tests {
     use super::{DomHost, EventRegistry};
     use bweb_html::{HtmlDocument, NodeKind};
-    use bweb_js::{MAX_ARRAY_LENGTH, Runtime, Value};
+    use bweb_js::{MAX_ARRAY_LENGTH, MAX_STRING_BYTES, Runtime, Value};
     use std::{cell::RefCell, rc::Rc};
 
     #[test]
@@ -566,5 +600,12 @@ mod tests {
             .eval("document.querySelectorAll('i').length")
             .expect("querySelectorAll must stay within the array limit");
         assert_eq!(length.display(), MAX_ARRAY_LENGTH.to_string());
+    }
+
+    #[test]
+    fn dom_argument_conversion_rejects_oversized_strings() {
+        let value = Value::String("x".repeat(MAX_STRING_BYTES + 1));
+        let error = super::host_display(&value).expect_err("conversion must be refused");
+        assert!(error.message.contains("string length"), "unexpected error: {}", error.message);
     }
 }
