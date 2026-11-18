@@ -6,7 +6,7 @@ use std::{
     rc::{Rc, Weak},
 };
 
-use bweb_html::{DomReadError, HtmlDocument, RemoveOutcome};
+use bweb_html::{DomMutationError, DomReadError, HtmlDocument, NodeId, RemoveOutcome};
 use bweb_js::{Host, JsError, MAX_ARRAY_LENGTH, MAX_STRING_BYTES, Object, Value};
 
 /// Converts a host argument to text after checking the single-string limit.
@@ -100,6 +100,26 @@ fn reserve_handle(
     } else {
         Err(JsError { message: "script memory budget exceeded".into() })
     }
+}
+
+fn mutation_error(error: DomMutationError) -> JsError {
+    let message = match error {
+        DomMutationError::InvalidNode => "invalid element handle",
+        DomMutationError::InvalidChild => "node is not a child of this element",
+        DomMutationError::AlreadyAttached => "node is already attached",
+        DomMutationError::Cycle => "DOM cycle detected",
+        DomMutationError::BudgetExhausted => "DOM work budget exhausted",
+        DomMutationError::LimitExceeded => "DOM structure limit exceeded",
+    };
+    JsError { message: message.into() }
+}
+
+fn argument_node(document: &HtmlDocument, value: &Value) -> Result<NodeId, JsError> {
+    let handle =
+        host_handle(value).ok_or_else(|| JsError { message: "invalid element handle".into() })?;
+    let index = handle_index(&handle, "element:")
+        .ok_or_else(|| JsError { message: "invalid element handle".into() })?;
+    document.node_at(index).ok_or_else(|| JsError { message: "invalid element handle".into() })
 }
 
 /// Exposes a document to scripts through the `document` host object.
@@ -587,6 +607,83 @@ impl Host for DomHost {
         args: &[Value],
         reserve: &mut dyn FnMut(usize) -> bool,
     ) -> Result<Option<Value>, JsError> {
+        if let Some(index) = handle_index(object, "element:") {
+            if matches!(method, "append" | "prepend" | "removeChild" | "replaceChild") {
+                let Some(document) = self.document.upgrade() else {
+                    return Err(JsError { message: "invalid element handle".into() });
+                };
+                let mut document = document.borrow_mut();
+                let Some(parent) = document.node_at(index) else {
+                    return Err(JsError { message: "invalid element handle".into() });
+                };
+                let mut work = self.work.get();
+                let outcome = match method {
+                    "append" | "prepend" => {
+                        let mut nodes = Vec::with_capacity(args.len());
+                        let mut conversion = Ok(());
+                        for arg in args {
+                            match argument_node(&document, arg) {
+                                Ok(node) => nodes.push(node),
+                                Err(error) => {
+                                    conversion = Err(error);
+                                    break;
+                                }
+                            }
+                        }
+                        if let Err(error) = conversion {
+                            self.work.set(work);
+                            return Err(error);
+                        }
+                        let result = if method == "append" {
+                            document.append_children_budgeted(parent, &nodes, &mut work)
+                        } else {
+                            document.prepend_children_budgeted(parent, &nodes, &mut work)
+                        };
+                        result.map(|()| Value::Undefined).map_err(mutation_error)
+                    }
+                    "removeChild" => {
+                        let child = argument_node(
+                            &document,
+                            args.first().ok_or_else(|| JsError {
+                                message: "invalid element handle".into(),
+                            })?,
+                        )?;
+                        let plan = document.plan_remove_child_budgeted(parent, child, &mut work);
+                        self.work.set(work);
+                        let position = plan.map_err(mutation_error)?;
+                        // Reserve only after the mutation is known to succeed.
+                        reserve_handle(reserve, "element:", child.index())?;
+                        document.apply_remove_child(parent, position);
+                        Ok(Value::Host(format!("element:{}", child.index())))
+                    }
+                    "replaceChild" => {
+                        let new_child = argument_node(
+                            &document,
+                            args.first().ok_or_else(|| JsError {
+                                message: "invalid element handle".into(),
+                            })?,
+                        )?;
+                        let old_child = argument_node(
+                            &document,
+                            args.get(1).ok_or_else(|| JsError {
+                                message: "invalid element handle".into(),
+                            })?,
+                        )?;
+                        let plan = document
+                            .plan_replace_child_budgeted(parent, new_child, old_child, &mut work);
+                        self.work.set(work);
+                        let position = plan.map_err(mutation_error)?;
+                        // Reserve only after the mutation is known to succeed.
+                        reserve_handle(reserve, "element:", old_child.index())?;
+                        document.apply_replace_child(parent, position, new_child);
+                        Ok(Value::Host(format!("element:{}", old_child.index())))
+                    }
+                    _ => unreachable!("method was checked above"),
+                };
+                self.work.set(work);
+                return outcome.map(Some);
+            }
+        }
         if method == "getAttribute" {
             if let Some(index) = handle_index(object, "element:") {
                 let Some(name) = args.first() else { return Ok(Some(Value::Null)) };
@@ -676,7 +773,7 @@ impl Host for DomHost {
 mod tests {
     use super::{DomHost, EventRegistry};
     use bweb_html::{HtmlDocument, NodeKind};
-    use bweb_js::{JsError, MAX_ARRAY_LENGTH, MAX_STRING_BYTES, Runtime, Value};
+    use bweb_js::{JsError, MAX_ARRAY_LENGTH, MAX_STRING_BYTES, Runtime, Value, parse};
     use std::{cell::RefCell, rc::Rc};
 
     fn eval_with_budget(
@@ -1407,6 +1504,152 @@ mod tests {
             error.message.contains("invalid element handle"),
             "unexpected error: {}",
             error.message
+        );
+    }
+
+    #[test]
+    fn append_prepend_remove_child_and_replace_child_work_in_javascript() {
+        let document = Rc::new(RefCell::new(HtmlDocument::parse("<html><body></body></html>")));
+        let events = Rc::new(RefCell::new(EventRegistry::default()));
+        let mut runtime = Runtime::new();
+        runtime.set_host(Box::new(DomHost::new(&document, events)));
+        runtime.define_global("document", Value::Host("document".into()));
+        runtime
+            .eval("let box = document.createElement('div'); document.body.appendChild(box); let a = document.createElement('i'); a.textContent = 'a'; let b = document.createElement('i'); b.textContent = 'b'; let c = document.createElement('i'); c.textContent = 'c';")
+            .expect("setup");
+
+        runtime.eval("box.append(a, b); box.prepend(c);").expect("append and prepend");
+        assert_eq!(runtime.eval("box.textContent").expect("order").display(), "cab");
+
+        let removed = runtime.eval("box.removeChild(a)").expect("removeChild");
+        assert_eq!(removed.display(), "[host element:5]", "the removed handle format");
+        assert_eq!(runtime.eval("a.textContent").expect("removed handle").display(), "a");
+        assert_eq!(runtime.eval("box.textContent").expect("after remove").display(), "cb");
+
+        runtime
+            .eval("let x = document.createElement('i'); x.textContent = 'x';")
+            .expect("new child");
+        let old = runtime.eval("box.replaceChild(x, b)").expect("replaceChild");
+        assert_eq!(old.display(), "[host element:7]", "the replaced handle format");
+        assert_eq!(runtime.eval("b.textContent").expect("old handle").display(), "b");
+        assert_eq!(runtime.eval("box.textContent").expect("after replace").display(), "cx");
+    }
+
+    #[test]
+    fn dom_mutation_errors_are_explicit_and_do_not_change_the_dom() {
+        let document = Rc::new(RefCell::new(HtmlDocument::parse("<html><body></body></html>")));
+        let events = Rc::new(RefCell::new(EventRegistry::default()));
+        let host = DomHost::new(&document, events);
+        let work = host.work_cell();
+        let mut runtime = Runtime::new();
+        runtime.set_host(Box::new(host));
+        runtime.define_global("document", Value::Host("document".into()));
+        runtime.define_global("stale", Value::Host("element:9999999".into()));
+        runtime
+            .eval("let box = document.createElement('div'); document.body.appendChild(box); let a = document.createElement('i'); a.textContent = 'a'; box.append(a); let grand = document.createElement('i'); a.appendChild(grand);")
+            .expect("setup");
+        let before = runtime.eval("box.textContent").expect("before").display();
+
+        let error = runtime.eval("box.removeChild(grand)").unwrap_err();
+        assert!(error.message.contains("not a child"), "{}", error.message);
+        let statements = parse("box.replaceChild(a, grand)").expect("parse");
+        let error = runtime.run(&statements).unwrap_err();
+        assert!(error.message.contains("already attached"), "{}", error.message);
+        let error = runtime.eval("box.removeChild(stale)").unwrap_err();
+        assert!(error.message.contains("invalid element handle"), "{}", error.message);
+        let error = runtime.eval("box.append(a)").unwrap_err();
+        assert!(error.message.contains("already attached"), "{}", error.message);
+        assert_eq!(runtime.eval("box.textContent").expect("intact").display(), before);
+
+        work.set(1);
+        let error = runtime.eval("let d = document.createElement('i'); box.append(d)").unwrap_err();
+        assert!(error.message.contains("DOM work budget"), "{}", error.message);
+        work.set(1_000_000);
+        assert_eq!(runtime.eval("box.textContent").expect("intact").display(), before);
+
+        let before_memory = runtime.memory_used();
+        let statements = parse("box.removeChild(a)").expect("parse");
+        let removed = runtime.run(&statements).expect("successful removeChild");
+        assert!(removed.display().starts_with("[host"), "the removed handle is returned");
+        assert!(runtime.memory_used() > before_memory, "a successful handle must be reserved");
+        assert_eq!(runtime.eval("1 + 1").expect("runtime usable").display(), "2");
+    }
+
+    #[test]
+    fn failed_mutations_do_not_reserve_the_returned_handle() {
+        let document_ok = Rc::new(RefCell::new(HtmlDocument::parse("<html><body></body></html>")));
+        let mut runtime_ok = Runtime::new();
+        runtime_ok.set_host(Box::new(DomHost::new(
+            &document_ok,
+            Rc::new(RefCell::new(EventRegistry::default())),
+        )));
+        runtime_ok.define_global("document", Value::Host("document".into()));
+        runtime_ok
+            .eval("let box = document.createElement('div'); document.body.appendChild(box); let n = document.createElement('i'); n.textContent = 'n'; box.appendChild(n); let other = document.createElement('i'); other.textContent = 'o';")
+            .expect("setup success");
+        let before_ok = runtime_ok.memory_used();
+        let statements = parse("box.removeChild(n)").expect("parse");
+        let removed = runtime_ok.run(&statements).expect("successful removeChild");
+        assert!(removed.display().starts_with("[host"));
+        let delta_ok = runtime_ok.memory_used() - before_ok;
+
+        let document_bad = Rc::new(RefCell::new(HtmlDocument::parse("<html><body></body></html>")));
+        let mut runtime_bad = Runtime::new();
+        runtime_bad.set_host(Box::new(DomHost::new(
+            &document_bad,
+            Rc::new(RefCell::new(EventRegistry::default())),
+        )));
+        runtime_bad.define_global("document", Value::Host("document".into()));
+        runtime_bad
+            .eval("let box = document.createElement('div'); document.body.appendChild(box); let n = document.createElement('i'); n.textContent = 'n'; let other = document.createElement('i'); other.textContent = 'o'; box.appendChild(other); other.appendChild(n);")
+            .expect("setup failure");
+        let before_bad = runtime_bad.memory_used();
+        let statements = parse("box.removeChild(n)").expect("parse");
+        let error = runtime_bad.run(&statements).unwrap_err();
+        assert!(error.message.contains("not a child"), "{}", error.message);
+        let delta_bad = runtime_bad.memory_used() - before_bad;
+        assert!(
+            delta_ok > delta_bad,
+            "a failed removeChild must not reserve the handle ({delta_bad} vs {delta_ok})"
+        );
+
+        // Same check for replaceChild: `other` is detached in the first runtime
+        // and already attached in the second, with an identical script.
+        let document_ok2 = Rc::new(RefCell::new(HtmlDocument::parse("<html><body></body></html>")));
+        let mut runtime_ok2 = Runtime::new();
+        runtime_ok2.set_host(Box::new(DomHost::new(
+            &document_ok2,
+            Rc::new(RefCell::new(EventRegistry::default())),
+        )));
+        runtime_ok2.define_global("document", Value::Host("document".into()));
+        runtime_ok2
+            .eval("let box = document.createElement('div'); document.body.appendChild(box); let n = document.createElement('i'); n.textContent = 'n'; box.appendChild(n); let other = document.createElement('i'); other.textContent = 'o';")
+            .expect("setup success 2");
+        let before_ok2 = runtime_ok2.memory_used();
+        let statements = parse("box.replaceChild(other, n)").expect("parse");
+        let old = runtime_ok2.run(&statements).expect("successful replaceChild");
+        assert!(old.display().starts_with("[host"));
+        let delta_ok2 = runtime_ok2.memory_used() - before_ok2;
+
+        let document_bad2 =
+            Rc::new(RefCell::new(HtmlDocument::parse("<html><body></body></html>")));
+        let mut runtime_bad2 = Runtime::new();
+        runtime_bad2.set_host(Box::new(DomHost::new(
+            &document_bad2,
+            Rc::new(RefCell::new(EventRegistry::default())),
+        )));
+        runtime_bad2.define_global("document", Value::Host("document".into()));
+        runtime_bad2
+            .eval("let box = document.createElement('div'); document.body.appendChild(box); let n = document.createElement('i'); n.textContent = 'n'; box.appendChild(n); let other = document.createElement('i'); other.textContent = 'o'; box.appendChild(other);")
+            .expect("setup failure 2");
+        let before_bad2 = runtime_bad2.memory_used();
+        let statements = parse("box.replaceChild(other, n)").expect("parse");
+        let error = runtime_bad2.run(&statements).unwrap_err();
+        assert!(error.message.contains("already attached"), "{}", error.message);
+        let delta_bad2 = runtime_bad2.memory_used() - before_bad2;
+        assert!(
+            delta_ok2 > delta_bad2,
+            "a failed replaceChild must not reserve the handle ({delta_bad2} vs {delta_ok2})"
         );
     }
 }

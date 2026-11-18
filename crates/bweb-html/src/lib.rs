@@ -78,6 +78,23 @@ pub enum DomReadError {
     InvalidNode,
 }
 
+/// Error returned by budgeted DOM mutations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DomMutationError {
+    /// A handle or NodeId does not refer to an existing node.
+    InvalidNode,
+    /// The supplied node is not a direct child of the parent.
+    InvalidChild,
+    /// The node is already attached and cannot be moved in this lot.
+    AlreadyAttached,
+    /// Attaching the node would close a DOM cycle.
+    Cycle,
+    /// The shared DOM work allowance ran out before the mutation.
+    BudgetExhausted,
+    /// A structural limit (depth or arena size) would be exceeded.
+    LimitExceeded,
+}
+
 /// Result of a budgeted node removal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RemoveOutcome {
@@ -849,6 +866,275 @@ impl HtmlDocument {
         self.nodes[child.0].parent = Some(parent);
         self.nodes[parent.0].children.push(child);
         true
+    }
+
+    fn mutation_work(work: &mut usize) -> Result<(), DomMutationError> {
+        if *work == 0 {
+            return Err(DomMutationError::BudgetExhausted);
+        }
+        *work -= 1;
+        Ok(())
+    }
+
+    fn is_ancestor_of_budgeted(
+        &self,
+        ancestor: NodeId,
+        id: NodeId,
+        work: &mut usize,
+    ) -> Result<bool, DomMutationError> {
+        let mut current = Some(id);
+        for _ in 0..=self.nodes.len() {
+            Self::mutation_work(work)?;
+            let Some(node_id) = current else {
+                return Ok(false);
+            };
+            if node_id == ancestor {
+                return Ok(true);
+            }
+            current = self.node(node_id).and_then(Node::parent);
+        }
+        Ok(true)
+    }
+
+    fn node_depth_budgeted(&self, id: NodeId, work: &mut usize) -> Result<usize, DomMutationError> {
+        let mut depth = 0;
+        let mut current = Some(id);
+        for _ in 0..=self.nodes.len() {
+            Self::mutation_work(work)?;
+            let Some(node_id) = current else {
+                return Ok(depth);
+            };
+            depth += 1;
+            current = self.node(node_id).and_then(Node::parent);
+        }
+        Ok(depth)
+    }
+
+    fn subtree_height_budgeted(
+        &self,
+        id: NodeId,
+        work: &mut usize,
+    ) -> Result<usize, DomMutationError> {
+        let mut height = 0;
+        let mut stack = vec![(id, 1usize)];
+        while let Some((node_id, depth)) = stack.pop() {
+            Self::mutation_work(work)?;
+            height = height.max(depth);
+            let Some(node) = self.node(node_id) else {
+                continue;
+            };
+            for child in node.children() {
+                if stack.len() < self.nodes.len() {
+                    stack.push((*child, depth + 1));
+                }
+            }
+        }
+        Ok(height)
+    }
+
+    fn validate_parent_budgeted(
+        &self,
+        parent: NodeId,
+        work: &mut usize,
+    ) -> Result<usize, DomMutationError> {
+        Self::mutation_work(work)?;
+        if self.node(parent).is_none() {
+            return Err(DomMutationError::InvalidNode);
+        }
+        self.node_depth_budgeted(parent, work)
+    }
+
+    fn validate_detached_budgeted(
+        &self,
+        parent: NodeId,
+        child: NodeId,
+        work: &mut usize,
+    ) -> Result<usize, DomMutationError> {
+        Self::mutation_work(work)?;
+        if child == self.root || self.node(child).is_none() {
+            return Err(DomMutationError::InvalidNode);
+        }
+        if self.node(child).and_then(Node::parent).is_some() {
+            return Err(DomMutationError::AlreadyAttached);
+        }
+        if self.is_ancestor_of_budgeted(child, parent, work)? {
+            return Err(DomMutationError::Cycle);
+        }
+        self.subtree_height_budgeted(child, work)
+    }
+
+    fn child_position_budgeted(
+        &self,
+        parent: NodeId,
+        child: NodeId,
+        work: &mut usize,
+    ) -> Result<usize, DomMutationError> {
+        Self::mutation_work(work)?;
+        for (index, candidate) in self.nodes[parent.0].children.iter().enumerate() {
+            Self::mutation_work(work)?;
+            if *candidate == child {
+                return Ok(index);
+            }
+        }
+        Err(DomMutationError::InvalidChild)
+    }
+
+    fn check_depth(parent_depth: usize, child_height: usize) -> Result<(), DomMutationError> {
+        if parent_depth.saturating_add(child_height) > MAX_DOM_DEPTH.saturating_add(1) {
+            Err(DomMutationError::LimitExceeded)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Appends detached nodes in argument order. Every check (existence,
+    /// attachment, cycles, depth and work) completes before any link changes.
+    pub fn append_children_budgeted(
+        &mut self,
+        parent: NodeId,
+        children: &[NodeId],
+        work: &mut usize,
+    ) -> Result<(), DomMutationError> {
+        let parent_depth = self.validate_parent_budgeted(parent, work)?;
+        for child in children {
+            let height = self.validate_detached_budgeted(parent, *child, work)?;
+            Self::check_depth(parent_depth, height)?;
+        }
+        for (index, child) in children.iter().enumerate() {
+            for other in children.iter().skip(index + 1) {
+                if self.is_ancestor_of_budgeted(*child, *other, work)?
+                    || self.is_ancestor_of_budgeted(*other, *child, work)?
+                {
+                    return Err(DomMutationError::AlreadyAttached);
+                }
+            }
+        }
+        for child in children {
+            self.nodes[child.0].parent = Some(parent);
+            self.nodes[parent.0].children.push(*child);
+        }
+        Ok(())
+    }
+
+    /// Prepends detached nodes in argument order. The sibling shifts caused by
+    /// `Vec::insert` are charged before the first mutation.
+    pub fn prepend_children_budgeted(
+        &mut self,
+        parent: NodeId,
+        children: &[NodeId],
+        work: &mut usize,
+    ) -> Result<(), DomMutationError> {
+        let parent_depth = self.validate_parent_budgeted(parent, work)?;
+        for child in children {
+            let height = self.validate_detached_budgeted(parent, *child, work)?;
+            Self::check_depth(parent_depth, height)?;
+        }
+        for (index, child) in children.iter().enumerate() {
+            for other in children.iter().skip(index + 1) {
+                if self.is_ancestor_of_budgeted(*child, *other, work)?
+                    || self.is_ancestor_of_budgeted(*other, *child, work)?
+                {
+                    return Err(DomMutationError::AlreadyAttached);
+                }
+            }
+        }
+        let count = children.len();
+        let existing = self.nodes[parent.0].children.len();
+        let shifts = count
+            .saturating_mul(existing)
+            .saturating_add(count.saturating_mul(count.saturating_sub(1) / 2));
+        if *work < shifts {
+            *work = 0;
+            return Err(DomMutationError::BudgetExhausted);
+        }
+        *work -= shifts;
+        for (offset, child) in children.iter().enumerate() {
+            self.nodes[parent.0].children.insert(offset, *child);
+            self.nodes[child.0].parent = Some(parent);
+        }
+        Ok(())
+    }
+
+    /// Validates a child removal and returns the sibling position to remove.
+    /// No link is changed here, so callers may reserve memory before applying.
+    pub fn plan_remove_child_budgeted(
+        &self,
+        parent: NodeId,
+        child: NodeId,
+        work: &mut usize,
+    ) -> Result<usize, DomMutationError> {
+        self.validate_parent_budgeted(parent, work)?;
+        Self::mutation_work(work)?;
+        if child == self.root || self.node(child).is_none() {
+            return Err(DomMutationError::InvalidNode);
+        }
+        let position = self.child_position_budgeted(parent, child, work)?;
+        let shifts = self.nodes[parent.0].children.len().saturating_sub(position).saturating_sub(1);
+        if *work < shifts {
+            *work = 0;
+            return Err(DomMutationError::BudgetExhausted);
+        }
+        *work -= shifts;
+        Ok(position)
+    }
+
+    /// Applies a removal previously validated by `plan_remove_child_budgeted`.
+    pub fn apply_remove_child(&mut self, parent: NodeId, position: usize) {
+        let child = self.nodes[parent.0].children.remove(position);
+        self.nodes[child.0].parent = None;
+    }
+
+    /// Removes a direct child and returns it, preserving its subtree and id.
+    pub fn remove_child_budgeted(
+        &mut self,
+        parent: NodeId,
+        child: NodeId,
+        work: &mut usize,
+    ) -> Result<NodeId, DomMutationError> {
+        let position = self.plan_remove_child_budgeted(parent, child, work)?;
+        self.apply_remove_child(parent, position);
+        Ok(child)
+    }
+
+    /// Validates a child replacement and returns the position to overwrite.
+    /// No link is changed here, so callers may reserve memory before applying.
+    pub fn plan_replace_child_budgeted(
+        &self,
+        parent: NodeId,
+        new_child: NodeId,
+        old_child: NodeId,
+        work: &mut usize,
+    ) -> Result<usize, DomMutationError> {
+        let parent_depth = self.validate_parent_budgeted(parent, work)?;
+        let height = self.validate_detached_budgeted(parent, new_child, work)?;
+        Self::check_depth(parent_depth, height)?;
+        Self::mutation_work(work)?;
+        if old_child == self.root || self.node(old_child).is_none() {
+            return Err(DomMutationError::InvalidNode);
+        }
+        self.child_position_budgeted(parent, old_child, work)
+    }
+
+    /// Applies a replacement previously validated by `plan_replace_child_budgeted`.
+    pub fn apply_replace_child(&mut self, parent: NodeId, position: usize, new_child: NodeId) {
+        let old_child = self.nodes[parent.0].children[position];
+        self.nodes[parent.0].children[position] = new_child;
+        self.nodes[new_child.0].parent = Some(parent);
+        self.nodes[old_child.0].parent = None;
+    }
+
+    /// Replaces a direct child with a detached node and returns the old child.
+    /// All checks precede the in-place swap, so an error leaves the DOM intact.
+    pub fn replace_child_budgeted(
+        &mut self,
+        parent: NodeId,
+        new_child: NodeId,
+        old_child: NodeId,
+        work: &mut usize,
+    ) -> Result<NodeId, DomMutationError> {
+        let position = self.plan_replace_child_budgeted(parent, new_child, old_child, work)?;
+        self.apply_replace_child(parent, position, new_child);
+        Ok(old_child)
     }
 
     /// Detaches a node from its parent without removing it from the arena.
@@ -2640,9 +2926,9 @@ fn read_bounded(reader: impl Read, limit: usize) -> Result<Vec<u8>, BoundedReadE
 #[cfg(test)]
 mod tests {
     use super::{
-        DomReadError, HtmlDocument, MAX_DOM_DEPTH, MAX_DYNAMIC_NODES, MAX_PARSED_NODES,
-        MAX_STACK_DEPTH, NodeId, NodeKind, QueryBudgetExhausted, RemoveOutcome, ResourceKind,
-        extract_css_urls,
+        DomMutationError, DomReadError, HtmlDocument, MAX_DOM_DEPTH, MAX_DYNAMIC_NODES,
+        MAX_PARSED_NODES, MAX_STACK_DEPTH, NodeId, NodeKind, QueryBudgetExhausted, RemoveOutcome,
+        ResourceKind, extract_css_urls,
     };
 
     #[test]
@@ -2944,6 +3230,106 @@ mod tests {
 
         assert!(document.append_child(main, paragraph));
         assert_eq!(document.query_selector_all("p"), vec![paragraph]);
+    }
+
+    #[test]
+    fn append_prepend_remove_and_replace_are_budgeted_and_ordered() {
+        let mut document = HtmlDocument::parse("<main id='m'></main>");
+        let main = document.element_by_id("m").expect("main");
+        let a = document.create_element("i");
+        document.set_text_content(a, "a");
+        let b = document.create_element("i");
+        document.set_text_content(b, "b");
+        let c = document.create_element("i");
+        document.set_text_content(c, "c");
+
+        let mut work = 1_000;
+        let before_mutations = document.node_count();
+        document.append_children_budgeted(main, &[a, b], &mut work).expect("append");
+        document.prepend_children_budgeted(main, &[c], &mut work).expect("prepend");
+        assert_eq!(document.text_content(main), "cab");
+        assert_eq!(document.node_count(), before_mutations, "mutations must not create nodes");
+
+        let removed = document.remove_child_budgeted(main, a, &mut work).expect("remove child");
+        assert_eq!(removed, a);
+        assert_eq!(document.node(a).expect("handle survives").parent(), None);
+        assert_eq!(
+            document.remove_child_budgeted(main, a, &mut work),
+            Err(DomMutationError::InvalidChild)
+        );
+        assert_eq!(document.text_content(main), "cb");
+
+        let x = document.create_element("i");
+        document.set_text_content(x, "x");
+        let old = document.replace_child_budgeted(main, x, b, &mut work).expect("replace child");
+        assert_eq!(old, b);
+        assert_eq!(document.node(b).expect("old handle survives").parent(), None);
+        assert_eq!(document.text_content(main), "cx");
+    }
+
+    #[test]
+    fn mutation_errors_leave_the_dom_unchanged() {
+        let mut document = HtmlDocument::parse("<main id='m'></main>");
+        let main = document.element_by_id("m").expect("main");
+        let attached = document.create_element("i");
+        document.set_text_content(attached, "a");
+        let mut work = 1_000;
+        document.append_children_budgeted(main, &[attached], &mut work).expect("attach");
+        let before = document.text_content(main);
+
+        assert_eq!(
+            document.replace_child_budgeted(main, attached, attached, &mut work),
+            Err(DomMutationError::AlreadyAttached)
+        );
+        assert_eq!(
+            document.append_children_budgeted(main, &[attached], &mut work),
+            Err(DomMutationError::AlreadyAttached)
+        );
+        assert_eq!(document.text_content(main), before);
+
+        let detached = document.create_element("i");
+        let mut tiny = 0;
+        assert_eq!(
+            document.append_children_budgeted(main, &[detached], &mut tiny),
+            Err(DomMutationError::BudgetExhausted)
+        );
+        assert_eq!(tiny, 0);
+        assert_eq!(document.node(detached).expect("node").parent(), None);
+        assert_eq!(document.text_content(main), before);
+    }
+
+    #[test]
+    fn append_respects_the_dom_depth_limit() {
+        let mut document = HtmlDocument::parse("<main id='m'></main>");
+        let mut parent = document.element_by_id("m").expect("main");
+        for _ in 0..MAX_DOM_DEPTH + 10 {
+            let child = document.create_element("i");
+            if document.append_child(parent, child) {
+                parent = child;
+            }
+        }
+        let detached = document.create_element("i");
+        let mut work = usize::MAX;
+        assert_eq!(
+            document.append_children_budgeted(parent, &[detached], &mut work),
+            Err(DomMutationError::LimitExceeded)
+        );
+        assert_eq!(document.node(detached).expect("node").parent(), None);
+    }
+
+    #[test]
+    fn ancestor_check_is_budgeted() {
+        let document = HtmlDocument::parse("<main id='m'><p id='p'></p></main>");
+        let main = document.element_by_id("m").expect("main");
+        let paragraph = document.element_by_id("p").expect("paragraph");
+        let mut work = 32;
+        assert!(document.is_ancestor_of_budgeted(main, paragraph, &mut work).expect("walk"));
+        assert!(work < 32, "the ancestor walk must consume DOM work");
+        let mut work = 0;
+        assert_eq!(
+            document.is_ancestor_of_budgeted(main, paragraph, &mut work),
+            Err(DomMutationError::BudgetExhausted)
+        );
     }
 
     #[test]
