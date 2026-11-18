@@ -604,6 +604,9 @@ mod tests {
     };
     use std::net::IpAddr;
 
+    /// Serializes tests that mutate process-wide proxy variables.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn privacy_headers_override_caller_values() {
         let mut headers = HeaderMap::new();
@@ -906,11 +909,9 @@ mod tests {
             env,
             io::{Read, Write},
             net::TcpListener,
-            sync::Mutex,
             thread,
         };
 
-        static ENV_LOCK: Mutex<()> = Mutex::new(());
         let _guard = ENV_LOCK.lock().expect("environment lock");
 
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind local server");
@@ -963,5 +964,73 @@ mod tests {
         let response = result.expect("direct requests must ignore system proxy variables");
         assert_eq!(response.status(), StatusCode::OK);
         server.join().expect("server thread");
+    }
+    #[test]
+    fn system_proxy_policy_forwards_through_the_configured_proxy() {
+        use std::{
+            env,
+            io::{Read, Write},
+            net::TcpListener,
+            thread,
+        };
+
+        let _guard = ENV_LOCK.lock().expect("environment lock");
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake proxy");
+        let proxy_address = listener.local_addr().expect("proxy address");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept proxy request");
+            let mut request = [0_u8; 2048];
+            let count = stream.read(&mut request).expect("read proxy request");
+            let request = String::from_utf8_lossy(&request[..count]).to_ascii_lowercase();
+            assert!(
+                request.starts_with("get http://93.184.216.34/"),
+                "unexpected proxy request: {request}"
+            );
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .expect("write proxy response");
+        });
+
+        let variables =
+            ["HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy"];
+        let saved: Vec<_> = variables.iter().map(|name| (*name, env::var_os(name))).collect();
+        // SAFETY: the test serializes environment mutation, and every other
+        // network test builds Direct clients, which ignore these variables.
+        unsafe {
+            env::set_var("HTTP_PROXY", format!("http://{proxy_address}"));
+            env::set_var("http_proxy", format!("http://{proxy_address}"));
+            env::remove_var("ALL_PROXY");
+            env::remove_var("all_proxy");
+            env::remove_var("NO_PROXY");
+            env::remove_var("no_proxy");
+        }
+
+        let transport = HttpTransport::new(
+            NetworkPolicy::new(Shield::empty()).with_proxy_policy(ProxyPolicy::System),
+        )
+        .expect("client");
+        let result = transport.execute(
+            "GET",
+            "http://93.184.216.34/",
+            "https://example.test/",
+            ResourceType::Document,
+            HeaderMap::new(),
+            None,
+        );
+
+        // SAFETY: see above.
+        unsafe {
+            for (name, value) in saved {
+                match value {
+                    Some(value) => env::set_var(name, value),
+                    None => env::remove_var(name),
+                }
+            }
+        }
+
+        let response = result.expect("System policy must honor HTTP_PROXY");
+        assert_eq!(response.status(), StatusCode::OK);
+        server.join().expect("proxy thread");
     }
 }
