@@ -16,6 +16,10 @@ use std::{
 /// bound recursion depth, so this guard prevents stack exhaustion on hostile
 /// stylesheets.
 const MAX_PARSE_DEPTH: usize = 64;
+/// Maximum number of compounds in a single selector. Selector matching walks
+/// compounds recursively, so an unbounded chain of combinators is as dangerous
+/// as unbounded `:not()` nesting.
+const MAX_SELECTOR_COMPOUNDS: usize = 64;
 
 /// A token emitted by the CSS lexer.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -638,6 +642,11 @@ fn parse_complex_selector(source: &str) -> Result<ComplexSelector, CssError> {
     let mut index = 0;
     let mut specificity = Specificity::default();
     while index < chars.len() {
+        // Reject long chains before parsing another compound: the matcher
+        // recurses once per compound and must not be given an unbounded chain.
+        if compounds.len() >= MAX_SELECTOR_COMPOUNDS {
+            return Err(CssError::new(0, "maximum selector length exceeded"));
+        }
         let mut consumed_space = false;
         while index < chars.len() && chars[index].is_ascii_whitespace() {
             index += 1;
@@ -1846,6 +1855,11 @@ fn matches_from_right(
     selector: &ComplexSelector,
     compound_index: usize,
 ) -> bool {
+    // Defensive bound even for a selector built programmatically: never walk
+    // more compounds than the parser would ever produce.
+    if compound_index >= MAX_SELECTOR_COMPOUNDS {
+        return false;
+    }
     let Some(node) = document.node(id) else { return false };
     if !matches_compound(document, id, node.kind(), &selector.compounds[compound_index]) {
         return false;
@@ -2018,7 +2032,10 @@ fn sibling_position(
 
 #[cfg(test)]
 mod tests {
-    use super::{ComputedStyle, Specificity, StyleEngine, Stylesheet, TokenKind, tokenize};
+    use super::{
+        ComputedStyle, MAX_SELECTOR_COMPOUNDS, Specificity, StyleEngine, Stylesheet, TokenKind,
+        tokenize,
+    };
     use bweb_html::{HtmlDocument, NodeKind};
 
     #[test]
@@ -2433,6 +2450,24 @@ mod tests {
         }
         let error = Stylesheet::parse(&layers).expect_err("deep @layer must fail");
         assert!(error.message.contains("nesting depth"), "unexpected error: {}", error.message);
+    }
+
+    #[test]
+    fn long_combinator_chains_are_rejected_without_stack_overflow() {
+        for combinator in [" ", " > ", " + ", " ~ "] {
+            let selector = vec!["div"; 5_000].join(combinator);
+            let source = format!("{selector} {{ color: red }}");
+            let error = Stylesheet::parse(&source).expect_err("long selector must fail");
+            assert!(
+                error.message.contains("selector length"),
+                "unexpected error for {combinator:?}: {}",
+                error.message
+            );
+        }
+        // A selector just under the limit still parses and matches.
+        let short = vec!["div"; MAX_SELECTOR_COMPOUNDS].join(" ");
+        Stylesheet::parse(&format!("{short} {{ color: red }}"))
+            .expect("selector at the limit is accepted");
     }
 
     #[test]

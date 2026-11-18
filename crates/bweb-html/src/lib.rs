@@ -23,6 +23,10 @@ const MAX_DOCUMENT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_STYLESHEET_BYTES: usize = 4 * 1024 * 1024;
 const MAX_SCRIPT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_IMAGE_BYTES: usize = 16 * 1024 * 1024;
+/// Maximum depth of the DOM tree, including nodes appended by scripts.
+pub const MAX_DOM_DEPTH: usize = 128;
+/// Maximum number of nodes scripts may add to one document.
+const MAX_DYNAMIC_NODES: usize = 10_000;
 /// Cumulative download budget for one page, including the main document.
 const MAX_TOTAL_RESOURCE_BYTES: usize = 32 * 1024 * 1024;
 /// Maximum number of distinct subresources fetched for one page.
@@ -93,6 +97,8 @@ pub struct HtmlDocument {
     nodes: Vec<Node>,
     root: NodeId,
     title_override: Option<String>,
+    /// Number of nodes created through the dynamic DOM API.
+    dynamic_nodes: usize,
 }
 
 impl Default for HtmlDocument {
@@ -112,6 +118,7 @@ impl HtmlDocument {
             nodes: vec![Node { kind: NodeKind::Document, parent: None, children: Vec::new() }],
             root,
             title_override: None,
+            dynamic_nodes: 0,
         };
         document.build_tree();
         document
@@ -310,6 +317,10 @@ impl HtmlDocument {
             return;
         }
         self.nodes[id.0].children.clear();
+        if self.dynamic_nodes >= MAX_DYNAMIC_NODES {
+            return;
+        }
+        self.dynamic_nodes += 1;
         let child = NodeId(self.nodes.len());
         self.nodes.push(Node {
             kind: NodeKind::Text(text.to_owned()),
@@ -383,6 +394,13 @@ impl HtmlDocument {
     /// Creates a detached element node with no attributes.
     #[must_use]
     pub fn create_element(&mut self, tag_name: &str) -> NodeId {
+        // Keep the existing signature: when the dynamic budget is exhausted,
+        // return an id that does not exist so every later operation on it is a
+        // silent no-op instead of growing the arena without bound.
+        if self.dynamic_nodes >= MAX_DYNAMIC_NODES {
+            return NodeId(usize::MAX);
+        }
+        self.dynamic_nodes += 1;
         let id = NodeId(self.nodes.len());
         self.nodes.push(Node {
             kind: NodeKind::Element {
@@ -395,14 +413,47 @@ impl HtmlDocument {
         id
     }
 
+    /// Returns true when `ancestor` is `id` or one of its ancestors.
+    ///
+    /// The walk is bounded by the arena size so that even a pre-existing cycle
+    /// cannot turn the check into an infinite loop.
+    fn is_ancestor_of(&self, ancestor: NodeId, id: NodeId) -> bool {
+        let mut current = Some(id);
+        for _ in 0..=self.nodes.len() {
+            let Some(node_id) = current else { return false };
+            if node_id == ancestor {
+                return true;
+            }
+            current = self.node(node_id).and_then(Node::parent);
+        }
+        true
+    }
+
     /// Appends a node as the last child of a parent. Returns false when either
-    /// node is missing or the child already has a parent.
+    /// node is missing, the child already has a parent, or inserting it would
+    /// create a cycle (including appending a node to itself).
     pub fn append_child(&mut self, parent: NodeId, child: NodeId) -> bool {
         if self.nodes.get(parent.index()).is_none() || self.nodes.get(child.index()).is_none() {
             return false;
         }
         if self.nodes[child.0].parent.is_some() {
             return false;
+        }
+        // `child` must not already contain `parent`; otherwise the new link
+        // would close a loop and every recursive DOM walk could hang.
+        if self.is_ancestor_of(child, parent) {
+            return false;
+        }
+        // Bound the resulting tree depth as well: layout walks the tree
+        // recursively, so a script-built chain must be as limited as markup.
+        let mut depth = 0;
+        let mut current = Some(parent);
+        while let Some(id) = current {
+            if depth >= MAX_DOM_DEPTH {
+                return false;
+            }
+            depth += 1;
+            current = self.node(id).and_then(Node::parent);
         }
         self.nodes[child.0].parent = Some(parent);
         self.nodes[parent.0].children.push(child);
@@ -622,7 +673,7 @@ impl HtmlDocument {
 
 /// Upper bound on the open-element stack. Real markup is shallow; a cap keeps
 /// adversarial input from growing the arena without limit.
-const MAX_STACK_DEPTH: usize = 512;
+const MAX_STACK_DEPTH: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InsertionMode {
@@ -1105,8 +1156,13 @@ impl<'a> TreeBuilder<'a> {
                 // Template content lives in a separate inert subtree.
                 let template = self.insert(NodeKind::Element { tag_name: name, attributes });
                 let content = self.document.append_node(template, NodeKind::TemplateContent);
-                self.stack.push(template);
-                self.stack.push(content);
+                // A template adds two stack entries (the element and its inert
+                // content root). Apply the same cap as `push()` here so nested
+                // templates cannot bypass MAX_STACK_DEPTH.
+                if self.stack.len() + 2 <= MAX_STACK_DEPTH {
+                    self.stack.push(template);
+                    self.stack.push(content);
+                }
                 cursor = end + 1;
                 continue;
             }
@@ -2061,7 +2117,10 @@ fn read_bounded(reader: impl Read, limit: usize) -> Result<Vec<u8>, BoundedReadE
 
 #[cfg(test)]
 mod tests {
-    use super::{HtmlDocument, NodeId, NodeKind, ResourceKind, extract_css_urls};
+    use super::{
+        HtmlDocument, MAX_DOM_DEPTH, MAX_DYNAMIC_NODES, MAX_STACK_DEPTH, NodeId, NodeKind,
+        ResourceKind, extract_css_urls,
+    };
 
     #[test]
     fn builds_parent_child_relationships_in_an_arena() {
@@ -2128,6 +2187,93 @@ mod tests {
             let _ = document.inline_stylesheets();
             let _ = document.node_count();
         }
+    }
+
+    #[test]
+    fn append_child_rejects_direct_and_indirect_cycles() {
+        let mut document =
+            HtmlDocument::parse("<main><div id='parent'><span id='child'></span></div></main>");
+        let parent = document.element_by_id("parent").expect("parent");
+        let child = document.element_by_id("child").expect("child");
+
+        // A node cannot become its own child, nor can an ancestor be inserted
+        // into its own descendant (direct and indirect cycles).
+        assert!(!document.append_child(child, child));
+        assert!(!document.append_child(child, parent));
+        let root = document.root();
+        assert!(!document.append_child(child, root));
+
+        // A valid insertion still works and leaves the tree walkable.
+        let detached = document.create_element("em");
+        assert!(document.append_child(child, detached));
+        assert_eq!(document.ancestor_elements(detached).first(), Some(&child));
+        // The document root is a Document node, not an element, so verify the
+        // parent chain directly instead.
+        let mut ancestor = Some(parent);
+        let mut reached_root = false;
+        while let Some(id) = ancestor {
+            if id == root {
+                reached_root = true;
+                break;
+            }
+            ancestor = document.node(id).and_then(|node| node.parent());
+        }
+        assert!(reached_root);
+    }
+
+    #[test]
+    fn dynamic_nodes_and_dom_depth_are_bounded() {
+        let mut document = HtmlDocument::parse("<main id='root'></main>");
+        let before = document.node_count();
+        for _ in 0..MAX_DYNAMIC_NODES {
+            let id = document.create_element("div");
+            assert!(document.node(id).is_some());
+        }
+        assert_eq!(document.node_count(), before + MAX_DYNAMIC_NODES);
+        // Further creations are refused without growing the arena.
+        let rejected = document.create_element("div");
+        assert!(document.node(rejected).is_none());
+        assert_eq!(document.node_count(), before + MAX_DYNAMIC_NODES);
+
+        // A chain built through append_child is capped at MAX_DOM_DEPTH.
+        let mut document = HtmlDocument::parse("<main id='chain'></main>");
+        let mut parent = document.element_by_id("chain").expect("chain");
+        for _ in 0..MAX_DOM_DEPTH + 10 {
+            let child = document.create_element("div");
+            if document.append_child(parent, child) {
+                parent = child;
+            }
+        }
+        let mut depth = 0;
+        let mut current = Some(parent);
+        while let Some(node) = current.and_then(|id| document.node(id)) {
+            if node.parent().is_none() {
+                break;
+            }
+            depth += 1;
+            current = node.parent();
+        }
+        assert!(depth <= MAX_DOM_DEPTH, "dynamically built DOM too deep: {depth}");
+    }
+
+    #[test]
+    fn nested_templates_cannot_bypass_the_stack_depth_cap() {
+        let markup = format!("{}<p>x{}", "<template>".repeat(3_000), "</template>".repeat(3_000));
+        let document = HtmlDocument::parse(markup);
+        let mut max_depth = 0;
+        for (id, _) in document.iter() {
+            let mut depth = 0;
+            let mut current = Some(id);
+            while let Some(node) = current.and_then(|id| document.node(id)) {
+                if node.parent().is_none() {
+                    break;
+                }
+                depth += 1;
+                current = node.parent();
+            }
+            max_depth = max_depth.max(depth);
+        }
+        assert!(max_depth <= MAX_STACK_DEPTH, "template nesting exceeded the cap: {max_depth}");
     }
 
     #[test]
