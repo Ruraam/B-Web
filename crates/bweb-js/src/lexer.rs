@@ -44,6 +44,19 @@ const KEYWORDS: &[&str] = &[
     "new",
 ];
 
+/// Maximum number of tokens produced for one script. Script sources are
+/// already size-limited on download, but an explicit parse bound prevents a
+/// huge inline script from monopolising the UI thread during tokenization.
+const MAX_PARSE_TOKENS: usize = 200_000;
+
+fn push_token(tokens: &mut Vec<Token>, token: Token) -> Result<(), LexError> {
+    if tokens.len() >= MAX_PARSE_TOKENS {
+        return Err(LexError { offset: 0, message: "maximum script token count exceeded".into() });
+    }
+    tokens.push(token);
+    Ok(())
+}
+
 /// Tokenizes a JavaScript source string.
 pub fn tokenize(source: &str) -> Result<Vec<Token>, LexError> {
     let chars: Vec<char> = source.chars().collect();
@@ -99,10 +112,10 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>, LexError> {
             if index >= chars.len() {
                 return Err(LexError { offset: index, message: "unterminated template".into() });
             }
-            tokens.push(Token {
-                kind: TokenKind::Template,
-                text: chars[start..index].iter().collect(),
-            });
+            push_token(
+                &mut tokens,
+                Token { kind: TokenKind::Template, text: chars[start..index].iter().collect() },
+            )?;
             index += 1;
             continue;
         }
@@ -130,7 +143,7 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>, LexError> {
                 return Err(LexError { offset: index, message: "unterminated string".into() });
             }
             index += 1;
-            tokens.push(Token { kind: TokenKind::String, text });
+            push_token(&mut tokens, Token { kind: TokenKind::String, text })?;
             continue;
         }
         if ch.is_ascii_digit()
@@ -146,10 +159,10 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>, LexError> {
                     index += 1;
                 }
             }
-            tokens.push(Token {
-                kind: TokenKind::Number,
-                text: chars[start..index].iter().collect(),
-            });
+            push_token(
+                &mut tokens,
+                Token { kind: TokenKind::Number, text: chars[start..index].iter().collect() },
+            )?;
             continue;
         }
         if is_identifier_start(ch) {
@@ -163,7 +176,7 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>, LexError> {
             } else {
                 TokenKind::Identifier
             };
-            tokens.push(Token { kind, text });
+            push_token(&mut tokens, Token { kind, text })?;
             continue;
         }
         let two =
@@ -186,13 +199,13 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>, LexError> {
         ) {
             let text: String = two.expect("two-char operator").iter().collect();
             index += 2;
-            tokens.push(Token { kind: TokenKind::Operator, text });
+            push_token(&mut tokens, Token { kind: TokenKind::Operator, text })?;
             continue;
         }
         if matches!(ch, '+' | '-' | '*' | '/' | '%' | '=' | '<' | '>' | '!' | '&' | '|') {
-            tokens.push(Token { kind: TokenKind::Operator, text: ch.to_string() });
+            push_token(&mut tokens, Token { kind: TokenKind::Operator, text: ch.to_string() })?;
         } else if matches!(ch, '(' | ')' | '{' | '}' | '[' | ']' | ';' | ',' | '.' | ':') {
-            tokens.push(Token { kind: TokenKind::Punctuation, text: ch.to_string() });
+            push_token(&mut tokens, Token { kind: TokenKind::Punctuation, text: ch.to_string() })?;
         } else {
             return Err(LexError {
                 offset: index,
@@ -201,7 +214,7 @@ pub fn tokenize(source: &str) -> Result<Vec<Token>, LexError> {
         }
         index += 1;
     }
-    tokens.push(Token { kind: TokenKind::Eof, text: String::new() });
+    push_token(&mut tokens, Token { kind: TokenKind::Eof, text: String::new() })?;
     Ok(tokens)
 }
 

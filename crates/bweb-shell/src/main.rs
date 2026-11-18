@@ -11,7 +11,7 @@ use address_bar::AddressBar;
 use bweb_css::{ComputedStyle, ComputedStyleMap, PseudoElement, StyleEngine, Stylesheet};
 use bweb_filterlists::FilterListDownloader;
 use bweb_html::{DocumentLoader, HtmlDocument, LoadedDocument, NodeId, ResourceKind, ScriptRef};
-use bweb_js::{Runtime, Value};
+use bweb_js::{PAGE_INSTRUCTION_BUDGET, Runtime, Value};
 use bweb_layout::{ImageSize, LayoutTree, PaintAdapter, Rect as LayoutRect, View, Viewport};
 use bweb_net::{HttpTransport, NetworkPolicy};
 use bweb_renderer::{Framebuffer, Image, Painter, Rasterizer};
@@ -244,11 +244,13 @@ fn prepare_page(page: &mut Page) -> PreparedPage {
     let mut runtime = Runtime::new();
     runtime.set_host(Box::new(DomHost::new(&document, events.clone())));
     runtime.define_global("document", Value::Host("document".into()));
+    runtime.set_page_budget(PAGE_INSTRUCTION_BUDGET);
     for source in &page.scripts {
         if let Err(error) = runtime.eval(source) {
             eprintln!("  script error: {error}");
         }
     }
+    runtime.clear_page_budget();
     for line in runtime.output() {
         println!("  script: {line}");
     }
@@ -450,11 +452,13 @@ impl<D: raw_window_handle::HasDisplayHandle + 'static> ApplicationHandler<UserEv
                 self.events.borrow_mut().clear();
                 self.runtime.set_host(Box::new(DomHost::new(&document, self.events.clone())));
                 self.runtime.define_global("document", Value::Host("document".into()));
+                self.runtime.set_page_budget(PAGE_INSTRUCTION_BUDGET);
                 for source in &page.scripts {
                     if let Err(error) = self.runtime.eval(source) {
                         eprintln!("  script error: {error}");
                     }
                 }
+                self.runtime.clear_page_budget();
                 for line in self.runtime.take_output() {
                     println!("  script: {line}");
                 }
@@ -1007,17 +1011,21 @@ fn filter_list_cache_directory() -> Result<PathBuf, io::Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::{content_viewport, copy_scaled_pixels, load_page};
+    use super::{NodeId, Page, content_viewport, copy_scaled_pixels, load_page, prepare_page};
     use crate::scripting::{DomHost, EventRegistry};
-    use bweb_html::{HtmlDocument, NodeKind};
+    use bweb_html::{HtmlDocument, LoadedDocument, NodeKind};
     use bweb_js::{Runtime, Value};
+    use bweb_renderer::Image;
     use std::{
         cell::RefCell,
+        collections::HashMap,
         io::{Read, Write},
         net::TcpListener,
         rc::Rc,
+        sync::Arc,
         thread,
     };
+    use url::Url;
 
     /// Serves one HTTP response on an ephemeral local port and returns its URL.
     fn serve_once(body: String, content_type: &str) -> String {
@@ -1069,6 +1077,28 @@ mod tests {
             }
         });
         format!("http://{address}/")
+    }
+
+    #[test]
+    fn prepare_page_runs_scripts_in_order_and_clears_the_page_budget() {
+        let mut page = Page {
+            loaded: LoadedDocument {
+                url: Url::parse("https://example.test/").expect("url"),
+                document: HtmlDocument::parse("<html><body></body></html>"),
+                resources: Vec::new(),
+                failed_resources: Vec::new(),
+            },
+            stylesheets: Vec::new(),
+            images: HashMap::<NodeId, Arc<Image>>::new(),
+            background_images: HashMap::new(),
+            scripts: vec![
+                "document.title = 'first';".to_owned(),
+                "document.title = 'second';".to_owned(),
+            ],
+        };
+        let prepared = prepare_page(&mut page);
+        assert_eq!(prepared.document.borrow().title().as_deref(), Some("second"));
+        assert_eq!(prepared.runtime.page_budget_remaining(), None);
     }
 
     #[test]
