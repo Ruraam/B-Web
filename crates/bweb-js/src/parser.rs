@@ -2,7 +2,7 @@
 
 use crate::{
     ast::{BinaryOp, Expr, LogicalOp, Stmt, UnaryOp, VarKind},
-    lexer::{Token, TokenKind, tokenize},
+    lexer::{MAX_PARSE_TOKENS, Token, TokenKind, tokenize_with_limit},
 };
 use std::{cell::Cell, rc::Rc};
 
@@ -37,23 +37,68 @@ struct Parser {
     tokens: Vec<Token>,
     position: usize,
     depth: Rc<Cell<usize>>,
+    /// Tokens still available to this parse call. Template interpolations are
+    /// parsed recursively and draw from the same allowance.
+    token_budget: Rc<Cell<usize>>,
 }
 
 /// Parses a source string into a list of statements.
 pub fn parse(source: &str) -> Result<Vec<Stmt>, ParseError> {
-    parse_with_depth(source, 0)
+    let token_budget = Rc::new(Cell::new(MAX_PARSE_TOKENS));
+    parse_with_depth(source, 0, &token_budget)
 }
 
-/// Internal entry point that carries the nesting depth across template
-/// interpolations, which are parsed as nested sources.
-pub(crate) fn parse_with_depth(source: &str, depth: usize) -> Result<Vec<Stmt>, ParseError> {
+/// Parses a source string while drawing tokens from a caller-owned budget.
+/// Used by `Runtime::eval` to enforce a cumulative budget across every script
+/// of a page. The budget is debited even when parsing fails, so a hostile
+/// script cannot repeat failed parses for free.
+pub(crate) fn parse_with_token_budget(
+    source: &str,
+    token_budget: Rc<Cell<usize>>,
+) -> Result<Vec<Stmt>, ParseError> {
+    parse_with_depth(source, 0, &token_budget)
+}
+
+/// Internal entry point that carries the nesting depth and token budget across
+/// template interpolations, which are parsed as nested sources.
+fn parse_with_depth(
+    source: &str,
+    depth: usize,
+    token_budget: &Rc<Cell<usize>>,
+) -> Result<Vec<Stmt>, ParseError> {
     if depth >= MAX_PARSE_DEPTH {
         return Err(ParseError {
             message: format!("maximum parser nesting depth ({MAX_PARSE_DEPTH}) exceeded"),
         });
     }
-    let tokens = tokenize(source).map_err(|error| ParseError { message: error.message })?;
-    let mut parser = Parser { tokens, position: 0, depth: Rc::new(Cell::new(depth)) };
+    let remaining = token_budget.get();
+    if remaining == 0 {
+        return Err(ParseError { message: "page parse token budget exhausted".into() });
+    }
+    let limit = remaining.min(MAX_PARSE_TOKENS);
+    let tokens = match tokenize_with_limit(source, limit) {
+        Ok(tokens) => tokens,
+        Err(error) => {
+            // Charge the work performed before the failure. Using the source
+            // length keeps a lexical error from draining the page allowance,
+            // while a token-limit error is capped by the granted limit.
+            let consumed = source.chars().count().saturating_add(1).min(limit);
+            token_budget.set(token_budget.get().saturating_sub(consumed));
+            let message = if limit < MAX_PARSE_TOKENS && error.message.contains("token count") {
+                "page parse token budget exhausted".to_owned()
+            } else {
+                error.message
+            };
+            return Err(ParseError { message });
+        }
+    };
+    token_budget.set(token_budget.get().saturating_sub(tokens.len()));
+    let mut parser = Parser {
+        tokens,
+        position: 0,
+        depth: Rc::new(Cell::new(depth)),
+        token_budget: token_budget.clone(),
+    };
     let mut statements = Vec::new();
     while parser.peek().kind != TokenKind::Eof {
         statements.push(parser.parse_statement()?);
@@ -491,7 +536,7 @@ impl Parser {
             }
             TokenKind::Template => {
                 self.position += 1;
-                parse_template(&token.text, self.depth.get())
+                parse_template(&token.text, self.depth.get(), &self.token_budget)
             }
             TokenKind::Identifier => {
                 self.position += 1;
@@ -576,7 +621,11 @@ impl Parser {
     }
 }
 
-fn parse_template(source: &str, depth: usize) -> Result<Expr, ParseError> {
+fn parse_template(
+    source: &str,
+    depth: usize,
+    token_budget: &Rc<Cell<usize>>,
+) -> Result<Expr, ParseError> {
     let mut parts = Vec::new();
     let mut rest = source;
     while let Some(start) = rest.find("${") {
@@ -610,7 +659,7 @@ fn parse_template(source: &str, depth: usize) -> Result<Expr, ParseError> {
         let Some(end) = end else {
             return Err(ParseError { message: "unterminated template interpolation".into() });
         };
-        let expression = parse_with_depth(&after[..end], depth + 1)?;
+        let expression = parse_with_depth(&after[..end], depth + 1, token_budget)?;
         let expression = match expression.first() {
             Some(Stmt::Expression(expression)) => expression.clone(),
             None => Expr::Undefined,

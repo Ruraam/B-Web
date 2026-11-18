@@ -12,7 +12,10 @@ mod runtime;
 pub use ast::{BinaryOp, Expr, LogicalOp, Stmt, UnaryOp, VarKind};
 pub use lexer::{LexError, Token, TokenKind, tokenize};
 pub use parser::{ParseError, parse};
-pub use runtime::{Env, Host, JsError, NativeFn, Object, PAGE_INSTRUCTION_BUDGET, Runtime, Value};
+pub use runtime::{
+    Env, Host, JsError, NativeFn, Object, PAGE_INSTRUCTION_BUDGET, PAGE_PARSE_TOKEN_BUDGET,
+    Runtime, Value,
+};
 
 /// Explicit status of the JavaScript runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,7 +26,7 @@ pub enum RuntimeStatus {
 
 #[cfg(test)]
 mod tests {
-    use super::{Runtime, Value};
+    use super::{PAGE_INSTRUCTION_BUDGET, Runtime, Value};
 
     #[test]
     fn evaluates_arithmetic_and_variables() {
@@ -198,6 +201,52 @@ mod tests {
             runtime.call_event(spin, vec![]).expect_err("page budget must stop the handler");
         assert!(error.message.contains("budget"), "unexpected error: {}", error.message);
         assert_eq!(runtime.page_budget_remaining(), Some(0));
+    }
+
+    #[test]
+    fn page_parse_budget_is_cumulative_across_scripts() {
+        let mut runtime = Runtime::new();
+        runtime.set_page_budget(PAGE_INSTRUCTION_BUDGET);
+        runtime.set_page_parse_budget(40);
+        // "let a = 1;" produces six tokens including end-of-file, so six
+        // scripts consume 36 of the 40 tokens.
+        for _ in 0..6 {
+            runtime.eval("let a = 1;").expect("script within the parse budget");
+        }
+        assert_eq!(runtime.page_parse_budget_remaining(), Some(4));
+
+        let error = runtime.eval("let b = 2;").expect_err("parse budget must stop the script");
+        assert!(
+            error.message.contains("page parse token budget"),
+            "unexpected error: {}",
+            error.message
+        );
+        assert_eq!(runtime.page_parse_budget_remaining(), Some(0));
+    }
+
+    #[test]
+    fn exhausted_page_budget_skips_parsing_entirely() {
+        let mut runtime = Runtime::new();
+        runtime.set_page_budget(0);
+        // The source is malformed; reaching the parser would report a syntax
+        // error instead of the page budget error.
+        let error = runtime.eval("let = ;").expect_err("no parsing without a budget");
+        assert!(
+            error.message.contains("page instruction budget"),
+            "unexpected error: {}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn failed_parses_still_charge_the_page_parse_budget() {
+        let mut runtime = Runtime::new();
+        runtime.set_page_budget(PAGE_INSTRUCTION_BUDGET);
+        runtime.set_page_parse_budget(100);
+        let before = runtime.page_parse_budget_remaining().expect("parse budget");
+        runtime.eval("'unterminated").expect_err("lexical error");
+        let after = runtime.page_parse_budget_remaining().expect("parse budget");
+        assert!(after < before, "failed parsing must still be charged");
     }
 
     #[test]

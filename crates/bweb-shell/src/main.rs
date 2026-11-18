@@ -261,13 +261,15 @@ fn prepare_page(page: &mut Page) -> PreparedPage {
     let mut runtime = Runtime::new();
     runtime.set_host(Box::new(DomHost::new(&document, events.clone())));
     runtime.define_global("document", Value::Host("document".into()));
+    // The page budget stays active for as long as this document is alive:
+    // event callbacks dispatched later draw from the same allowance. It is
+    // reset by set_page_budget when the next page is prepared.
     runtime.set_page_budget(PAGE_INSTRUCTION_BUDGET);
     for source in &page.scripts {
         if let Err(error) = runtime.eval(source) {
             eprintln!("  script error: {error}");
         }
     }
-    runtime.clear_page_budget();
     for line in runtime.output() {
         println!("  script: {line}");
     }
@@ -469,13 +471,14 @@ impl<D: raw_window_handle::HasDisplayHandle + 'static> ApplicationHandler<UserEv
                 self.events.borrow_mut().clear();
                 self.runtime.set_host(Box::new(DomHost::new(&document, self.events.clone())));
                 self.runtime.define_global("document", Value::Host("document".into()));
+                // Reset the shared allowance for the new document; callbacks
+                // from the previous page are gone (events were cleared above).
                 self.runtime.set_page_budget(PAGE_INSTRUCTION_BUDGET);
                 for source in &page.scripts {
                     if let Err(error) = self.runtime.eval(source) {
                         eprintln!("  script error: {error}");
                     }
                 }
-                self.runtime.clear_page_budget();
                 for line in self.runtime.take_output() {
                     println!("  script: {line}");
                 }
@@ -1038,11 +1041,12 @@ fn filter_list_cache_directory() -> Result<PathBuf, io::Error> {
 #[cfg(test)]
 mod tests {
     use super::{
-        NodeId, Page, content_viewport, copy_scaled_pixels, load_page_with_policy, prepare_page,
+        NodeId, Page, content_viewport, copy_scaled_pixels, load_page, load_page_with_policy,
+        prepare_page,
     };
     use crate::scripting::{DomHost, EventRegistry};
     use bweb_html::{HtmlDocument, LoadedDocument, NodeKind};
-    use bweb_js::{Runtime, Value};
+    use bweb_js::{PAGE_INSTRUCTION_BUDGET, PAGE_PARSE_TOKEN_BUDGET, Runtime, Value};
     use bweb_net::AddressPolicy;
     use bweb_renderer::Image;
     use std::{
@@ -1109,7 +1113,7 @@ mod tests {
     }
 
     #[test]
-    fn prepare_page_runs_scripts_in_order_and_clears_the_page_budget() {
+    fn prepare_page_runs_scripts_in_order_and_keeps_the_page_budget_active() {
         let mut page = Page {
             loaded: LoadedDocument {
                 url: Url::parse("https://example.test/").expect("url"),
@@ -1121,13 +1125,58 @@ mod tests {
             images: HashMap::<NodeId, Arc<Image>>::new(),
             background_images: HashMap::new(),
             scripts: vec![
-                "document.title = 'first';".to_owned(),
+                "document.title = 'first'; \
+                 document.querySelector('body').addEventListener('click', function() { \
+                   document.title = 'clicked'; \
+                 });"
+                .to_owned(),
                 "document.title = 'second';".to_owned(),
             ],
         };
-        let prepared = prepare_page(&mut page);
+        let mut prepared = prepare_page(&mut page);
         assert_eq!(prepared.document.borrow().title().as_deref(), Some("second"));
-        assert_eq!(prepared.runtime.page_budget_remaining(), None);
+        // The budget stays active for callbacks dispatched later in this
+        // document's lifetime; it is only reset on the next navigation.
+        let after_scripts = prepared.runtime.page_budget_remaining().expect("active page budget");
+        assert!(after_scripts < PAGE_INSTRUCTION_BUDGET && after_scripts > 0);
+        let after_parse =
+            prepared.runtime.page_parse_budget_remaining().expect("active parse budget");
+        assert!(after_parse < PAGE_PARSE_TOKEN_BUDGET && after_parse > 0);
+
+        let body = prepared
+            .document
+            .borrow()
+            .iter()
+            .find_map(|(id, node)| {
+                matches!(node.kind(), NodeKind::Element { tag_name, .. } if tag_name == "body")
+                    .then_some(id)
+            })
+            .expect("body");
+        let callbacks =
+            prepared.events.borrow().callbacks(&format!("element:{}", body.index()), "click");
+        assert_eq!(callbacks.len(), 1);
+        for callback in callbacks {
+            prepared
+                .runtime
+                .call_event(callback, vec![Value::Host("event".into())])
+                .expect("click handler");
+        }
+        assert_eq!(prepared.document.borrow().title().as_deref(), Some("clicked"));
+        assert!(
+            prepared.runtime.page_budget_remaining().expect("active page budget") < after_scripts
+        );
+    }
+
+    #[test]
+    fn default_policy_rejects_loopback_navigation() {
+        let url =
+            serve_once("<!DOCTYPE html><html><body>local</body></html>".to_owned(), "text/html");
+        let error = match load_page(&url, false) {
+            Ok(_) => panic!("loopback must be denied by default"),
+            Err(error) => error,
+        };
+        let message = error.to_string();
+        assert!(message.contains("local or internal address"), "unexpected error: {message}");
     }
 
     #[test]
