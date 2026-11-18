@@ -75,6 +75,32 @@ pub const DOM_WORK_BUDGET: usize = 1_000_000;
 /// Fixed accounting cost of one materialised host string.
 const HOST_STRING_OVERHEAD: usize = 24;
 
+fn decimal_digits(mut value: usize) -> usize {
+    let mut digits = 1;
+    while value >= 10 {
+        value /= 10;
+        digits += 1;
+    }
+    digits
+}
+
+fn handle_len(prefix: &str, index: usize) -> usize {
+    prefix.len().saturating_add(decimal_digits(index))
+}
+
+/// Reserves the cost of a `Value::Host` handle before it is formatted.
+fn reserve_handle(
+    reserve: &mut dyn FnMut(usize) -> bool,
+    prefix: &str,
+    index: usize,
+) -> Result<(), JsError> {
+    if reserve(handle_len(prefix, index).saturating_add(HOST_STRING_OVERHEAD)) {
+        Ok(())
+    } else {
+        Err(JsError { message: "script memory budget exceeded".into() })
+    }
+}
+
 /// Exposes a document to scripts through the `document` host object.
 pub struct DomHost {
     document: Weak<RefCell<HtmlDocument>>,
@@ -259,9 +285,11 @@ impl Host for DomHost {
             self.work.set(work);
             let found =
                 found.map_err(|_| JsError { message: "DOM work budget exhausted".into() })?;
-            return Ok(Some(
-                found.map_or(Value::Undefined, |id| Value::Host(format!("element:{}", id.index()))),
-            ));
+            let Some(id) = found else {
+                return Ok(Some(Value::Undefined));
+            };
+            reserve_handle(reserve, "element:", id.index())?;
+            return Ok(Some(Value::Host(format!("element:{}", id.index()))));
         }
         if object == "document" && property == "title" {
             let mut work = self.work.get();
@@ -272,6 +300,14 @@ impl Host for DomHost {
         if let Some(index) = handle_index(object, "element:") {
             let Some(id) = document.node_at(index) else { return Ok(Some(Value::Undefined)) };
             match property {
+                "style" => {
+                    reserve_handle(reserve, "style:", index)?;
+                    return Ok(Some(Value::Host(format!("style:{index}"))));
+                }
+                "classList" => {
+                    reserve_handle(reserve, "classlist:", index)?;
+                    return Ok(Some(Value::Host(format!("classlist:{index}"))));
+                }
                 "textContent" => {
                     let mut work = self.work.get();
                     let outcome =
@@ -558,9 +594,11 @@ impl Host for DomHost {
             self.work.set(work);
             let found =
                 found.map_err(|_| JsError { message: "DOM work budget exhausted".into() })?;
-            return Ok(Some(
-                found.map_or(Value::Null, |node| Value::Host(format!("element:{}", node.index()))),
-            ));
+            let Some(node) = found else {
+                return Ok(Some(Value::Null));
+            };
+            reserve_handle(reserve, "element:", node.index())?;
+            return Ok(Some(Value::Host(format!("element:{}", node.index()))));
         }
         if object == "document" && method == "querySelectorAll" {
             let selector = match args.first() {
@@ -574,7 +612,21 @@ impl Host for DomHost {
             self.work.set(work);
             let nodes =
                 nodes.map_err(|_| JsError { message: "DOM work budget exhausted".into() })?;
-            let cost = nodes.len().saturating_mul(HOST_STRING_OVERHEAD * 2).saturating_add(64);
+            // Charge every allocation the handle array will perform: its
+            // containers, the "length" key, each index key and each
+            // "element:<index>" handle string.
+            let mut cost = HOST_STRING_OVERHEAD
+                .saturating_mul(2)
+                .saturating_add(HOST_STRING_OVERHEAD)
+                .saturating_add("length".len());
+            for (index, node) in nodes.iter().enumerate() {
+                cost = cost
+                    .saturating_add(HOST_STRING_OVERHEAD)
+                    .saturating_add(decimal_digits(index).saturating_add(HOST_STRING_OVERHEAD))
+                    .saturating_add(
+                        handle_len("element:", node.index()).saturating_add(HOST_STRING_OVERHEAD),
+                    );
+            }
             if !reserve(cost) {
                 return Err(JsError { message: "script memory budget exceeded".into() });
             }
@@ -597,8 +649,24 @@ impl Host for DomHost {
 mod tests {
     use super::{DomHost, EventRegistry};
     use bweb_html::{HtmlDocument, NodeKind};
-    use bweb_js::{MAX_ARRAY_LENGTH, MAX_STRING_BYTES, Runtime, Value};
+    use bweb_js::{JsError, MAX_ARRAY_LENGTH, MAX_STRING_BYTES, Runtime, Value};
     use std::{cell::RefCell, rc::Rc};
+
+    fn eval_with_budget(
+        document: &Rc<RefCell<HtmlDocument>>,
+        source: &str,
+        budget: usize,
+    ) -> Result<(String, usize), JsError> {
+        let mut runtime = Runtime::new();
+        runtime.set_host(Box::new(DomHost::new(
+            document,
+            Rc::new(RefCell::new(EventRegistry::default())),
+        )));
+        runtime.define_global("document", Value::Host("document".into()));
+        runtime.set_memory_budget(budget);
+        let value = runtime.eval(source)?;
+        Ok((value.display(), runtime.memory_used()))
+    }
 
     #[test]
     fn host_survives_as_long_as_the_document_rc_is_alive() {
@@ -1180,5 +1248,33 @@ mod tests {
             );
         }
         assert_eq!(runtime.eval("1 + 1").expect("runtime still usable").display(), "2");
+    }
+
+    #[test]
+    fn host_handles_reserve_memory_before_materialisation() {
+        let document = Rc::new(RefCell::new(HtmlDocument::parse(
+            "<html><body><main id='x'><p></p><p></p></main></body></html>",
+        )));
+        for source in [
+            "document.body",
+            "document.documentElement",
+            "document.querySelector('main')",
+            "document.getElementById('x')",
+            "document.querySelectorAll('p').length",
+        ] {
+            let (_, exact) = eval_with_budget(&document, source, 1_000_000)
+                .unwrap_or_else(|error| panic!("{source}: {error}"));
+            let (value, used) = eval_with_budget(&document, source, exact)
+                .unwrap_or_else(|error| panic!("{source} with exact budget: {error}"));
+            assert!(!value.is_empty(), "{source} returned no value");
+            assert_eq!(used, exact, "{source} must reserve exactly the measured cost");
+
+            let error = eval_with_budget(&document, source, exact - 1).unwrap_err();
+            assert!(
+                error.message.contains("memory budget"),
+                "{source}: unexpected error: {}",
+                error.message
+            );
+        }
     }
 }
