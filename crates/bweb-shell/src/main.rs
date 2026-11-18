@@ -1041,11 +1041,12 @@ fn filter_list_cache_directory() -> Result<PathBuf, io::Error> {
 #[cfg(test)]
 mod tests {
     use super::{
-        NodeId, Page, content_viewport, copy_scaled_pixels, load_page_with_policy, prepare_page,
+        NodeId, Page, content_viewport, copy_scaled_pixels, load_page, load_page_with_policy,
+        prepare_page,
     };
     use crate::scripting::{DomHost, EventRegistry};
     use bweb_html::{HtmlDocument, LoadedDocument, NodeKind};
-    use bweb_js::{PAGE_INSTRUCTION_BUDGET, Runtime, Value};
+    use bweb_js::{PAGE_INSTRUCTION_BUDGET, PAGE_PARSE_TOKEN_BUDGET, Runtime, Value};
     use bweb_net::AddressPolicy;
     use bweb_renderer::Image;
     use std::{
@@ -1138,6 +1139,9 @@ mod tests {
         // document's lifetime; it is only reset on the next navigation.
         let after_scripts = prepared.runtime.page_budget_remaining().expect("active page budget");
         assert!(after_scripts < PAGE_INSTRUCTION_BUDGET && after_scripts > 0);
+        let after_parse =
+            prepared.runtime.page_parse_budget_remaining().expect("active parse budget");
+        assert!(after_parse < PAGE_PARSE_TOKEN_BUDGET && after_parse > 0);
 
         let body = prepared
             .document
@@ -1161,6 +1165,18 @@ mod tests {
         assert!(
             prepared.runtime.page_budget_remaining().expect("active page budget") < after_scripts
         );
+    }
+
+    #[test]
+    fn default_policy_rejects_loopback_navigation() {
+        let url =
+            serve_once("<!DOCTYPE html><html><body>local</body></html>".to_owned(), "text/html");
+        let error = match load_page(&url, false) {
+            Ok(_) => panic!("loopback must be denied by default"),
+            Err(error) => error,
+        };
+        let message = error.to_string();
+        assert!(message.contains("local or internal address"), "unexpected error: {message}");
     }
 
     #[test]
