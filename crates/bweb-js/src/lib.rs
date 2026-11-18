@@ -716,4 +716,36 @@ mod tests {
         );
         assert_eq!(runtime.eval("typeof {}").expect("object").display(), "object");
     }
+
+    #[test]
+    fn typeof_undeclared_identifier_is_undefined() {
+        let mut runtime = Runtime::new();
+        assert_eq!(runtime.eval("typeof absent").expect("typeof").display(), "undefined");
+        assert_eq!(
+            runtime.eval("typeof absent !== 'undefined'").expect("guard").display(),
+            "false"
+        );
+        // Normal identifier access still errors, and only bare identifiers get
+        // the typeof exemption.
+        assert!(runtime.eval("absent").is_err());
+        assert!(runtime.eval("typeof absent.prop").is_err());
+    }
+
+    #[test]
+    fn native_functions_compare_by_identity() {
+        let mut runtime = Runtime::new();
+        assert_eq!(
+            runtime.eval("Math.floor === Math.floor").expect("same native").display(),
+            "true"
+        );
+        assert_eq!(
+            runtime.eval("Math.floor !== Math.floor").expect("same native").display(),
+            "false"
+        );
+        assert_eq!(
+            runtime.eval("Math.floor === Math.ceil").expect("different natives").display(),
+            "false"
+        );
+        assert_eq!(runtime.eval("print === console.log").expect("shared native").display(), "true");
+    }
 }

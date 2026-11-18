@@ -940,11 +940,29 @@ impl Runtime {
                 })))
             }
             Expr::Unary { op, value } => {
+                // `typeof` is the one operator that must not throw on an
+                // undeclared identifier: it yields "undefined" instead. Only
+                // bare identifiers get this treatment; property access and
+                // other expressions keep their normal errors.
+                if matches!(op, UnaryOp::TypeOf) {
+                    if let Expr::Identifier(name) = &**value {
+                        let found =
+                            env.get_checked(name, &mut |value| self.charge_value_clone(value))?;
+                        let value = found.unwrap_or(Value::Undefined);
+                        let type_name = value.type_name();
+                        self.charge_string(type_name)?;
+                        return Ok(Value::String(type_name.into()));
+                    }
+                }
                 let value = self.eval_expr(value, env)?;
                 match op {
                     UnaryOp::Negate => Ok(Value::Number(-value.number())),
                     UnaryOp::Not => Ok(Value::Bool(!value.truthy())),
-                    UnaryOp::TypeOf => Ok(Value::String(value.type_name().into())),
+                    UnaryOp::TypeOf => {
+                        let type_name = value.type_name();
+                        self.charge_string(type_name)?;
+                        Ok(Value::String(type_name.into()))
+                    }
                 }
             }
             Expr::Binary { op, left, right } => {
@@ -1473,6 +1491,9 @@ fn strict_equals(left: &Value, right: &Value) -> bool {
         (Value::String(a), Value::String(b)) => a == b,
         (Value::Object(a), Value::Object(b)) => Rc::ptr_eq(a, b),
         (Value::Function(a), Value::Function(b)) => Rc::ptr_eq(a, b),
+        // Native functions are plain function pointers; compare their address
+        // so two references to the same builtin are strictly equal.
+        (Value::Native(a), Value::Native(b)) => std::ptr::fn_addr_eq(*a, *b),
         (Value::Host(a), Value::Host(b)) => a == b,
         _ => false,
     }
