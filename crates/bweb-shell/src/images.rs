@@ -35,24 +35,38 @@ impl Error for DecodeError {}
 /// image header cannot force a huge allocation. A post-decode check remains as
 /// a safety net for decoders that ignore limits.
 pub fn decode(bytes: &[u8]) -> Result<Image, DecodeError> {
+    decode_with_budget(bytes, MAX_IMAGE_PIXELS)
+}
+
+/// Decodes an image with an explicit per-image pixel allowance. The decoder's
+/// allocation limit is set from this budget *before* decoding, so an image that
+/// cannot fit the page's remaining allowance is never fully allocated.
+fn decode_with_budget(bytes: &[u8], max_pixels: usize) -> Result<Image, DecodeError> {
+    if max_pixels == 0 {
+        return Err(DecodeError::TooLarge);
+    }
+    let max_pixels = max_pixels.min(MAX_IMAGE_PIXELS);
     let mut limits = image::Limits::default();
     // Bound the decoded allocation by total pixels (RGBA8 = 4 bytes/pixel).
     // No per-axis dimension cap: a panoramic image such as 16000x100 is well
     // within the pixel budget and must be accepted. `max_alloc` alone still
     // rejects a crafted 100000x100000 header before any large allocation.
-    limits.max_alloc = Some((MAX_IMAGE_PIXELS as u64) * 4);
+    limits.max_alloc = Some((max_pixels as u64) * 4);
 
     let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format()
         .map_err(|_| DecodeError::UnsupportedOrCorrupt)?;
     // Limits are set before decode, so the decoder bound allocations up front.
     reader.limits(limits);
-    let decoded = reader.decode().map_err(|_| DecodeError::UnsupportedOrCorrupt)?;
+    let decoded = reader.decode().map_err(|error| match error {
+        image::ImageError::Limits(_) => DecodeError::TooLarge,
+        _ => DecodeError::UnsupportedOrCorrupt,
+    })?;
 
     let width = decoded.width() as usize;
     let height = decoded.height() as usize;
     let pixels = width.checked_mul(height).ok_or(DecodeError::TooLarge)?;
-    if pixels == 0 || pixels > MAX_IMAGE_PIXELS {
+    if pixels == 0 || pixels > max_pixels {
         return Err(DecodeError::TooLarge);
     }
     let rgba = decoded.to_rgba8();
@@ -63,17 +77,33 @@ pub fn decode(bytes: &[u8]) -> Result<Image, DecodeError> {
 /// Decodes every fetched image exactly once, keyed by its resolved URL. Both
 /// `<img>` elements and CSS backgrounds share these decoded bitmaps.
 pub fn decode_all(resources: &[LoadedResource]) -> HashMap<String, Arc<Image>> {
+    decode_all_with_budget(resources, MAX_IMAGE_PIXELS)
+}
+
+/// Decodes images while consuming a shared pixel budget. Each image is decoded
+/// with the *remaining* allowance, so an oversized image is rejected by the
+/// decoder's allocation limits before its bitmap is built.
+fn decode_all_with_budget(
+    resources: &[LoadedResource],
+    pixel_budget: usize,
+) -> HashMap<String, Arc<Image>> {
     let mut decoded = HashMap::new();
-    let mut total_pixels = 0usize;
+    let mut remaining = pixel_budget;
     for resource in resources.iter().filter(|item| item.kind == ResourceKind::Image) {
-        match decode(&resource.bytes) {
+        let result = if remaining >= MAX_IMAGE_PIXELS {
+            decode(&resource.bytes)
+        } else {
+            decode_with_budget(&resource.bytes, remaining)
+        };
+        match result {
             Ok(image) => {
-                total_pixels += (image.width() as usize).saturating_mul(image.height() as usize);
-                if total_pixels > MAX_IMAGE_PIXELS {
-                    eprintln!("  image memory budget exhausted; skipping {}", resource.url);
-                    break;
-                }
+                let pixels = (image.width() as usize).saturating_mul(image.height() as usize);
+                remaining = remaining.saturating_sub(pixels);
                 decoded.insert(resource.url.as_str().to_owned(), Arc::new(image));
+            }
+            Err(DecodeError::TooLarge) => {
+                eprintln!("  image memory budget exhausted; skipping {}", resource.url);
+                break;
             }
             Err(error) => eprintln!("  invalid image {}: {error}", resource.url),
         }
@@ -128,7 +158,10 @@ pub fn image_sizes(images: &HashMap<NodeId, Arc<Image>>) -> HashMap<NodeId, Imag
 
 #[cfg(test)]
 mod tests {
-    use super::{DecodeError, collect_images, decode, decode_all, image_sizes};
+    use super::{
+        DecodeError, collect_images, decode, decode_all, decode_all_with_budget,
+        decode_with_budget, image_sizes,
+    };
     use bweb_html::{HtmlDocument, LoadedResource, NodeKind, ResourceKind};
     use bweb_renderer::Image;
     use image::{ImageEncoder, RgbaImage};
@@ -177,6 +210,32 @@ mod tests {
         let bytes = png(5000, 10, [10, 20, 30, 255]);
         let image = decode(&bytes).expect("panoramic image within budget");
         assert_eq!((image.width(), image.height()), (5000, 10));
+    }
+
+    #[test]
+    fn decode_all_applies_the_remaining_budget_before_decoding() {
+        let bytes = png(8, 8, [0, 0, 255, 255]);
+        // The decoder is given a 32-pixel allowance for a 64-pixel image, so
+        // it must reject it instead of allocating the full bitmap.
+        assert_eq!(decode_with_budget(&bytes, 32), Err(DecodeError::TooLarge));
+
+        let resource = |name: &str, width, height| LoadedResource {
+            url: Url::parse(&format!("https://example.test/{name}.png")).unwrap(),
+            kind: ResourceKind::Image,
+            content_type: None,
+            bytes: png(width, height, [0, 0, 255, 255]),
+        };
+        let resources = vec![
+            resource("a", 4, 4),
+            resource("b", 4, 4),
+            resource("big", 8, 8),
+            resource("never", 1, 1),
+        ];
+        let decoded = decode_all_with_budget(&resources, 32);
+        assert_eq!(decoded.len(), 2, "the two 4x4 images fit the 32-pixel budget");
+        assert!(!decoded.contains_key("https://example.test/big.png"));
+        // The budget is exhausted, so no further image is even attempted.
+        assert!(!decoded.contains_key("https://example.test/never.png"));
     }
 
     #[test]
