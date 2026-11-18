@@ -6,7 +6,7 @@ use std::{
     rc::{Rc, Weak},
 };
 
-use bweb_html::{DomReadError, HtmlDocument};
+use bweb_html::{DomReadError, HtmlDocument, RemoveOutcome};
 use bweb_js::{Host, JsError, MAX_ARRAY_LENGTH, MAX_STRING_BYTES, Object, Value};
 
 /// Converts a host argument to text after checking the single-string limit.
@@ -31,6 +31,7 @@ fn finish_budgeted_read(
         Err(DomReadError::ReservationFailed) => {
             Err(JsError { message: "script memory budget exceeded".into() })
         }
+        Err(DomReadError::InvalidNode) => Err(JsError { message: "invalid element handle".into() }),
     }
 }
 
@@ -280,8 +281,9 @@ impl Host for DomHost {
         let Some(document) = self.document.upgrade() else { return Ok(Some(Value::Undefined)) };
         let document = document.borrow();
         if object == "document" && (property == "body" || property == "documentElement") {
+            let tag = if property == "documentElement" { "html" } else { "body" };
             let mut work = self.work.get();
-            let found = document.element_by_tag_budgeted(property, &mut work);
+            let found = document.element_by_tag_budgeted(tag, &mut work);
             self.work.set(work);
             let found =
                 found.map_err(|_| JsError { message: "DOM work budget exhausted".into() })?;
@@ -412,6 +414,9 @@ impl Host for DomHost {
         if let Some(index) = handle_index(object, "element:") {
             let Some(document) = self.document.upgrade() else { return Ok(Value::Undefined) };
             let mut document = document.borrow_mut();
+            if method == "remove" && document.node_at(index).is_none() {
+                return Err(JsError { message: "invalid element handle".into() });
+            }
             let Some(id) = document.node_at(index) else { return Ok(Value::Undefined) };
             return match method {
                 "setAttribute" => {
@@ -448,6 +453,25 @@ impl Host for DomHost {
                     } else {
                         Value::Null
                     })
+                }
+                "remove" => {
+                    let mut work = self.work.get();
+                    let outcome = document.remove_node_budgeted(id, &mut work);
+                    self.work.set(work);
+                    match outcome {
+                        Ok(Some(RemoveOutcome::Removed))
+                        | Ok(Some(RemoveOutcome::AlreadyDetached)) => Ok(Value::Undefined),
+                        Ok(None) => {
+                            Err(JsError { message: "cannot remove a top-level element".into() })
+                        }
+                        Err(DomReadError::BudgetExhausted) => {
+                            Err(JsError { message: "DOM work budget exhausted".into() })
+                        }
+                        Err(DomReadError::InvalidNode) => {
+                            Err(JsError { message: "invalid element handle".into() })
+                        }
+                        Err(_) => Err(JsError { message: "invalid element handle".into() }),
+                    }
                 }
                 _ => Ok(Value::Undefined),
             };
@@ -495,6 +519,9 @@ impl Host for DomHost {
                         return Ok(Value::Undefined);
                     };
                     let mut document = document.borrow_mut();
+                    if !document.can_create_node() {
+                        return Err(JsError { message: "element budget exhausted".into() });
+                    }
                     let node = document.create_element(&tag);
                     return Ok(Value::Host(format!("element:{}", node.index())));
                 }
@@ -1276,5 +1303,110 @@ mod tests {
                 error.message
             );
         }
+    }
+
+    #[test]
+    fn document_element_returns_the_active_html_root() {
+        let document = Rc::new(RefCell::new(HtmlDocument::parse(
+            "<html><body><p id='x'>hi</p></body></html>",
+        )));
+        let events = Rc::new(RefCell::new(EventRegistry::default()));
+        let mut runtime = Runtime::new();
+        runtime.set_host(Box::new(DomHost::new(&document, events)));
+        runtime.define_global("document", Value::Host("document".into()));
+        assert_eq!(
+            runtime
+                .eval("document.documentElement === document.querySelector('html')")
+                .expect("documentElement")
+                .display(),
+            "true"
+        );
+        assert_eq!(
+            runtime.eval("document.body !== document.documentElement").expect("distinct").display(),
+            "true"
+        );
+    }
+
+    #[test]
+    fn element_remove_detaches_and_can_be_reappended() {
+        let document = Rc::new(RefCell::new(HtmlDocument::parse("<main></main>")));
+        let events = Rc::new(RefCell::new(EventRegistry::default()));
+        let mut runtime = Runtime::new();
+        runtime.set_host(Box::new(DomHost::new(&document, events)));
+        runtime.define_global("document", Value::Host("document".into()));
+        runtime
+            .eval("let p = document.createElement('p'); p.textContent = 'hi'; document.body.appendChild(p);")
+            .expect("create and attach");
+        assert_eq!(
+            runtime.eval("document.querySelectorAll('p').length").expect("count").display(),
+            "1"
+        );
+        runtime.eval("p.remove();").expect("remove");
+        runtime.eval("p.remove();").expect("removing a detached node is a no-op");
+        assert_eq!(
+            runtime.eval("document.querySelectorAll('p').length").expect("count").display(),
+            "0"
+        );
+        runtime.eval("document.body.appendChild(p);").expect("re-append");
+        assert_eq!(
+            runtime.eval("document.querySelectorAll('p').length").expect("count").display(),
+            "1"
+        );
+        assert_eq!(runtime.eval("p.textContent").expect("subtree survived").display(), "hi");
+
+        let error = runtime.eval("document.documentElement.remove()").unwrap_err();
+        assert!(error.message.contains("top-level element"), "{}", error.message);
+        assert_eq!(runtime.eval("1 + 1").expect("runtime usable").display(), "2");
+    }
+
+    #[test]
+    fn create_element_exhaustion_is_explicit() {
+        let document = Rc::new(RefCell::new(HtmlDocument::parse("<main></main>")));
+        let events = Rc::new(RefCell::new(EventRegistry::default()));
+        let mut runtime = Runtime::new();
+        runtime.set_host(Box::new(DomHost::new(&document, events)));
+        runtime.define_global("document", Value::Host("document".into()));
+        let error = runtime
+            .eval("for (let i = 0; i < 10000; i = i + 1) { document.createElement('i'); } document.createElement('b');")
+            .expect_err("the dynamic node budget must be reported");
+        assert!(
+            error.message.contains("element budget exhausted"),
+            "unexpected error: {}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn remove_consumes_dom_work_and_rejects_invalid_handles() {
+        let document = Rc::new(RefCell::new(HtmlDocument::parse("<main id='m'></main>")));
+        let events = Rc::new(RefCell::new(EventRegistry::default()));
+        let host = DomHost::new(&document, events);
+        let work = host.work_cell();
+        let mut runtime = Runtime::new();
+        runtime.set_host(Box::new(host));
+        runtime.define_global("document", Value::Host("document".into()));
+        runtime
+            .eval("let main = document.getElementById('m'); let first = null; for (let i = 0; i < 1000; i = i + 1) { let child = document.createElement('i'); main.appendChild(child); if (i === 0) { first = child; } }")
+            .expect("build a wide parent");
+
+        work.set(5);
+        let error = runtime
+            .eval("first.remove()")
+            .expect_err("a wide sibling scan must consume the DOM work budget");
+        assert!(error.message.contains("DOM work budget"), "unexpected error: {}", error.message);
+        assert_eq!(work.get(), 0);
+        work.set(1_000_000);
+        assert_eq!(
+            runtime.eval("document.querySelectorAll('i').length").expect("unchanged").display(),
+            "1000"
+        );
+
+        runtime.define_global("stale", Value::Host("element:9999999".into()));
+        let error = runtime.eval("stale.remove()").unwrap_err();
+        assert!(
+            error.message.contains("invalid element handle"),
+            "unexpected error: {}",
+            error.message
+        );
     }
 }

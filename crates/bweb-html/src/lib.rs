@@ -74,6 +74,17 @@ pub enum DomReadError {
     TooLarge,
     /// The cumulative memory budget could not cover an allocation.
     ReservationFailed,
+    /// The supplied `NodeId` does not refer to any node in the arena.
+    InvalidNode,
+}
+
+/// Result of a budgeted node removal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoveOutcome {
+    /// The node was detached from its parent.
+    Removed,
+    /// The node was already detached; removal is a no-op.
+    AlreadyDetached,
 }
 
 /// Stable index into a document's node arena.
@@ -709,7 +720,7 @@ impl HtmlDocument {
     ) -> Result<Vec<NodeId>, QueryBudgetExhausted> {
         self.query_selector_all_budgeted(selector, limit, work).map_err(|error| match error {
             DomReadError::BudgetExhausted | DomReadError::ReservationFailed => QueryBudgetExhausted,
-            DomReadError::TooLarge => QueryBudgetExhausted,
+            DomReadError::TooLarge | DomReadError::InvalidNode => QueryBudgetExhausted,
         })
     }
 
@@ -736,6 +747,12 @@ impl HtmlDocument {
             }
         }
         Ok(None)
+    }
+
+    /// Returns whether another script-created node still fits in the arena.
+    #[must_use]
+    pub const fn can_create_node(&self) -> bool {
+        self.dynamic_nodes < MAX_DYNAMIC_NODES
     }
 
     /// Creates a detached element node with no attributes.
@@ -832,6 +849,67 @@ impl HtmlDocument {
         self.nodes[child.0].parent = Some(parent);
         self.nodes[parent.0].children.push(child);
         true
+    }
+
+    /// Detaches a node from its parent without removing it from the arena.
+    /// Node ids stay stable and the subtree is preserved, so handles held by
+    /// scripts remain valid after the removal.
+    pub fn remove_node(&mut self, id: NodeId) -> bool {
+        let mut work = usize::MAX;
+        matches!(self.remove_node_budgeted(id, &mut work), Ok(Some(RemoveOutcome::Removed)))
+    }
+
+    /// Budgeted removal. The child scan and the subsequent shift of siblings
+    /// together cost exactly the parent's child count, and every unit is
+    /// debited from `work` before the arena is mutated.
+    pub fn remove_node_budgeted(
+        &mut self,
+        id: NodeId,
+        work: &mut usize,
+    ) -> Result<Option<RemoveOutcome>, DomReadError> {
+        if id == self.root {
+            return Ok(None);
+        }
+        if self.node(id).is_none() {
+            return Err(DomReadError::InvalidNode);
+        }
+        let parent = self.node(id).and_then(|node| node.parent());
+        let Some(parent) = parent else {
+            return Ok(Some(RemoveOutcome::AlreadyDetached));
+        };
+        if parent == self.root {
+            return Ok(None);
+        }
+        let position = {
+            let children = &self.nodes[parent.0].children;
+            let mut found = None;
+            for (index, child) in children.iter().enumerate() {
+                if *work == 0 {
+                    return Err(DomReadError::BudgetExhausted);
+                }
+                *work -= 1;
+                if *child == id {
+                    found = Some(index);
+                    break;
+                }
+            }
+            found
+        };
+        let Some(position) = position else {
+            return Ok(Some(RemoveOutcome::AlreadyDetached));
+        };
+        // `Vec::remove` shifts every following sibling; charge those moves
+        // before performing them so an exhausted budget changes nothing.
+        let child_count = self.nodes[parent.0].children.len();
+        let shifted = child_count.saturating_sub(position).saturating_sub(1);
+        if *work < shifted {
+            *work = 0;
+            return Err(DomReadError::BudgetExhausted);
+        }
+        *work -= shifted;
+        self.nodes[parent.0].children.remove(position);
+        self.nodes[id.0].parent = None;
+        Ok(Some(RemoveOutcome::Removed))
     }
 
     /// Returns whether an element's `class` attribute contains a class token.
@@ -2563,7 +2641,8 @@ fn read_bounded(reader: impl Read, limit: usize) -> Result<Vec<u8>, BoundedReadE
 mod tests {
     use super::{
         DomReadError, HtmlDocument, MAX_DOM_DEPTH, MAX_DYNAMIC_NODES, MAX_PARSED_NODES,
-        MAX_STACK_DEPTH, NodeId, NodeKind, QueryBudgetExhausted, ResourceKind, extract_css_urls,
+        MAX_STACK_DEPTH, NodeId, NodeKind, QueryBudgetExhausted, RemoveOutcome, ResourceKind,
+        extract_css_urls,
     };
 
     #[test]
@@ -2843,6 +2922,99 @@ mod tests {
         assert_eq!(document.query_selector("span"), None);
         assert_eq!(document.element_by_id("outside"), None);
         assert!(document.element_by_id("inside").is_some());
+    }
+
+    #[test]
+    fn remove_node_detaches_without_reindexing() {
+        let mut document = HtmlDocument::parse("<main id='m'><p id='p'>hi</p></main>");
+        let main = document.element_by_id("m").expect("main");
+        let paragraph = document.element_by_id("p").expect("paragraph");
+
+        assert!(document.remove_node(paragraph));
+        assert_eq!(document.node(paragraph).expect("node survives").parent(), None);
+        assert!(document.query_selector_all("p").is_empty(), "detached node is not selected");
+        assert_eq!(document.text_content(paragraph), "hi", "subtree is preserved");
+        assert!(!document.remove_node(document.root()), "the document root cannot be removed");
+        assert!(!document.remove_node(paragraph), "already detached");
+        let mut work = 16;
+        assert_eq!(
+            document.remove_node_budgeted(paragraph, &mut work),
+            Ok(Some(RemoveOutcome::AlreadyDetached))
+        );
+
+        assert!(document.append_child(main, paragraph));
+        assert_eq!(document.query_selector_all("p"), vec![paragraph]);
+    }
+
+    #[test]
+    fn remove_node_budget_rejects_invalid_node_id() {
+        let mut document = HtmlDocument::parse("<main></main>");
+        let mut work = 16;
+        assert_eq!(
+            document.remove_node_budgeted(NodeId(usize::MAX), &mut work),
+            Err(DomReadError::InvalidNode)
+        );
+        assert_eq!(work, 16, "an invalid id must not consume DOM work");
+    }
+
+    #[test]
+    fn remove_node_budget_is_idempotent_for_a_real_detached_node() {
+        let mut document = HtmlDocument::parse("<main id='m'><p id='p'>hi</p></main>");
+        let paragraph = document.element_by_id("p").expect("paragraph");
+        let mut work = 16;
+        assert_eq!(
+            document.remove_node_budgeted(paragraph, &mut work),
+            Ok(Some(RemoveOutcome::Removed))
+        );
+        let mut work = 16;
+        assert_eq!(
+            document.remove_node_budgeted(paragraph, &mut work),
+            Ok(Some(RemoveOutcome::AlreadyDetached))
+        );
+        assert_eq!(work, 16, "a no-op removal must not consume DOM work");
+        assert_eq!(document.text_content(paragraph), "hi", "subtree must survive");
+    }
+
+    #[test]
+    fn remove_node_budget_tracks_child_scan_and_shift() {
+        let mut document = HtmlDocument::parse("<main id='m'></main>");
+        let main = document.element_by_id("m").expect("main");
+        let initial = document.node(main).expect("main").children().len();
+        for _ in 0..1_000 {
+            let child = document.create_element("i");
+            assert!(document.append_child(main, child));
+        }
+        let child_count = initial + 1_000;
+        let first = document.node(main).expect("main").children()[0];
+
+        // Not enough work to even find the child: no mutation.
+        let mut work = 5;
+        assert_eq!(
+            document.remove_node_budgeted(first, &mut work),
+            Err(DomReadError::BudgetExhausted)
+        );
+        assert_eq!(work, 0);
+        assert_eq!(document.node(main).expect("main").children().len(), child_count);
+
+        // Removing the last child costs exactly one unit per sibling scanned.
+        let last = *document.node(main).expect("main").children().last().expect("child");
+        let mut work = child_count;
+        assert_eq!(
+            document.remove_node_budgeted(last, &mut work),
+            Ok(Some(RemoveOutcome::Removed))
+        );
+        assert_eq!(work, 0, "the scan must consume the whole allowance");
+        assert_eq!(document.node(main).expect("main").children().len(), child_count - 1);
+    }
+
+    #[test]
+    fn can_create_node_tracks_the_dynamic_budget() {
+        let mut document = HtmlDocument::parse("<main></main>");
+        assert!(document.can_create_node());
+        for _ in 0..MAX_DYNAMIC_NODES {
+            let _ = document.create_element("i");
+        }
+        assert!(!document.can_create_node());
     }
 
     #[test]

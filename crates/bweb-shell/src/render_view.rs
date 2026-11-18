@@ -77,10 +77,12 @@ impl BrowserViewBackend {
         self.pseudo_styles = StyleEngine::new()
             .compute_generated(&self.document, &self.stylesheets, 1280.0, 720.0)
             .1;
+        // Keep the previous frame and scroll offset during a mutation: the
+        // next reflow/repaint replaces both. Clearing the framebuffer here
+        // leaves a window where other events can try to repaint without a
+        // valid layout, and resetting the scroll is a visible regression.
         self.display_list = None;
-        self.framebuffer = None;
         self.text_runs.clear();
-        self.scroll_y = 0.0;
     }
 
     #[must_use]
@@ -450,5 +452,25 @@ mod tests {
             matches!(&items[2], PaintItem::Text { glyphs, .. } if glyphs[0].y == 5.0 && glyphs[0].x == 4.0)
         );
         assert_eq!(items[3], PaintItem::PopClip);
+    }
+
+    #[test]
+    fn mutation_preserves_scroll_and_last_frame() {
+        let markup = format!("<main>{}</main>", "<p>long line</p>".repeat(40));
+        let mut backend = backend(HtmlDocument::parse(markup));
+        let viewport = Viewport::new(200, 100, 1.0).expect("viewport");
+        backend.reflow(200, 100, 1.0).expect("initial reflow");
+        backend.repaint(viewport).expect("initial paint");
+        backend.content_height_css = 1000.0;
+        let max = backend.max_scroll(viewport.height(), viewport.scale_factor());
+        assert!(max > 0.0, "the test page must be scrollable");
+        backend.set_scroll_y(max / 2.0, viewport.height(), viewport.scale_factor());
+        let scroll = backend.scroll_y();
+        assert!(scroll > 0.0);
+
+        backend
+            .replace_document(HtmlDocument::parse("<main>mutated</main>"), "https://example.test/");
+        assert_eq!(backend.scroll_y(), scroll, "a DOM mutation must not reset the scroll");
+        assert!(backend.framebuffer().is_some(), "the last frame must stay paint");
     }
 }
