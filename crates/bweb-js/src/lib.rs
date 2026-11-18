@@ -26,8 +26,10 @@ pub enum RuntimeStatus {
 
 #[cfg(test)]
 mod tests {
-    use super::{Host, Object, PAGE_INSTRUCTION_BUDGET, PAGE_MEMORY_BUDGET, Runtime, Value};
-    use std::{cell::RefCell, rc::Rc};
+    use super::{
+        Host, JsError, Object, PAGE_INSTRUCTION_BUDGET, PAGE_MEMORY_BUDGET, Runtime, Value,
+    };
+    use std::{cell::Cell, cell::RefCell, rc::Rc};
 
     #[test]
     fn evaluates_arithmetic_and_variables() {
@@ -488,6 +490,73 @@ mod tests {
         runtime.define_global("host", Value::Host("host".into()));
         let error = runtime.eval("host.node").expect_err("nesting limit");
         assert!(error.message.contains("nesting"), "unexpected error: {}", error.message);
+    }
+
+    struct BudgetHost {
+        materialized: Rc<Cell<usize>>,
+    }
+
+    impl BudgetHost {
+        fn note(&self) {
+            self.materialized.set(self.materialized.get() + 1);
+        }
+    }
+
+    impl Host for BudgetHost {
+        fn call(
+            &mut self,
+            _object: &str,
+            _method: &str,
+            _args: &[Value],
+        ) -> Result<Value, JsError> {
+            self.note();
+            Ok(Value::String("x".repeat(100)))
+        }
+
+        fn call_with_budget(
+            &mut self,
+            _object: &str,
+            _method: &str,
+            _args: &[Value],
+            reserve: &mut dyn FnMut(usize) -> bool,
+        ) -> Result<Option<Value>, JsError> {
+            if !reserve(100 + 24) {
+                return Ok(Some(Value::Null));
+            }
+            self.note();
+            Ok(Some(Value::String("x".repeat(100))))
+        }
+
+        fn get(&self, _object: &str, _property: &str) -> Value {
+            self.note();
+            Value::String("x".repeat(100))
+        }
+
+        fn get_with_budget(
+            &self,
+            _object: &str,
+            _property: &str,
+            reserve: &mut dyn FnMut(usize) -> bool,
+        ) -> Option<Value> {
+            if !reserve(100 + 24) {
+                return Some(Value::Undefined);
+            }
+            self.note();
+            Some(Value::String("x".repeat(100)))
+        }
+    }
+
+    #[test]
+    fn host_reserves_budget_before_materialising_strings() {
+        let materialized = Rc::new(Cell::new(0));
+        let mut runtime = Runtime::new();
+        runtime.set_host(Box::new(BudgetHost { materialized: materialized.clone() }));
+        runtime.set_memory_budget(1_000);
+        runtime.set_memory_used(950);
+
+        assert_eq!(runtime.test_host_call("host", "data", &[]).expect("call").display(), "null");
+        assert_eq!(runtime.test_host_get("host", "data").expect("get").display(), "undefined");
+        assert_eq!(materialized.get(), 0, "oversized host strings must not be materialised");
     }
 
     #[test]

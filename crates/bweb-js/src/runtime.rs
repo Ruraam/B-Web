@@ -194,11 +194,38 @@ pub trait Host {
     fn get(&self, _object: &str, _property: &str) -> Value {
         Value::Undefined
     }
+
+    /// Optional budgeted lookup. An implementation that materialises strings
+    /// should call `reserve(bytes)` before allocating; a `false` result means
+    /// the allocation must be skipped. Returning `Some` means the value has
+    /// already been charged, so the runtime must not charge it again.
+    fn get_with_budget(
+        &self,
+        _object: &str,
+        _property: &str,
+        _reserve: &mut dyn FnMut(usize) -> bool,
+    ) -> Option<Value> {
+        None
+    }
+
     fn set(&mut self, _object: &str, _property: &str, _value: Value) -> Result<(), JsError> {
         Ok(())
     }
+
     fn call(&mut self, _object: &str, _method: &str, _args: &[Value]) -> Result<Value, JsError> {
         Ok(Value::Undefined)
+    }
+
+    /// Budgeted counterpart of `call`, with the same reservation contract as
+    /// `get_with_budget`.
+    fn call_with_budget(
+        &mut self,
+        _object: &str,
+        _method: &str,
+        _args: &[Value],
+        _reserve: &mut dyn FnMut(usize) -> bool,
+    ) -> Result<Option<Value>, JsError> {
+        Ok(None)
     }
 }
 
@@ -411,6 +438,21 @@ impl Runtime {
     #[cfg(test)]
     pub(crate) fn set_memory_used(&mut self, used: usize) {
         self.memory_used = used;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_host_call(
+        &mut self,
+        host: &str,
+        method: &str,
+        args: &[Value],
+    ) -> Result<Value, JsError> {
+        self.call_host(host, method, args)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_host_get(&mut self, host: &str, property: &str) -> Result<Value, JsError> {
+        self.get_member(&Value::Host(host.to_owned()), property)
     }
 
     /// Verifies that an allocation of `bytes` fits the remaining budget without
@@ -968,10 +1010,28 @@ impl Runtime {
     fn get_member(&mut self, object: &Value, property: &str) -> Result<Value, JsError> {
         match object {
             Value::Host(name) => {
-                let value =
-                    self.host.as_ref().map_or(Value::Undefined, |host| host.get(name, property));
-                self.charge_host_value(&value)?;
-                Ok(value)
+                // Let the bridge reserve the cost of any string it is about to
+                // materialise. Taking the host out avoids borrowing `self` both
+                // as the reservation closure and as the host owner.
+                let host = self.host.take();
+                let budgeted = match host.as_ref() {
+                    Some(host) => host.get_with_budget(name, property, &mut |bytes| {
+                        self.charge_memory(bytes).is_ok()
+                    }),
+                    None => None,
+                };
+                let result = if let Some(value) = budgeted {
+                    Ok(value)
+                } else {
+                    let value =
+                        host.as_ref().map_or(Value::Undefined, |host| host.get(name, property));
+                    match self.charge_host_value(&value) {
+                        Ok(()) => Ok(value),
+                        Err(error) => Err(error),
+                    }
+                };
+                self.host = host;
+                result
             }
             Value::Object(object) => {
                 let value = {
@@ -1033,12 +1093,32 @@ impl Runtime {
         for argument in args {
             self.charge_host_display(argument)?;
         }
-        let value = match self.host.as_mut() {
-            Some(bridge) => bridge.call(host, method, args)?,
-            None => return Ok(Value::Undefined),
+        let mut bridge = self.host.take();
+        let budgeted = match bridge.as_mut() {
+            Some(bridge) => bridge.call_with_budget(host, method, args, &mut |bytes| {
+                self.charge_memory(bytes).is_ok()
+            }),
+            None => Ok(None),
         };
-        self.charge_host_value(&value)?;
-        Ok(value)
+        let result = match budgeted {
+            Ok(Some(value)) => Ok(value),
+            Ok(None) => {
+                let call_result = match bridge.as_mut() {
+                    Some(bridge) => bridge.call(host, method, args),
+                    None => Ok(Value::Undefined),
+                };
+                match call_result {
+                    Ok(value) => match self.charge_host_value(&value) {
+                        Ok(()) => Ok(value),
+                        Err(error) => Err(error),
+                    },
+                    Err(error) => Err(error),
+                }
+            }
+            Err(error) => Err(error),
+        };
+        self.host = bridge;
+        result
     }
 
     /// Calls a runtime value as a function with the full script budget.

@@ -54,6 +54,8 @@ impl EventRegistry {
 /// Maximum number of DOM nodes a document's scripts may examine before the
 /// bridge stops answering selector queries for that document.
 pub const DOM_WORK_BUDGET: usize = 1_000_000;
+/// Fixed accounting cost of one materialised host string.
+const HOST_STRING_OVERHEAD: usize = 24;
 
 /// Exposes a document to scripts through the `document` host object.
 pub struct DomHost {
@@ -95,12 +97,15 @@ fn host_handle(value: &Value) -> Option<String> {
     }
 }
 
-fn style_value_bounded(style: &str, property: &str, max_bytes: usize) -> Option<String> {
+fn style_value_ref<'a>(style: &'a str, property: &str) -> Option<&'a str> {
     style.split(';').find_map(|declaration| {
         let (name, value) = declaration.split_once(':')?;
-        let value = value.trim();
-        (name.trim() == property && value.len() <= max_bytes).then(|| value.to_owned())
+        (name.trim() == property).then(|| value.trim())
     })
+}
+
+fn style_value_bounded(style: &str, property: &str, max_bytes: usize) -> Option<String> {
+    style_value_ref(style, property).filter(|value| value.len() <= max_bytes).map(str::to_owned)
 }
 
 fn with_style(
@@ -110,27 +115,60 @@ fn with_style(
     value: Option<&str>,
 ) -> Result<(), JsError> {
     let Some(id) = document.node_at(index) else { return Ok(()) };
-    let style = document.attribute(id, "style").unwrap_or("").to_owned();
-    let mut declarations: Vec<(String, String)> = style
-        .split(';')
-        .filter_map(|part| {
-            let (name, value) = part.split_once(':')?;
-            Some((name.trim().to_owned(), value.trim().to_owned()))
-        })
-        .collect();
-    declarations.retain(|(name, _)| name != property);
-    if let Some(value) = value {
-        declarations.push((property.to_owned(), value.to_owned()));
+    let style = document.attribute(id, "style").unwrap_or("");
+
+    // Predict the final size before building any owned declaration strings.
+    let mut predicted = 0usize;
+    let mut declarations = 0usize;
+    for part in style.split(';') {
+        let Some((name, value)) = part.split_once(':') else { continue };
+        let name = name.trim();
+        if name == property {
+            continue;
+        }
+        predicted = predicted
+            .saturating_add(name.len())
+            .saturating_add(2)
+            .saturating_add(value.trim().len());
+        declarations += 1;
     }
-    let style = declarations
-        .iter()
-        .map(|(name, value)| format!("{name}: {value}"))
-        .collect::<Vec<_>>()
-        .join("; ");
-    if style.len() > MAX_STRING_BYTES {
+    if let Some(value) = value {
+        predicted =
+            predicted.saturating_add(property.len()).saturating_add(2).saturating_add(value.len());
+        declarations += 1;
+    }
+    if declarations > 1 {
+        predicted = predicted.saturating_add((declarations - 1).saturating_mul(2));
+    }
+    if predicted > MAX_STRING_BYTES {
         return Err(JsError { message: "maximum string length exceeded".into() });
     }
-    document.set_attribute(id, "style", &style);
+
+    let mut text = String::with_capacity(predicted);
+    let mut first = true;
+    for part in style.split(';') {
+        let Some((name, value)) = part.split_once(':') else { continue };
+        let name = name.trim();
+        if name == property {
+            continue;
+        }
+        if !first {
+            text.push_str("; ");
+        }
+        text.push_str(name);
+        text.push_str(": ");
+        text.push_str(value.trim());
+        first = false;
+    }
+    if let Some(value) = value {
+        if !first {
+            text.push_str("; ");
+        }
+        text.push_str(property);
+        text.push_str(": ");
+        text.push_str(value);
+    }
+    document.set_attribute(id, "style", &text);
     Ok(())
 }
 
@@ -195,6 +233,78 @@ impl Host for DomHost {
             }
         }
         Value::Undefined
+    }
+
+    fn get_with_budget(
+        &self,
+        object: &str,
+        property: &str,
+        reserve: &mut dyn FnMut(usize) -> bool,
+    ) -> Option<Value> {
+        let Some(document) = self.document.upgrade() else { return Some(Value::Undefined) };
+        let document = document.borrow();
+        if object == "document" && property == "title" {
+            // A title lookup may scan the whole arena; charge the shared work
+            // budget for that scan before materialising the text.
+            let mut work = self.work.get();
+            if work == 0 {
+                return Some(Value::String(String::new()));
+            }
+            work = work.saturating_sub(document.node_count());
+            self.work.set(work);
+            let length = document.title_len();
+            if length > MAX_STRING_BYTES || !reserve(length + HOST_STRING_OVERHEAD) {
+                return Some(Value::String(String::new()));
+            }
+            return Some(Value::String(
+                document.title_bounded(MAX_STRING_BYTES).unwrap_or_default(),
+            ));
+        }
+        if let Some(index) = handle_index(object, "element:") {
+            let Some(id) = document.node_at(index) else { return Some(Value::Undefined) };
+            match property {
+                "textContent" => {
+                    let mut work = self.work.get();
+                    let Some(length) =
+                        document.text_content_len_budgeted(id, MAX_STRING_BYTES, &mut work)
+                    else {
+                        self.work.set(work);
+                        return Some(Value::String(String::new()));
+                    };
+                    self.work.set(work);
+                    if !reserve(length + HOST_STRING_OVERHEAD) {
+                        return Some(Value::String(String::new()));
+                    }
+                    return Some(Value::String(
+                        document.text_content_bounded(id, MAX_STRING_BYTES).unwrap_or_default(),
+                    ));
+                }
+                "id" | "class" | "href" | "src" => {
+                    let value = document.attribute(id, property).unwrap_or("");
+                    if value.len() > MAX_STRING_BYTES
+                        || !reserve(value.len() + HOST_STRING_OVERHEAD)
+                    {
+                        return Some(Value::Undefined);
+                    }
+                    return Some(Value::String(value.to_owned()));
+                }
+                _ => {}
+            }
+        }
+        if let Some(index) = handle_index(object, "style:") {
+            if let Some(id) = document.node_at(index) {
+                let style = document.attribute(id, "style").unwrap_or("");
+                if let Some(value) = style_value_ref(style, property) {
+                    if value.len() > MAX_STRING_BYTES
+                        || !reserve(value.len() + HOST_STRING_OVERHEAD)
+                    {
+                        return Some(Value::Undefined);
+                    }
+                    return Some(Value::String(value.to_owned()));
+                }
+            }
+        }
+        None
     }
 
     fn set(&mut self, object: &str, property: &str, value: Value) -> Result<(), JsError> {
@@ -322,12 +432,11 @@ impl Host for DomHost {
                     // Every examined node consumes the document's shared DOM
                     // work budget; an exhausted budget returns no results.
                     let mut work = self.work.get();
-                    let nodes = document.query_selector_all_budgeted(
-                        &selector,
-                        MAX_ARRAY_LENGTH,
-                        &mut work,
-                    );
+                    let nodes =
+                        document.query_selector_all_checked(&selector, MAX_ARRAY_LENGTH, &mut work);
                     self.work.set(work);
+                    let nodes = nodes
+                        .map_err(|_| JsError { message: "DOM work budget exhausted".into() })?;
                     let visible = nodes.len();
                     let mut properties = HashMap::with_capacity(visible.saturating_add(1));
                     for (index, node) in nodes.iter().enumerate() {
@@ -402,6 +511,61 @@ impl Host for DomHost {
             }
         }
         Ok(Value::Undefined)
+    }
+
+    fn call_with_budget(
+        &mut self,
+        object: &str,
+        method: &str,
+        args: &[Value],
+        reserve: &mut dyn FnMut(usize) -> bool,
+    ) -> Result<Option<Value>, JsError> {
+        if method == "getAttribute" {
+            if let Some(index) = handle_index(object, "element:") {
+                let Some(name) = args.first() else { return Ok(Some(Value::Null)) };
+                let name = name.display_limited(MAX_STRING_BYTES)?;
+                let Some(document) = self.document.upgrade() else { return Ok(Some(Value::Null)) };
+                let document = document.borrow();
+                let Some(id) = document.node_at(index) else { return Ok(Some(Value::Null)) };
+                if let Some(value) = document.attribute(id, &name) {
+                    if value.len() > MAX_STRING_BYTES
+                        || !reserve(value.len() + HOST_STRING_OVERHEAD)
+                    {
+                        return Ok(Some(Value::Null));
+                    }
+                    return Ok(Some(Value::String(value.to_owned())));
+                }
+                return Ok(Some(Value::Null));
+            }
+        }
+        if object == "document" && method == "querySelectorAll" {
+            let selector = match args.first() {
+                Some(value) => value.display_limited(MAX_STRING_BYTES)?,
+                None => String::new(),
+            };
+            let Some(document) = self.document.upgrade() else { return Ok(Some(Value::Undefined)) };
+            let document = document.borrow();
+            let mut work = self.work.get();
+            let nodes = document.query_selector_all_checked(&selector, MAX_ARRAY_LENGTH, &mut work);
+            self.work.set(work);
+            let nodes =
+                nodes.map_err(|_| JsError { message: "DOM work budget exhausted".into() })?;
+            let cost = nodes.len().saturating_mul(HOST_STRING_OVERHEAD * 2).saturating_add(64);
+            if !reserve(cost) {
+                return Err(JsError { message: "script memory budget exceeded".into() });
+            }
+            let mut properties = HashMap::with_capacity(nodes.len().saturating_add(1));
+            for (index, node) in nodes.iter().enumerate() {
+                properties
+                    .insert(index.to_string(), Value::Host(format!("element:{}", node.index())));
+            }
+            properties.insert("length".into(), Value::Number(nodes.len() as f64));
+            return Ok(Some(Value::Object(Rc::new(RefCell::new(Object {
+                properties,
+                is_array: true,
+            })))));
+        }
+        Ok(None)
     }
 }
 
@@ -665,14 +829,17 @@ mod tests {
         runtime.set_host(Box::new(host));
         runtime.define_global("document", Value::Host("document".into()));
 
-        // A selector with no matches still examines nodes; the shared work
-        // allowance must run out and stop further scans.
-        let empty =
-            runtime.eval("document.querySelectorAll('missing').length").expect("first query");
-        assert_eq!(empty.display(), "0");
+        // A selector with no matches still examines nodes; exhaustion is now
+        // reported as an error instead of an empty result.
+        let error = runtime
+            .eval("document.querySelectorAll('missing').length")
+            .expect_err("first query must report exhaustion");
+        assert!(error.message.contains("DOM work budget"), "unexpected error: {}", error.message);
         assert_eq!(work.get(), 0);
-        let again = runtime.eval("document.querySelectorAll('span').length").expect("second query");
-        assert_eq!(again.display(), "0", "an exhausted budget must return no matches");
+        let error = runtime
+            .eval("document.querySelectorAll('span').length")
+            .expect_err("second query must also be refused");
+        assert!(error.message.contains("DOM work budget"), "unexpected error: {}", error.message);
     }
 
     #[test]
@@ -706,5 +873,102 @@ mod tests {
             "undefined"
         );
         assert!(runtime.memory_used() < 5000, "oversized DOM text must not be charged as retained");
+    }
+
+    #[test]
+    fn oversized_get_attribute_is_rejected_before_copy() {
+        let document = Rc::new(RefCell::new(HtmlDocument::parse("<p id='x'></p>")));
+        let oversized = "x".repeat(MAX_STRING_BYTES + 1);
+        {
+            let mut dom = document.borrow_mut();
+            let id = dom.element_by_id("x").expect("paragraph");
+            dom.set_attribute(id, "data", &oversized);
+        }
+        let events = Rc::new(RefCell::new(EventRegistry::default()));
+        let mut runtime = Runtime::new();
+        runtime.set_host(Box::new(DomHost::new(&document, events)));
+        runtime.define_global("document", Value::Host("document".into()));
+        let value = runtime
+            .eval("document.getElementById('x').getAttribute('data')")
+            .expect("getAttribute must refuse the oversized value");
+        assert_eq!(value.display(), "null");
+        assert!(runtime.memory_used() < 5000, "the oversized attribute must not be materialised");
+    }
+
+    #[test]
+    fn title_and_text_content_reads_consume_dom_work() {
+        let document = Rc::new(RefCell::new(HtmlDocument::parse("<title>hello</title>")));
+        let events = Rc::new(RefCell::new(EventRegistry::default()));
+        let host = DomHost::new(&document, events);
+        host.set_work_budget(3);
+        let work = host.work_cell();
+        let mut runtime = Runtime::new();
+        runtime.set_host(Box::new(host));
+        runtime.define_global("document", Value::Host("document".into()));
+        assert_eq!(runtime.eval("document.title").expect("title").display(), "hello");
+        let after_title = work.get();
+        assert!(after_title < 3, "the title search must consume DOM work");
+        assert_eq!(runtime.eval("document.title").expect("title again").display(), "");
+        assert_eq!(work.get(), 0);
+
+        let document = Rc::new(RefCell::new(HtmlDocument::parse("<p id='x'>text</p>")));
+        let events = Rc::new(RefCell::new(EventRegistry::default()));
+        let host = DomHost::new(&document, events);
+        host.set_work_budget(5);
+        let work = host.work_cell();
+        let mut runtime = Runtime::new();
+        runtime.set_host(Box::new(host));
+        runtime.define_global("document", Value::Host("document".into()));
+        let empty = runtime
+            .eval("document.getElementById('x').textContent")
+            .expect("textContent must stop when the work budget is gone");
+        assert_eq!(empty.display(), "");
+        assert_eq!(work.get(), 0);
+    }
+
+    #[test]
+    fn attribute_scans_consume_dom_work_and_report_exhaustion() {
+        let document = Rc::new(RefCell::new(HtmlDocument::parse("<p id='x'></p>")));
+        {
+            let mut dom = document.borrow_mut();
+            let id = dom.element_by_id("x").expect("paragraph");
+            for index in 0..50 {
+                dom.set_attribute(id, &format!("data-{index}"), "value");
+            }
+        }
+        let events = Rc::new(RefCell::new(EventRegistry::default()));
+        let host = DomHost::new(&document, events);
+        host.set_work_budget(10);
+        let work = host.work_cell();
+        let mut runtime = Runtime::new();
+        runtime.set_host(Box::new(host));
+        runtime.define_global("document", Value::Host("document".into()));
+        let error = runtime
+            .eval("document.querySelectorAll('#missing')")
+            .expect_err("an exhausted attribute traversal must be reported");
+        assert!(error.message.contains("DOM work budget"), "unexpected error: {}", error.message);
+        assert_eq!(work.get(), 0);
+    }
+
+    #[test]
+    fn oversized_existing_style_is_rejected_before_rebuilding() {
+        let document = Rc::new(RefCell::new(HtmlDocument::parse("<p id='x'></p>")));
+        {
+            let mut dom = document.borrow_mut();
+            let id = dom.element_by_id("x").expect("paragraph");
+            dom.set_attribute(
+                id,
+                "style",
+                &format!("background: {}", "x".repeat(MAX_STRING_BYTES)),
+            );
+        }
+        let events = Rc::new(RefCell::new(EventRegistry::default()));
+        let mut runtime = Runtime::new();
+        runtime.set_host(Box::new(DomHost::new(&document, events)));
+        runtime.define_global("document", Value::Host("document".into()));
+        let error = runtime
+            .eval("document.getElementById('x').style.color = 'red';")
+            .expect_err("style rebuilding must be refused before allocating");
+        assert!(error.message.contains("string length"), "unexpected error: {}", error.message);
     }
 }

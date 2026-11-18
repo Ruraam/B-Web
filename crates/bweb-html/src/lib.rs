@@ -35,6 +35,12 @@ const MAX_TOTAL_RESOURCE_BYTES: usize = 32 * 1024 * 1024;
 /// Maximum number of distinct subresources fetched for one page.
 const MAX_TOTAL_RESOURCES: usize = 256;
 
+/// The DOM work allowance was exhausted before a selector traversal could
+/// complete. Callers surface this as a script error rather than returning a
+/// silently incomplete result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QueryBudgetExhausted;
+
 /// Stable index into a document's node arena.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct NodeId(usize);
@@ -184,6 +190,22 @@ impl HtmlDocument {
         self.title_bounded(usize::MAX)
     }
 
+    fn title_id(&self) -> Option<NodeId> {
+        self.nodes.iter().enumerate().find_map(|(index, node)| match &node.kind {
+            NodeKind::Element { tag_name, .. } if tag_name == "title" => Some(NodeId(index)),
+            _ => None,
+        })
+    }
+
+    /// Byte length of the title text, without allocating it.
+    #[must_use]
+    pub fn title_len(&self) -> usize {
+        if let Some(title) = &self.title_override {
+            return title.trim().len();
+        }
+        self.title_id().map_or(0, |id| self.text_content_len(id))
+    }
+
     /// Returns the title only when its text fits in `max_bytes`, checking the
     /// length before building the returned string.
     #[must_use]
@@ -192,12 +214,31 @@ impl HtmlDocument {
             let title = title.trim();
             return (!title.is_empty() && title.len() <= max_bytes).then(|| title.to_owned());
         }
-        let title_id =
-            self.nodes.iter().enumerate().find_map(|(index, node)| match &node.kind {
-                NodeKind::Element { tag_name, .. } if tag_name == "title" => Some(NodeId(index)),
-                _ => None,
-            })?;
-        let text = self.text_content_bounded(title_id, max_bytes)?;
+        let text = self.text_content_bounded(self.title_id()?, max_bytes)?;
+        let title = text.trim().to_owned();
+        (!title.is_empty()).then_some(title)
+    }
+
+    /// Budgeted title lookup: the search for the title element and the text
+    /// length check both consume `work`.
+    #[must_use]
+    pub fn title_budgeted(&self, max_bytes: usize, work: &mut usize) -> Option<String> {
+        if let Some(title) = &self.title_override {
+            let title = title.trim();
+            return (!title.is_empty() && title.len() <= max_bytes).then(|| title.to_owned());
+        }
+        let mut id = None;
+        for (index, node) in self.nodes.iter().enumerate() {
+            if *work == 0 {
+                return None;
+            }
+            *work -= 1;
+            if matches!(&node.kind, NodeKind::Element { tag_name, .. } if tag_name == "title") {
+                id = Some(NodeId(index));
+                break;
+            }
+        }
+        let text = self.text_content_budgeted(id?, max_bytes, work)?;
         let title = text.trim().to_owned();
         (!title.is_empty()).then_some(title)
     }
@@ -293,10 +334,13 @@ impl HtmlDocument {
                 continue;
             }
             if let NodeKind::Element { attributes, .. } = node.kind() {
-                if attributes
-                    .iter()
-                    .any(|attribute| attribute.name == "id" && attribute.value == id)
-                {
+                if attributes.iter().any(|attribute| {
+                    if *work == 0 {
+                        return false;
+                    }
+                    *work -= 1;
+                    attribute.name == "id" && attribute.value == id
+                }) {
                     return Some(node_id);
                 }
             }
@@ -360,6 +404,22 @@ impl HtmlDocument {
         Some(text)
     }
 
+    /// Budgeted text read. The length walk stops as soon as `max_bytes` is
+    /// exceeded or the shared work allowance runs out, before the result string
+    /// is built.
+    #[must_use]
+    pub fn text_content_budgeted(
+        &self,
+        id: NodeId,
+        max_bytes: usize,
+        work: &mut usize,
+    ) -> Option<String> {
+        self.text_content_len_budgeted(id, max_bytes, work)?;
+        let mut text = String::new();
+        self.collect_text(id, &mut text);
+        Some(text)
+    }
+
     /// Replaces all children of a node with a single text node.
     pub fn set_text_content(&mut self, id: NodeId, text: &str) {
         if self.nodes.get(id.0).is_none() {
@@ -384,7 +444,19 @@ impl HtmlDocument {
         self.nodes[id.0].children.push(child);
     }
 
-    fn simple_selector_matches(&self, id: NodeId, node: &Node, selector: &str) -> bool {
+    /// Matcher that also charges one work unit per attribute inspected, so a
+    /// selector over an element with a huge attribute list cannot run for free.
+    fn simple_selector_matches_budgeted(
+        &self,
+        id: NodeId,
+        node: &Node,
+        selector: &str,
+        work: &mut usize,
+    ) -> bool {
+        if *work == 0 {
+            return false;
+        }
+        *work -= 1;
         // Detached nodes created by scripts are not part of the document tree.
         if !self.is_connected(id) || self.is_in_template(id) {
             return false;
@@ -393,9 +465,19 @@ impl HtmlDocument {
             return false;
         };
         if let Some(name) = selector.strip_prefix('#') {
-            attributes.iter().any(|attribute| attribute.name == "id" && attribute.value == name)
+            attributes.iter().any(|attribute| {
+                if *work == 0 {
+                    return false;
+                }
+                *work -= 1;
+                attribute.name == "id" && attribute.value == name
+            })
         } else if let Some(name) = selector.strip_prefix('.') {
             attributes.iter().any(|attribute| {
+                if *work == 0 {
+                    return false;
+                }
+                *work -= 1;
                 attribute.name == "class"
                     && attribute.value.split_ascii_whitespace().any(|part| part == name)
             })
@@ -423,8 +505,7 @@ impl HtmlDocument {
             if *work == 0 {
                 return None;
             }
-            *work -= 1;
-            if self.simple_selector_matches(id, node, selector) {
+            if self.simple_selector_matches_budgeted(id, node, selector, work) {
                 return Some(id);
             }
         }
@@ -466,8 +547,7 @@ impl HtmlDocument {
             if *work == 0 {
                 break;
             }
-            *work -= 1;
-            if self.simple_selector_matches(id, node, selector) {
+            if self.simple_selector_matches_budgeted(id, node, selector, work) {
                 matches.push(id);
                 if matches.len() >= limit {
                     break;
@@ -475,6 +555,33 @@ impl HtmlDocument {
             }
         }
         matches
+    }
+
+    /// Like `query_selector_all_budgeted`, but reports an exhausted traversal
+    /// instead of returning a partial result.
+    pub fn query_selector_all_checked(
+        &self,
+        selector: &str,
+        limit: usize,
+        work: &mut usize,
+    ) -> Result<Vec<NodeId>, QueryBudgetExhausted> {
+        let selector = selector.trim();
+        let mut matches = Vec::new();
+        if selector.is_empty() || limit == 0 {
+            return Ok(matches);
+        }
+        for (id, node) in self.iter() {
+            if *work == 0 {
+                return Err(QueryBudgetExhausted);
+            }
+            if self.simple_selector_matches_budgeted(id, node, selector, work) {
+                matches.push(id);
+                if matches.len() >= limit {
+                    return Ok(matches);
+                }
+            }
+        }
+        Ok(matches)
     }
 
     /// Finds the first connected element with a given tag, charging one work
@@ -798,18 +905,55 @@ impl HtmlDocument {
         false
     }
 
-    fn text_content_len(&self, id: NodeId) -> usize {
-        let Some(node) = self.node(id) else {
-            return 0;
-        };
-        let mut length = match &node.kind {
-            NodeKind::Text(text) => text.len(),
-            _ => 0,
-        };
-        for child in &node.children {
-            length = length.saturating_add(self.text_content_len(*child));
+    /// Sums text bytes without allocating. Public so the DOM bridge can
+    /// reserve the budget before materialising `textContent`.
+    #[must_use]
+    pub fn text_content_len(&self, id: NodeId) -> usize {
+        let mut total = 0;
+        let mut unlimited = usize::MAX;
+        let _ = self.text_content_len_inner(id, usize::MAX, &mut unlimited, &mut total);
+        total
+    }
+
+    /// Budgeted length walk that stops early when the limit or the work
+    /// allowance is exhausted. `None` means "do not materialise this text".
+    pub(crate) fn text_content_len_inner(
+        &self,
+        id: NodeId,
+        max_bytes: usize,
+        work: &mut usize,
+        total: &mut usize,
+    ) -> Option<()> {
+        if *work == 0 {
+            return None;
         }
-        length
+        *work -= 1;
+        let Some(node) = self.node(id) else {
+            return Some(());
+        };
+        if let NodeKind::Text(text) = &node.kind {
+            *total = total.saturating_add(text.len());
+            if *total > max_bytes {
+                return None;
+            }
+        }
+        for child in &node.children {
+            self.text_content_len_inner(*child, max_bytes, work, total)?;
+        }
+        Some(())
+    }
+
+    /// Budgeted length walk that stops early when the limit or the work
+    /// allowance is exhausted. `None` means "do not materialise this text".
+    pub fn text_content_len_budgeted(
+        &self,
+        id: NodeId,
+        max_bytes: usize,
+        work: &mut usize,
+    ) -> Option<usize> {
+        let mut total = 0;
+        self.text_content_len_inner(id, max_bytes, work, &mut total)?;
+        Some(total)
     }
 
     fn collect_text(&self, id: NodeId, output: &mut String) {
@@ -2286,7 +2430,7 @@ fn read_bounded(reader: impl Read, limit: usize) -> Result<Vec<u8>, BoundedReadE
 mod tests {
     use super::{
         HtmlDocument, MAX_DOM_DEPTH, MAX_DYNAMIC_NODES, MAX_PARSED_NODES, MAX_STACK_DEPTH, NodeId,
-        NodeKind, ResourceKind, extract_css_urls,
+        NodeKind, QueryBudgetExhausted, ResourceKind, extract_css_urls,
     };
 
     #[test]
@@ -2480,6 +2624,27 @@ mod tests {
         let mut work = 7;
         assert_eq!(document.query_selector_all_budgeted("i", 10, &mut work).len(), 2);
         assert_eq!(work, 0);
+    }
+
+    #[test]
+    fn checked_selector_reports_exhausted_budget() {
+        let document = HtmlDocument::parse("<span></span>".repeat(50));
+        let mut work = 3;
+        assert_eq!(
+            document.query_selector_all_checked("missing", 10, &mut work),
+            Err(QueryBudgetExhausted)
+        );
+        assert_eq!(work, 0);
+    }
+
+    #[test]
+    fn text_content_length_walk_stops_past_the_limit() {
+        let document = HtmlDocument::parse("<p></p>");
+        let id = document.query_selector("p").expect("paragraph");
+        let mut dom = document.clone();
+        dom.set_text_content(id, &"x".repeat(4096));
+        let mut work = usize::MAX;
+        assert_eq!(dom.text_content_len_budgeted(id, 8, &mut work), None);
     }
 
     #[test]
