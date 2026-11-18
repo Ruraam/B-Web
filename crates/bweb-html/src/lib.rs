@@ -74,6 +74,8 @@ pub enum DomReadError {
     TooLarge,
     /// The cumulative memory budget could not cover an allocation.
     ReservationFailed,
+    /// The supplied `NodeId` does not refer to any node in the arena.
+    InvalidNode,
 }
 
 /// Result of a budgeted node removal.
@@ -718,7 +720,7 @@ impl HtmlDocument {
     ) -> Result<Vec<NodeId>, QueryBudgetExhausted> {
         self.query_selector_all_budgeted(selector, limit, work).map_err(|error| match error {
             DomReadError::BudgetExhausted | DomReadError::ReservationFailed => QueryBudgetExhausted,
-            DomReadError::TooLarge => QueryBudgetExhausted,
+            DomReadError::TooLarge | DomReadError::InvalidNode => QueryBudgetExhausted,
         })
     }
 
@@ -867,6 +869,9 @@ impl HtmlDocument {
     ) -> Result<Option<RemoveOutcome>, DomReadError> {
         if id == self.root {
             return Ok(None);
+        }
+        if self.node(id).is_none() {
+            return Err(DomReadError::InvalidNode);
         }
         let parent = self.node(id).and_then(|node| node.parent());
         let Some(parent) = parent else {
@@ -2939,6 +2944,35 @@ mod tests {
 
         assert!(document.append_child(main, paragraph));
         assert_eq!(document.query_selector_all("p"), vec![paragraph]);
+    }
+
+    #[test]
+    fn remove_node_budget_rejects_invalid_node_id() {
+        let mut document = HtmlDocument::parse("<main></main>");
+        let mut work = 16;
+        assert_eq!(
+            document.remove_node_budgeted(NodeId(usize::MAX), &mut work),
+            Err(DomReadError::InvalidNode)
+        );
+        assert_eq!(work, 16, "an invalid id must not consume DOM work");
+    }
+
+    #[test]
+    fn remove_node_budget_is_idempotent_for_a_real_detached_node() {
+        let mut document = HtmlDocument::parse("<main id='m'><p id='p'>hi</p></main>");
+        let paragraph = document.element_by_id("p").expect("paragraph");
+        let mut work = 16;
+        assert_eq!(
+            document.remove_node_budgeted(paragraph, &mut work),
+            Ok(Some(RemoveOutcome::Removed))
+        );
+        let mut work = 16;
+        assert_eq!(
+            document.remove_node_budgeted(paragraph, &mut work),
+            Ok(Some(RemoveOutcome::AlreadyDetached))
+        );
+        assert_eq!(work, 16, "a no-op removal must not consume DOM work");
+        assert_eq!(document.text_content(paragraph), "hi", "subtree must survive");
     }
 
     #[test]

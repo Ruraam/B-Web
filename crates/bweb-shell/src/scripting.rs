@@ -31,6 +31,7 @@ fn finish_budgeted_read(
         Err(DomReadError::ReservationFailed) => {
             Err(JsError { message: "script memory budget exceeded".into() })
         }
+        Err(DomReadError::InvalidNode) => Err(JsError { message: "invalid element handle".into() }),
     }
 }
 
@@ -465,6 +466,9 @@ impl Host for DomHost {
                         }
                         Err(DomReadError::BudgetExhausted) => {
                             Err(JsError { message: "DOM work budget exhausted".into() })
+                        }
+                        Err(DomReadError::InvalidNode) => {
+                            Err(JsError { message: "invalid element handle".into() })
                         }
                         Err(_) => Err(JsError { message: "invalid element handle".into() }),
                     }
