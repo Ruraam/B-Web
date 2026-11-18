@@ -280,8 +280,9 @@ impl Host for DomHost {
         let Some(document) = self.document.upgrade() else { return Ok(Some(Value::Undefined)) };
         let document = document.borrow();
         if object == "document" && (property == "body" || property == "documentElement") {
+            let tag = if property == "documentElement" { "html" } else { "body" };
             let mut work = self.work.get();
-            let found = document.element_by_tag_budgeted(property, &mut work);
+            let found = document.element_by_tag_budgeted(tag, &mut work);
             self.work.set(work);
             let found =
                 found.map_err(|_| JsError { message: "DOM work budget exhausted".into() })?;
@@ -449,6 +450,19 @@ impl Host for DomHost {
                         Value::Null
                     })
                 }
+                "remove" => {
+                    let work = self.work.get();
+                    if work == 0 {
+                        return Err(JsError { message: "DOM work budget exhausted".into() });
+                    }
+                    self.work.set(work - 1);
+                    if !document.remove_node(id) {
+                        return Err(JsError {
+                            message: "cannot remove a top-level element".into(),
+                        });
+                    }
+                    Ok(Value::Undefined)
+                }
                 _ => Ok(Value::Undefined),
             };
         }
@@ -495,6 +509,9 @@ impl Host for DomHost {
                         return Ok(Value::Undefined);
                     };
                     let mut document = document.borrow_mut();
+                    if !document.can_create_node() {
+                        return Err(JsError { message: "element budget exhausted".into() });
+                    }
                     let node = document.create_element(&tag);
                     return Ok(Value::Host(format!("element:{}", node.index())));
                 }
@@ -1276,5 +1293,75 @@ mod tests {
                 error.message
             );
         }
+    }
+
+    #[test]
+    fn document_element_returns_the_active_html_root() {
+        let document = Rc::new(RefCell::new(HtmlDocument::parse(
+            "<html><body><p id='x'>hi</p></body></html>",
+        )));
+        let events = Rc::new(RefCell::new(EventRegistry::default()));
+        let mut runtime = Runtime::new();
+        runtime.set_host(Box::new(DomHost::new(&document, events)));
+        runtime.define_global("document", Value::Host("document".into()));
+        assert_eq!(
+            runtime
+                .eval("document.documentElement === document.querySelector('html')")
+                .expect("documentElement")
+                .display(),
+            "true"
+        );
+        assert_eq!(
+            runtime.eval("document.body !== document.documentElement").expect("distinct").display(),
+            "true"
+        );
+    }
+
+    #[test]
+    fn element_remove_detaches_and_can_be_reappended() {
+        let document = Rc::new(RefCell::new(HtmlDocument::parse("<main></main>")));
+        let events = Rc::new(RefCell::new(EventRegistry::default()));
+        let mut runtime = Runtime::new();
+        runtime.set_host(Box::new(DomHost::new(&document, events)));
+        runtime.define_global("document", Value::Host("document".into()));
+        runtime
+            .eval("let p = document.createElement('p'); p.textContent = 'hi'; document.body.appendChild(p);")
+            .expect("create and attach");
+        assert_eq!(
+            runtime.eval("document.querySelectorAll('p').length").expect("count").display(),
+            "1"
+        );
+        runtime.eval("p.remove();").expect("remove");
+        assert_eq!(
+            runtime.eval("document.querySelectorAll('p').length").expect("count").display(),
+            "0"
+        );
+        runtime.eval("document.body.appendChild(p);").expect("re-append");
+        assert_eq!(
+            runtime.eval("document.querySelectorAll('p').length").expect("count").display(),
+            "1"
+        );
+        assert_eq!(runtime.eval("p.textContent").expect("subtree survived").display(), "hi");
+
+        let error = runtime.eval("document.documentElement.remove()").unwrap_err();
+        assert!(error.message.contains("top-level element"), "{}", error.message);
+        assert_eq!(runtime.eval("1 + 1").expect("runtime usable").display(), "2");
+    }
+
+    #[test]
+    fn create_element_exhaustion_is_explicit() {
+        let document = Rc::new(RefCell::new(HtmlDocument::parse("<main></main>")));
+        let events = Rc::new(RefCell::new(EventRegistry::default()));
+        let mut runtime = Runtime::new();
+        runtime.set_host(Box::new(DomHost::new(&document, events)));
+        runtime.define_global("document", Value::Host("document".into()));
+        let error = runtime
+            .eval("for (let i = 0; i < 10000; i = i + 1) { document.createElement('i'); } document.createElement('b');")
+            .expect_err("the dynamic node budget must be reported");
+        assert!(
+            error.message.contains("element budget exhausted"),
+            "unexpected error: {}",
+            error.message
+        );
     }
 }

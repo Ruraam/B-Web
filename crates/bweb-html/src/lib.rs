@@ -738,6 +738,12 @@ impl HtmlDocument {
         Ok(None)
     }
 
+    /// Returns whether another script-created node still fits in the arena.
+    #[must_use]
+    pub const fn can_create_node(&self) -> bool {
+        self.dynamic_nodes < MAX_DYNAMIC_NODES
+    }
+
     /// Creates a detached element node with no attributes.
     #[must_use]
     pub fn create_element(&mut self, tag_name: &str) -> NodeId {
@@ -831,6 +837,30 @@ impl HtmlDocument {
         }
         self.nodes[child.0].parent = Some(parent);
         self.nodes[parent.0].children.push(child);
+        true
+    }
+
+    /// Detaches a node from its parent without removing it from the arena.
+    /// Node ids stay stable and the subtree is preserved, so handles held by
+    /// scripts remain valid after the removal.
+    pub fn remove_node(&mut self, id: NodeId) -> bool {
+        if id == self.root {
+            return false;
+        }
+        let Some(parent) = self.node(id).and_then(|node| node.parent()) else {
+            return false;
+        };
+        // Direct children of the Document node (html) form the document
+        // element and must not be detachable.
+        if parent == self.root {
+            return false;
+        }
+        let Some(position) = self.nodes[parent.0].children.iter().position(|child| *child == id)
+        else {
+            return false;
+        };
+        self.nodes[parent.0].children.remove(position);
+        self.nodes[id.0].parent = None;
         true
     }
 
@@ -2843,6 +2873,33 @@ mod tests {
         assert_eq!(document.query_selector("span"), None);
         assert_eq!(document.element_by_id("outside"), None);
         assert!(document.element_by_id("inside").is_some());
+    }
+
+    #[test]
+    fn remove_node_detaches_without_reindexing() {
+        let mut document = HtmlDocument::parse("<main id='m'><p id='p'>hi</p></main>");
+        let main = document.element_by_id("m").expect("main");
+        let paragraph = document.element_by_id("p").expect("paragraph");
+
+        assert!(document.remove_node(paragraph));
+        assert_eq!(document.node(paragraph).expect("node survives").parent(), None);
+        assert!(document.query_selector_all("p").is_empty(), "detached node is not selected");
+        assert_eq!(document.text_content(paragraph), "hi", "subtree is preserved");
+        assert!(!document.remove_node(document.root()), "the document root cannot be removed");
+        assert!(!document.remove_node(paragraph), "already detached");
+
+        assert!(document.append_child(main, paragraph));
+        assert_eq!(document.query_selector_all("p"), vec![paragraph]);
+    }
+
+    #[test]
+    fn can_create_node_tracks_the_dynamic_budget() {
+        let mut document = HtmlDocument::parse("<main></main>");
+        assert!(document.can_create_node());
+        for _ in 0..MAX_DYNAMIC_NODES {
+            let _ = document.create_element("i");
+        }
+        assert!(!document.can_create_node());
     }
 
     #[test]
