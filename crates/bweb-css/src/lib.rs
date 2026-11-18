@@ -1982,12 +1982,12 @@ fn matches_from_right(
             false
         }
         Combinator::AdjacentSibling => {
-            previous_element_sibling(document, id).is_some_and(|sibling| {
+            previous_element_sibling(document, id, budget).is_some_and(|sibling| {
                 matches_from_right(document, sibling, selector, compound_index - 1, budget)
             })
         }
         Combinator::GeneralSibling => {
-            let mut sibling = previous_element_sibling(document, id);
+            let mut sibling = previous_element_sibling(document, id, budget);
             while let Some(id) = sibling {
                 if budget.exhausted() {
                     return false;
@@ -1995,20 +1995,46 @@ fn matches_from_right(
                 if matches_from_right(document, id, selector, compound_index - 1, budget) {
                     return true;
                 }
-                sibling = previous_element_sibling(document, id);
+                sibling = previous_element_sibling(document, id, budget);
             }
             false
         }
     }
 }
 
-fn previous_element_sibling(document: &HtmlDocument, id: NodeId) -> Option<NodeId> {
+/// Returns the preceding element sibling. Every sibling inspected (both while
+/// locating `id` and while walking backwards) is charged to the shared budget;
+/// an exhausted scan returns `None`, which the callers treat as "no match".
+fn previous_element_sibling(
+    document: &HtmlDocument,
+    id: NodeId,
+    budget: &mut MatchBudget,
+) -> Option<NodeId> {
     let parent = document.node(id)?.parent()?;
     let siblings = document.node(parent)?.children();
-    let position = siblings.iter().position(|sibling| *sibling == id)?;
-    siblings[..position].iter().copied().rev().find(|sibling| {
-        document.node(*sibling).is_some_and(|node| matches!(node.kind(), NodeKind::Element { .. }))
-    })
+    let mut position = None;
+    for (index, sibling) in siblings.iter().enumerate() {
+        if !budget.tick() {
+            return None;
+        }
+        if *sibling == id {
+            position = Some(index);
+            break;
+        }
+    }
+    let position = position?;
+    for sibling in siblings[..position].iter().copied().rev() {
+        if !budget.tick() {
+            return None;
+        }
+        if document
+            .node(sibling)
+            .is_some_and(|node| matches!(node.kind(), NodeKind::Element { .. }))
+        {
+            return Some(sibling);
+        }
+    }
+    None
 }
 
 fn matches_compound(
@@ -2099,11 +2125,21 @@ fn matches_compound(
             matches!(sibling_position(document, id, Some(tag_name), budget), Some((index, total)) if index == total)
         }
         PseudoClass::Empty => document.node(id).is_some_and(|node| {
-            node.children().iter().all(|child| {
-                document
+            // Charge every child inspected. Exhausting the budget is returned
+            // as "not empty" rather than a false positive match.
+            let mut children = node.children().iter();
+            loop {
+                let Some(child) = children.next() else { return true };
+                if !budget.tick() {
+                    return false;
+                }
+                if document
                     .node(*child)
-                    .is_none_or(|child_node| matches!(child_node.kind(), NodeKind::Comment(_)))
-            })
+                    .is_some_and(|child_node| !matches!(child_node.kind(), NodeKind::Comment(_)))
+                {
+                    return false;
+                }
+            }
         }),
         PseudoClass::AnyLink => tag_name == "a" && attr("href").is_some(),
         PseudoClass::NthChild(nth) => sibling_position(document, id, None, budget)
@@ -2567,6 +2603,86 @@ mod tests {
         }
         let error = Stylesheet::parse(&layers).expect_err("deep @layer must fail");
         assert!(error.message.contains("nesting depth"), "unexpected error: {}", error.message);
+    }
+
+    #[test]
+    fn sibling_combinators_charge_their_sibling_scans() {
+        let markup = format!(
+            "<main><p id='first'></p><p id='target'></p>{}</main>",
+            "<p></p>".repeat(5_000)
+        );
+        let document = HtmlDocument::parse(markup);
+        let target = document.element_by_id("target").expect("target paragraph");
+        let color_of = |styles: &ComputedStyleMap| {
+            styles.get(target).and_then(|style| style.get("color")).map(str::to_owned)
+        };
+
+        for (selector, expected) in [("p + p", "red"), ("p ~ p", "blue")] {
+            let sheet = Stylesheet::parse(&format!("{selector} {{ color: {expected} }}"))
+                .expect("sibling selector");
+            // Twelve units reach the sibling scan; a charged scan needs three
+            // more, while a free one would leave enough for the recursive
+            // match to succeed.
+            let starved = StyleEngine::new().compute_with_match_budget(
+                &document,
+                std::slice::from_ref(&sheet),
+                800.0,
+                600.0,
+                14,
+            );
+            assert_ne!(
+                color_of(&starved),
+                Some(expected.to_owned()),
+                "{selector} must not match when the scan is starved"
+            );
+
+            let normal = StyleEngine::new().compute_with_match_budget(
+                &document,
+                std::slice::from_ref(&sheet),
+                800.0,
+                600.0,
+                MATCH_WORK_BUDGET,
+            );
+            assert_eq!(color_of(&normal), Some(expected.to_owned()), "{selector} still works");
+        }
+    }
+
+    #[test]
+    fn empty_pseudo_class_charges_each_child_inspected() {
+        let markup = format!(
+            "<main><p id='big'>{}</p><p id='empty'></p></main>",
+            "<!-- comment -->".repeat(5_000)
+        );
+        let document = HtmlDocument::parse(markup);
+        let big = document.element_by_id("big").expect("big paragraph");
+        let sheet = Stylesheet::parse("p:empty { color: red }").expect("empty selector");
+
+        // Ten units are spent before :empty starts scanning the big paragraph;
+        // one extra unit must not be enough to inspect 5,000 children.
+        let starved = StyleEngine::new().compute_with_match_budget(
+            &document,
+            std::slice::from_ref(&sheet),
+            800.0,
+            600.0,
+            11,
+        );
+        assert_ne!(
+            starved.styles.get(&big).and_then(|style| style.get("color")),
+            Some("red"),
+            "an incomplete :empty scan must not match"
+        );
+
+        let normal = StyleEngine::new().compute_with_match_budget(
+            &document,
+            std::slice::from_ref(&sheet),
+            800.0,
+            600.0,
+            MATCH_WORK_BUDGET,
+        );
+        // Comment-only children still satisfy :empty once the full scan can run.
+        assert_eq!(normal.styles.get(&big).and_then(|style| style.get("color")), Some("red"));
+        let empty = document.element_by_id("empty").expect("empty paragraph");
+        assert_eq!(normal.styles.get(&empty).and_then(|style| style.get("color")), Some("red"));
     }
 
     #[test]
