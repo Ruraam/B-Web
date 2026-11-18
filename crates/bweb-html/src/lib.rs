@@ -35,6 +35,23 @@ const MAX_TOTAL_RESOURCE_BYTES: usize = 32 * 1024 * 1024;
 /// Maximum number of distinct subresources fetched for one page.
 const MAX_TOTAL_RESOURCES: usize = 256;
 
+/// Trims leading and trailing whitespace in place, without allocating a new
+/// String. The buffer was already reserved by the budgeted collector.
+fn trim_string_in_place(text: &mut String) {
+    let (start, len) = {
+        let trimmed = text.trim();
+        (trimmed.as_ptr() as usize - text.as_ptr() as usize, trimmed.len())
+    };
+    if len == 0 {
+        text.clear();
+        return;
+    }
+    if start > 0 {
+        let _ = text.drain(..start);
+    }
+    text.truncate(len);
+}
+
 /// The DOM work allowance was exhausted before a selector traversal could
 /// complete. Callers surface this as a script error rather than returning a
 /// silently incomplete result.
@@ -291,7 +308,13 @@ impl HtmlDocument {
                 return Err(DomReadError::BudgetExhausted);
             }
             *work -= 1;
-            if matches!(&node.kind, NodeKind::Element { tag_name, .. } if tag_name == "title") {
+            if !matches!(&node.kind, NodeKind::Element { tag_name, .. } if tag_name == "title") {
+                continue;
+            }
+            // Ignore detached nodes and template content: only the active
+            // document tree may provide the title.
+            let context = self.node_context_budgeted(NodeId(index), work)?;
+            if context.connected && !context.in_template {
                 id = Some(NodeId(index));
                 break;
             }
@@ -299,9 +322,10 @@ impl HtmlDocument {
         let Some(id) = id else {
             return Ok(None);
         };
-        let text = self.collect_text_budgeted(id, max_bytes, work, reserve)?;
-        let title = text.trim().to_owned();
-        Ok((!title.is_empty()).then_some(title))
+        let mut text = self.collect_text_budgeted(id, max_bytes, work, reserve)?;
+        // Trim in place: the reserved String is reused, no second allocation.
+        trim_string_in_place(&mut text);
+        Ok((!text.is_empty()).then_some(text))
     }
 
     /// Returns the first `<base href>` value, used to resolve relative URLs.
@@ -2755,6 +2779,22 @@ mod tests {
         dom.set_text_content(id, &"x".repeat(4096));
         let mut work = usize::MAX;
         assert_eq!(dom.text_content_len_budgeted(id, 8, &mut work), None);
+    }
+
+    #[test]
+    fn budgeted_title_ignores_inactive_and_detached_nodes() {
+        let mut document =
+            HtmlDocument::parse("<title>real</title><template><title>inactive</title></template>");
+        let detached = document.create_element("title");
+        document.set_text_content(detached, "detached");
+
+        let mut reserve = |_bytes: usize| true;
+        let mut work = usize::MAX;
+        let title = document
+            .title_budgeted(1000, &mut work, &mut reserve)
+            .expect("budget")
+            .expect("active title");
+        assert_eq!(title, "real");
     }
 
     #[test]

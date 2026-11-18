@@ -199,14 +199,6 @@ impl Host for DomHost {
                 "title" => {
                     Value::String(document.title_bounded(MAX_STRING_BYTES).unwrap_or_default())
                 }
-                "body" | "documentElement" => {
-                    let mut work = self.work.get();
-                    let found = document.element_by_tag_budgeted(property, &mut work);
-                    self.work.set(work);
-                    found.unwrap_or(None).map_or(Value::Undefined, |id| {
-                        Value::Host(format!("element:{}", id.index()))
-                    })
-                }
                 _ => Value::Undefined,
             };
         }
@@ -261,6 +253,16 @@ impl Host for DomHost {
     ) -> Result<Option<Value>, JsError> {
         let Some(document) = self.document.upgrade() else { return Ok(Some(Value::Undefined)) };
         let document = document.borrow();
+        if object == "document" && (property == "body" || property == "documentElement") {
+            let mut work = self.work.get();
+            let found = document.element_by_tag_budgeted(property, &mut work);
+            self.work.set(work);
+            let found =
+                found.map_err(|_| JsError { message: "DOM work budget exhausted".into() })?;
+            return Ok(Some(
+                found.map_or(Value::Undefined, |id| Value::Host(format!("element:{}", id.index()))),
+            ));
+        }
         if object == "document" && property == "title" {
             let mut work = self.work.get();
             let outcome = document.title_budgeted(MAX_STRING_BYTES, &mut work, reserve);
@@ -1115,6 +1117,62 @@ mod tests {
 
         for source in ["document.querySelector('p')", "document.getElementById('x')"] {
             let error = runtime.eval(source).expect_err("exhaustion must not look like null");
+            assert!(
+                error.message.contains("DOM work budget"),
+                "unexpected error: {}",
+                error.message
+            );
+        }
+        assert_eq!(runtime.eval("1 + 1").expect("runtime still usable").display(), "2");
+    }
+
+    #[test]
+    fn title_trim_reuses_the_reserved_buffer() {
+        let document = Rc::new(RefCell::new(HtmlDocument::parse("<title>  hello  </title>")));
+        let events = Rc::new(RefCell::new(EventRegistry::default()));
+        let mut runtime = Runtime::new();
+        runtime.set_host(Box::new(DomHost::new(&document, events)));
+        runtime.define_global("document", Value::Host("document".into()));
+        runtime.set_memory_budget(1_000_000);
+        assert_eq!(runtime.eval("document.title").expect("title").display(), "hello");
+        let exact = runtime.memory_used();
+
+        let mut runtime = Runtime::new();
+        runtime.set_host(Box::new(DomHost::new(
+            &document,
+            Rc::new(RefCell::new(EventRegistry::default())),
+        )));
+        runtime.define_global("document", Value::Host("document".into()));
+        runtime.set_memory_budget(exact);
+        assert_eq!(
+            runtime.eval("document.title").expect("exact budget covers the trim").display(),
+            "hello"
+        );
+
+        let mut runtime = Runtime::new();
+        runtime.set_host(Box::new(DomHost::new(
+            &document,
+            Rc::new(RefCell::new(EventRegistry::default())),
+        )));
+        runtime.define_global("document", Value::Host("document".into()));
+        runtime.set_memory_budget(exact - 1);
+        let error = runtime.eval("document.title").expect_err("no unreserved trim copy allowed");
+        assert!(error.message.contains("memory budget"), "unexpected error: {}", error.message);
+    }
+
+    #[test]
+    fn document_body_reads_report_budget_exhaustion() {
+        let document = Rc::new(RefCell::new(HtmlDocument::parse("<html><body>hi</body></html>")));
+        let events = Rc::new(RefCell::new(EventRegistry::default()));
+        let host = DomHost::new(&document, events);
+        host.set_work_budget(1);
+        let mut runtime = Runtime::new();
+        runtime.set_host(Box::new(host));
+        runtime.define_global("document", Value::Host("document".into()));
+
+        for property in ["body", "documentElement"] {
+            let source = format!("document.{property}");
+            let error = runtime.eval(&source).expect_err("exhaustion must be explicit");
             assert!(
                 error.message.contains("DOM work budget"),
                 "unexpected error: {}",
