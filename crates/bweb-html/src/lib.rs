@@ -2906,8 +2906,11 @@ mod resource_budget_tests {
     };
 
     fn loader(limits: ResourceLimits) -> DocumentLoader {
-        let transport =
-            HttpTransport::new(NetworkPolicy::new(Shield::empty())).expect("local transport");
+        let transport = HttpTransport::new(NetworkPolicy::with_address_policy(
+            Shield::empty(),
+            bweb_net::AddressPolicy::AllowLoopback,
+        ))
+        .expect("local transport");
         DocumentLoader::with_limits(transport, limits)
     }
 
