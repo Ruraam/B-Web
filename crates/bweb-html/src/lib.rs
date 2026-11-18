@@ -27,6 +27,9 @@ const MAX_IMAGE_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_DOM_DEPTH: usize = 128;
 /// Maximum number of nodes scripts may add to one document.
 const MAX_DYNAMIC_NODES: usize = 10_000;
+/// Maximum size of the node arena built by the HTML parser. Document byte
+/// limits alone do not bound the number of tiny elements a page can declare.
+const MAX_PARSED_NODES: usize = 250_000;
 /// Cumulative download budget for one page, including the main document.
 const MAX_TOTAL_RESOURCE_BYTES: usize = 32 * 1024 * 1024;
 /// Maximum number of distinct subresources fetched for one page.
@@ -316,10 +319,15 @@ impl HtmlDocument {
         if self.nodes.get(id.0).is_none() {
             return;
         }
-        self.nodes[id.0].children.clear();
+        // Check both limits before touching the DOM: an exhausted budget must
+        // not leave the element emptied with no replacement text.
         if self.dynamic_nodes >= MAX_DYNAMIC_NODES {
             return;
         }
+        if self.node_depth(id).saturating_add(1) > MAX_DOM_DEPTH.saturating_add(1) {
+            return;
+        }
+        self.nodes[id.0].children.clear();
         self.dynamic_nodes += 1;
         let child = NodeId(self.nodes.len());
         self.nodes.push(Node {
@@ -429,6 +437,36 @@ impl HtmlDocument {
         true
     }
 
+    /// Number of nodes on the path from `id` up to (and including) the root.
+    fn node_depth(&self, id: NodeId) -> usize {
+        let mut depth = 0;
+        let mut current = Some(id);
+        for _ in 0..=self.nodes.len() {
+            let Some(node_id) = current else { return depth };
+            depth += 1;
+            current = self.node(node_id).and_then(Node::parent);
+        }
+        depth
+    }
+
+    /// Height of the subtree rooted at `id`, counting the root itself. The
+    /// walk is iterative and bounded so detached subtrees can be measured
+    /// without recursion or an unbounded loop.
+    fn subtree_height(&self, id: NodeId) -> usize {
+        let mut height = 0;
+        let mut stack = vec![(id, 1usize)];
+        while let Some((node_id, depth)) = stack.pop() {
+            height = height.max(depth);
+            let Some(node) = self.node(node_id) else { continue };
+            for child in node.children() {
+                if stack.len() < self.nodes.len() {
+                    stack.push((*child, depth + 1));
+                }
+            }
+        }
+        height
+    }
+
     /// Appends a node as the last child of a parent. Returns false when either
     /// node is missing, the child already has a parent, or inserting it would
     /// create a cycle (including appending a node to itself).
@@ -444,16 +482,13 @@ impl HtmlDocument {
         if self.is_ancestor_of(child, parent) {
             return false;
         }
-        // Bound the resulting tree depth as well: layout walks the tree
-        // recursively, so a script-built chain must be as limited as markup.
-        let mut depth = 0;
-        let mut current = Some(parent);
-        while let Some(id) = current {
-            if depth >= MAX_DOM_DEPTH {
-                return false;
-            }
-            depth += 1;
-            current = self.node(id).and_then(Node::parent);
+        // Bound the *final* depth, including the whole detached subtree being
+        // attached. Checking only the parent's ancestors would let a deep
+        // detached tree push the combined depth past the limit.
+        let parent_depth = self.node_depth(parent);
+        let child_height = self.subtree_height(child);
+        if parent_depth.saturating_add(child_height) > MAX_DOM_DEPTH.saturating_add(1) {
+            return false;
         }
         self.nodes[child.0].parent = Some(parent);
         self.nodes[parent.0].children.push(child);
@@ -570,6 +605,12 @@ impl HtmlDocument {
     }
 
     fn insert_node(&mut self, parent: NodeId, before: Option<NodeId>, kind: NodeKind) -> NodeId {
+        // Never hand an invalid id back to the parser: its stack and insertion
+        // point index the arena directly. Returning the parent keeps every
+        // follow-up operation valid while simply dropping the extra node.
+        if self.nodes.len() >= MAX_PARSED_NODES {
+            return parent;
+        }
         let id = NodeId(self.nodes.len());
         self.nodes.push(Node { kind, parent: Some(parent), children: Vec::new() });
         let children = &mut self.nodes[parent.0].children;
@@ -915,6 +956,9 @@ impl<'a> TreeBuilder<'a> {
     /// Reopens formatting elements that were implicitly closed by a block
     /// boundary, so later text keeps the intended inline styling.
     fn detached_element(&mut self, tag: &str, attributes: Vec<Attribute>) -> NodeId {
+        if self.document.nodes.len() >= MAX_PARSED_NODES {
+            return self.current();
+        }
         let id = NodeId(self.document.nodes.len());
         self.document.nodes.push(Node {
             kind: NodeKind::Element { tag_name: tag.to_owned(), attributes },
@@ -1104,6 +1148,11 @@ impl<'a> TreeBuilder<'a> {
 
     fn build(&mut self, source: &str, mut cursor: usize) {
         while cursor < source.len() {
+            // Stop early once the arena is full; continuing to tokenise would
+            // burn CPU without adding any nodes.
+            if self.document.nodes.len() >= MAX_PARSED_NODES {
+                break;
+            }
             let Some(relative_open) = source[cursor..].find('<') else {
                 self.text(&source[cursor..]);
                 break;
@@ -1153,6 +1202,11 @@ impl<'a> TreeBuilder<'a> {
                 continue;
             }
             if name == "template" && !self_closing {
+                // A template creates two nodes; refuse it when only room for
+                // one is left instead of partially building the subtree.
+                if self.document.nodes.len() + 2 > MAX_PARSED_NODES {
+                    break;
+                }
                 // Template content lives in a separate inert subtree.
                 let template = self.insert(NodeKind::Element { tag_name: name, attributes });
                 let content = self.document.append_node(template, NodeKind::TemplateContent);
@@ -2118,8 +2172,8 @@ fn read_bounded(reader: impl Read, limit: usize) -> Result<Vec<u8>, BoundedReadE
 #[cfg(test)]
 mod tests {
     use super::{
-        HtmlDocument, MAX_DOM_DEPTH, MAX_DYNAMIC_NODES, MAX_STACK_DEPTH, NodeId, NodeKind,
-        ResourceKind, extract_css_urls,
+        HtmlDocument, MAX_DOM_DEPTH, MAX_DYNAMIC_NODES, MAX_PARSED_NODES, MAX_STACK_DEPTH, NodeId,
+        NodeKind, ResourceKind, extract_css_urls,
     };
 
     #[test]
@@ -2219,6 +2273,77 @@ mod tests {
             ancestor = document.node(id).and_then(|node| node.parent());
         }
         assert!(reached_root);
+    }
+
+    #[test]
+    fn append_child_checks_the_detached_subtree_height() {
+        let mut document = HtmlDocument::parse("<main id='root'></main>");
+        let main = document.element_by_id("root").expect("main");
+
+        // A 64-level detached subtree fits under a shallow parent.
+        let subtree = document.create_element("div");
+        let mut tip = subtree;
+        for _ in 0..63 {
+            let child = document.create_element("div");
+            assert!(document.append_child(tip, child));
+            tip = child;
+        }
+        assert!(document.append_child(main, subtree));
+
+        // The same height no longer fits under a deep parent: only checking
+        // the parent's ancestors would accept this insertion.
+        let subtree = document.create_element("div");
+        let mut tip = subtree;
+        for _ in 0..63 {
+            let child = document.create_element("div");
+            assert!(document.append_child(tip, child));
+            tip = child;
+        }
+        let mut deep = main;
+        for _ in 0..70 {
+            let child = document.create_element("div");
+            assert!(document.append_child(deep, child));
+            deep = child;
+        }
+        assert!(!document.append_child(deep, subtree), "combined depth must be rejected");
+        assert!(document.node(subtree).and_then(|node| node.parent()).is_none());
+    }
+
+    #[test]
+    fn set_text_content_checks_limits_before_mutating() {
+        // At the depth limit, no text node may be appended and existing
+        // children must be left untouched.
+        let mut document = HtmlDocument::parse("<main id='deep'><p id='kept'></p></main>");
+        let mut deepest = document.element_by_id("deep").expect("main");
+        loop {
+            let child = document.create_element("div");
+            if !document.append_child(deepest, child) {
+                break;
+            }
+            deepest = child;
+        }
+        let kept = document.element_by_id("kept").expect("kept child");
+        let before = document.node_count();
+        document.set_text_content(deepest, "text");
+        assert_eq!(document.node_count(), before);
+        assert!(document.node(deepest).and_then(|node| node.children().first()).is_none());
+        assert!(document.node(kept).is_some());
+
+        // With an exhausted dynamic budget, set_text_content must not clear
+        // the element's existing children either.
+        let mut document = HtmlDocument::parse("<main id='m'><p id='child'></p></main>");
+        for _ in 0..MAX_DYNAMIC_NODES {
+            let _ = document.create_element("i");
+        }
+        let main = document.query_selector("main").expect("main");
+        let child = document.element_by_id("child").expect("child");
+        let count = document.node_count();
+        document.set_text_content(main, "replacement");
+        assert_eq!(document.node_count(), count, "no node created when the budget is exhausted");
+        assert!(
+            document.node(main).is_some_and(|node| node.children().contains(&child)),
+            "existing children must survive a rejected set_text_content"
+        );
     }
 
     #[test]
@@ -2590,6 +2715,16 @@ mod tests {
     fn skips_doctype_without_creating_a_node() {
         let document = HtmlDocument::parse("<!DOCTYPE html><p>x</p>");
         assert_eq!(child_tags(&document, element_id(&document, "body")), ["p"]);
+    }
+
+    #[test]
+    fn parser_caps_the_total_number_of_nodes() {
+        // Hundreds of thousands of tiny elements fit in the 8 MiB document
+        // budget, so the node arena needs its own limit.
+        let markup = "<p></p>".repeat(MAX_PARSED_NODES);
+        let document = HtmlDocument::parse(markup);
+        assert!(document.node_count() <= MAX_PARSED_NODES, "node arena exceeded the cap");
+        assert!(document.node_count() > MAX_PARSED_NODES / 2, "parser stopped far too early");
     }
 
     #[test]

@@ -69,7 +69,10 @@ fn decode_with_budget(bytes: &[u8], max_pixels: usize) -> Result<Image, DecodeEr
     if pixels == 0 || pixels > max_pixels {
         return Err(DecodeError::TooLarge);
     }
-    let rgba = decoded.to_rgba8();
+    // Consume the decoded image: when it is already RGBA8 (the common PNG
+    // case) this reuses its buffer instead of allocating a second full bitmap
+    // with `to_rgba8`, keeping the peak temporary memory within the budget.
+    let rgba = decoded.into_rgba8();
     Image::new(rgba.width(), rgba.height(), rgba.into_raw())
         .map_err(|_| DecodeError::UnsupportedOrCorrupt)
 }
@@ -164,7 +167,7 @@ mod tests {
     };
     use bweb_html::{HtmlDocument, LoadedResource, NodeKind, ResourceKind};
     use bweb_renderer::Image;
-    use image::{ImageEncoder, RgbaImage};
+    use image::{ImageEncoder, RgbImage, RgbaImage};
     use std::{collections::HashMap, sync::Arc};
     use url::Url;
 
@@ -183,6 +186,20 @@ mod tests {
         assert_eq!((image.width(), image.height()), (2, 3));
         assert_eq!(image.pixels().len(), 2 * 3 * 4);
         assert_eq!(&image.pixels()[0..4], &[10, 20, 30, 255]);
+    }
+
+    #[test]
+    fn converts_non_rgba_images_without_keeping_a_second_bitmap() {
+        // An RGB PNG must be converted to RGBA, but the decoded image is
+        // consumed by into_rgba8 so only one full bitmap is alive at a time.
+        let source = RgbImage::from_pixel(3, 2, image::Rgb([20, 40, 60]));
+        let mut bytes = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut bytes)
+            .write_image(source.as_raw(), 3, 2, image::ColorType::Rgb8.into())
+            .expect("RGB PNG encoding");
+        let image = decode(&bytes).expect("RGB PNG decodes");
+        assert_eq!((image.width(), image.height()), (3, 2));
+        assert_eq!(&image.pixels()[0..4], &[20, 40, 60, 255]);
     }
 
     #[test]
