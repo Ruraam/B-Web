@@ -254,17 +254,29 @@ struct PreparedPage {
     events: Rc<RefCell<EventRegistry>>,
 }
 
+/// Installs a fresh JavaScript context for one document. The initial page and
+/// window navigations share this path; navigations reuse the same `Runtime`, so
+/// the old globals, functions and accumulated memory must be discarded here.
+fn prepare_document_runtime(
+    runtime: &mut Runtime,
+    document: Rc<RefCell<HtmlDocument>>,
+    events: Rc<RefCell<EventRegistry>>,
+) {
+    runtime.reset_context();
+    runtime.set_host(Box::new(DomHost::new(&document, events)));
+    runtime.define_global("document", Value::Host("document".into()));
+    runtime.set_page_budget(PAGE_INSTRUCTION_BUDGET);
+}
+
 /// Runs scripts on the UI thread, then computes styles from the mutated DOM.
 fn prepare_page(page: &mut Page) -> PreparedPage {
     let document = Rc::new(RefCell::new(std::mem::take(&mut page.loaded.document)));
     let events = Rc::new(RefCell::new(EventRegistry::default()));
     let mut runtime = Runtime::new();
-    runtime.set_host(Box::new(DomHost::new(&document, events.clone())));
-    runtime.define_global("document", Value::Host("document".into()));
+    prepare_document_runtime(&mut runtime, document.clone(), events.clone());
     // The page budget stays active for as long as this document is alive:
     // event callbacks dispatched later draw from the same allowance. It is
     // reset by set_page_budget when the next page is prepared.
-    runtime.set_page_budget(PAGE_INSTRUCTION_BUDGET);
     for source in &page.scripts {
         if let Err(error) = runtime.eval(source) {
             eprintln!("  script error: {error}");
@@ -469,11 +481,7 @@ impl<D: raw_window_handle::HasDisplayHandle + 'static> ApplicationHandler<UserEv
                 };
                 let document = Rc::new(RefCell::new(std::mem::take(&mut page.loaded.document)));
                 self.events.borrow_mut().clear();
-                self.runtime.set_host(Box::new(DomHost::new(&document, self.events.clone())));
-                self.runtime.define_global("document", Value::Host("document".into()));
-                // Reset the shared allowance for the new document; callbacks
-                // from the previous page are gone (events were cleared above).
-                self.runtime.set_page_budget(PAGE_INSTRUCTION_BUDGET);
+                prepare_document_runtime(&mut self.runtime, document.clone(), self.events.clone());
                 for source in &page.scripts {
                     if let Err(error) = self.runtime.eval(source) {
                         eprintln!("  script error: {error}");
@@ -1042,7 +1050,7 @@ fn filter_list_cache_directory() -> Result<PathBuf, io::Error> {
 mod tests {
     use super::{
         NodeId, Page, content_viewport, copy_scaled_pixels, load_page, load_page_with_policy,
-        prepare_page,
+        prepare_document_runtime, prepare_page,
     };
     use crate::scripting::{DomHost, EventRegistry};
     use bweb_html::{HtmlDocument, LoadedDocument, NodeKind};
@@ -1165,6 +1173,31 @@ mod tests {
         assert!(
             prepared.runtime.page_budget_remaining().expect("active page budget") < after_scripts
         );
+    }
+
+    #[test]
+    fn navigation_prepares_a_fresh_javascript_context() {
+        let old_document = Rc::new(RefCell::new(HtmlDocument::parse("<title>old</title>")));
+        let old_events = Rc::new(RefCell::new(EventRegistry::default()));
+        let mut runtime = Runtime::new();
+        prepare_document_runtime(&mut runtime, old_document.clone(), old_events.clone());
+        runtime
+            .eval("let secret = '0123456789'; function oldHandler() { return 7; }")
+            .expect("old document script");
+        assert!(runtime.eval("secret").is_ok());
+        assert!(runtime.memory_used() > 0);
+
+        // A window navigation reuses the Runtime instance but installs a new
+        // document and host; the old context must not survive it.
+        let new_document = Rc::new(RefCell::new(HtmlDocument::parse("<title>new</title>")));
+        let new_events = Rc::new(RefCell::new(EventRegistry::default()));
+        prepare_document_runtime(&mut runtime, new_document.clone(), new_events.clone());
+
+        assert_eq!(runtime.memory_used(), 0);
+        assert!(runtime.eval("secret").is_err(), "old global survived navigation");
+        assert!(runtime.eval("oldHandler").is_err(), "old function survived navigation");
+        assert_eq!(runtime.eval("1 + 1").expect("built-ins").display(), "2");
+        assert_eq!(runtime.eval("document.title").expect("new host").display(), "new");
     }
 
     #[test]
