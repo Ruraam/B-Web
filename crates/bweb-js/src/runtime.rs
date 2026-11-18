@@ -1,6 +1,10 @@
 //! Evaluator for the B-Web JavaScript subset.
 
-use std::{cell::RefCell, collections::HashMap, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    collections::HashMap,
+    rc::Rc,
+};
 
 use crate::ast::{BinaryOp, Expr, LogicalOp, Stmt, UnaryOp, VarKind};
 
@@ -178,6 +182,9 @@ const INSTRUCTION_BUDGET: u64 = 10_000_000;
 /// callbacks). It complements, rather than replaces, the per-evaluation and
 /// per-event budgets below.
 pub const PAGE_INSTRUCTION_BUDGET: u64 = 10_000_000;
+/// Cumulative token allowance shared by every script parsed for one page. It
+/// bounds total parsing work independently of the instruction budget.
+pub const PAGE_PARSE_TOKEN_BUDGET: usize = 1_000_000;
 /// Smaller budget for interactive event handlers, which run directly on the
 /// window's event loop. Measured at roughly 5 ms in release builds (10M ticks
 /// take ~0.5 s), it keeps a handler within a frame's time slice.
@@ -198,6 +205,9 @@ pub struct Runtime {
     /// Optional remaining instruction allowance shared by all evaluations and
     /// event callbacks of the current page. `None` keeps the legacy behaviour.
     page_budget: Option<u64>,
+    /// Optional remaining token allowance shared by all scripts parsed for the
+    /// current page, including nested template interpolations.
+    page_parse_budget: Option<usize>,
 }
 
 impl Default for Runtime {
@@ -243,25 +253,42 @@ impl Runtime {
             budget: INSTRUCTION_BUDGET,
             call_depth: 0,
             page_budget: None,
+            page_parse_budget: None,
         }
     }
 
-    /// Enables a shared instruction budget for the current page. Each later
-    /// evaluation or event callback draws from it in addition to its own limit.
+    /// Enables the shared per-page budgets. Call this once per document: it
+    /// resets both the instruction and token allowances. Each evaluation or
+    /// event callback then draws from them in addition to its own limit.
     pub fn set_page_budget(&mut self, budget: u64) {
         self.page_budget = Some(budget);
+        self.page_parse_budget = Some(PAGE_PARSE_TOKEN_BUDGET);
     }
 
-    /// Removes the shared page budget, restoring independent per-evaluation
-    /// budgets.
+    /// Removes the shared page budgets, restoring independent per-evaluation
+    /// limits.
     pub fn clear_page_budget(&mut self) {
         self.page_budget = None;
+        self.page_parse_budget = None;
     }
 
-    /// Returns the remaining shared page budget, if one is active.
+    /// Returns the remaining shared page instruction budget, if one is active.
     #[must_use]
     pub const fn page_budget_remaining(&self) -> Option<u64> {
         self.page_budget
+    }
+
+    /// Returns the remaining shared page parse allowance, if one is active.
+    #[must_use]
+    pub const fn page_parse_budget_remaining(&self) -> Option<usize> {
+        self.page_parse_budget
+    }
+
+    /// Overrides the cumulative parse allowance, mainly for tests and callers
+    /// that need a tighter bound than the default page budget.
+    #[cfg(test)]
+    pub(crate) fn set_page_parse_budget(&mut self, budget: usize) {
+        self.page_parse_budget = Some(budget);
     }
 
     /// Reserves up to `limit` instructions from the shared page budget and
@@ -316,8 +343,19 @@ impl Runtime {
 
     /// Parses and executes a source string.
     pub fn eval(&mut self, source: &str) -> Result<Value, JsError> {
-        let statements =
-            crate::parser::parse(source).map_err(|error| JsError { message: error.message })?;
+        // Refuse further parsing as soon as the shared instruction allowance is
+        // gone: parsing itself must not outlive the page budget.
+        if self.page_budget == Some(0) {
+            return Err(JsError { message: "page instruction budget exhausted".into() });
+        }
+        let statements = if let Some(remaining) = self.page_parse_budget {
+            let budget = Rc::new(Cell::new(remaining));
+            let parsed = crate::parser::parse_with_token_budget(source, budget.clone());
+            self.page_parse_budget = Some(budget.get());
+            parsed.map_err(|error| JsError { message: error.message })?
+        } else {
+            crate::parser::parse(source).map_err(|error| JsError { message: error.message })?
+        };
         let granted = self.reserve_budget(INSTRUCTION_BUDGET)?;
         self.budget = granted;
         self.call_depth = 0;
