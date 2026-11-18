@@ -16,7 +16,7 @@ pub use view::{ResizeOutcome, View, ViewBackend, Viewport};
 use std::{collections::HashMap, sync::Arc};
 
 use bweb_css::{ComputedStyle, ComputedStyleMap};
-use bweb_html::{HtmlDocument, Node, NodeId, NodeKind};
+use bweb_html::{HtmlDocument, MAX_DOM_DEPTH, Node, NodeId, NodeKind};
 use bweb_text::Font;
 
 /// A rectangle in CSS logical pixels.
@@ -309,22 +309,47 @@ impl LayoutTree {
             viewport: (width, finite_non_negative(viewport_height)),
         };
         let viewport = Rect { x: 0.0, y: 0.0, width, height: width };
-        let root = layout_node(&context, document.root(), 0.0, 0.0, width, viewport, &mut count)
-            .unwrap_or_else(|| LayoutBox {
-                node: document.root(),
-                display: Display::Block,
-                rect: Rect { x: 0.0, y: 0.0, width, height: 0.0 },
-                flow_rect: Rect { x: 0.0, y: 0.0, width, height: 0.0 },
-                out_of_flow: false,
-                sticky: StickyShift::default(),
-                margin: Edges::default(),
-                padding: Edges::default(),
-                border: Edges::default(),
-                children: Vec::new(),
-                line_boxes: Vec::new(),
-            });
+        // Defensive guard: layout descends the DOM recursively, so refuse to
+        // walk a tree that is deeper than the DOM API allows.
+        let root = if dom_depth_exceeds(document, MAX_DOM_DEPTH) {
+            None
+        } else {
+            layout_node(&context, document.root(), 0.0, 0.0, width, viewport, &mut count)
+        }
+        .unwrap_or_else(|| LayoutBox {
+            node: document.root(),
+            display: Display::Block,
+            rect: Rect { x: 0.0, y: 0.0, width, height: 0.0 },
+            flow_rect: Rect { x: 0.0, y: 0.0, width, height: 0.0 },
+            out_of_flow: false,
+            sticky: StickyShift::default(),
+            margin: Edges::default(),
+            padding: Edges::default(),
+            border: Edges::default(),
+            children: Vec::new(),
+            line_boxes: Vec::new(),
+        });
         Self { root, box_count: count }
     }
+}
+
+/// Returns true when any node in the document is deeper than `limit`.
+fn dom_depth_exceeds(document: &HtmlDocument, limit: usize) -> bool {
+    document.iter().any(|(id, _)| {
+        let mut depth = 0;
+        let mut current = Some(id);
+        while let Some(node) = current.and_then(|id| document.node(id)) {
+            if node.parent().is_none() {
+                return false;
+            }
+            depth += 1;
+            if depth > limit {
+                return true;
+            }
+            current = node.parent();
+        }
+        false
+    })
 }
 
 fn layout_node(
@@ -2095,9 +2120,23 @@ fn finite_non_negative(value: f32) -> f32 {
 mod tests {
     use super::{Display, GeneratedText, ImageSize, LayoutBox, LayoutTree, PseudoContent};
     use bweb_css::{PseudoElement, StyleEngine, Stylesheet};
-    use bweb_html::{HtmlDocument, NodeKind};
+    use bweb_html::{HtmlDocument, MAX_DOM_DEPTH, NodeKind};
     use bweb_text::Font;
     use std::{collections::HashMap, sync::Arc};
+
+    #[test]
+    fn layout_handles_a_dom_chain_at_the_depth_limit() {
+        let mut document = HtmlDocument::parse("<main id='chain'></main>");
+        let mut parent = document.element_by_id("chain").expect("chain");
+        for _ in 0..MAX_DOM_DEPTH - 1 {
+            let child = document.create_element("div");
+            assert!(document.append_child(parent, child));
+            parent = child;
+        }
+        let styles = StyleEngine::new().compute(&document, &[]);
+        let tree = LayoutTree::build(&document, &styles, 800.0);
+        assert!(tree.box_count > 0);
+    }
 
     fn layout(markup: &str, css: &str) -> (HtmlDocument, LayoutTree) {
         let document = HtmlDocument::parse(markup);
