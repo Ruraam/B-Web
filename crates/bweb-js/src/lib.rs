@@ -13,8 +13,8 @@ pub use ast::{BinaryOp, Expr, LogicalOp, Stmt, UnaryOp, VarKind};
 pub use lexer::{LexError, Token, TokenKind, tokenize};
 pub use parser::{ParseError, parse};
 pub use runtime::{
-    Env, Host, JsError, NativeFn, Object, PAGE_INSTRUCTION_BUDGET, PAGE_PARSE_TOKEN_BUDGET,
-    Runtime, Value,
+    Env, Host, JsError, NativeFn, Object, PAGE_INSTRUCTION_BUDGET, PAGE_MEMORY_BUDGET,
+    PAGE_PARSE_TOKEN_BUDGET, Runtime, Value,
 };
 
 /// Explicit status of the JavaScript runtime.
@@ -26,7 +26,7 @@ pub enum RuntimeStatus {
 
 #[cfg(test)]
 mod tests {
-    use super::{PAGE_INSTRUCTION_BUDGET, Runtime, Value};
+    use super::{Host, PAGE_INSTRUCTION_BUDGET, PAGE_MEMORY_BUDGET, Runtime, Value};
 
     #[test]
     fn evaluates_arithmetic_and_variables() {
@@ -267,5 +267,147 @@ mod tests {
         // A second evaluation still has a full budget.
         let value = runtime.eval("1 + 1").expect("script");
         assert_eq!(value.display(), "2");
+    }
+
+    #[test]
+    fn memory_budget_is_active_by_default() {
+        let runtime = Runtime::new();
+        assert_eq!(runtime.memory_budget(), PAGE_MEMORY_BUDGET);
+        assert_eq!(runtime.memory_used(), 0);
+    }
+
+    #[test]
+    fn string_concatenation_is_bounded_by_the_memory_budget() {
+        let mut runtime = Runtime::new();
+        runtime.set_memory_budget(4096);
+        let error = runtime
+            .eval("let s = 'x'; while (true) { s = s + 'x'; }")
+            .expect_err("concatenation must exhaust the memory budget");
+        assert!(error.message.contains("memory budget"), "unexpected error: {}", error.message);
+        assert!(runtime.memory_used() <= 4096);
+    }
+
+    #[test]
+    fn oversized_strings_are_rejected() {
+        let mut runtime = Runtime::new();
+        runtime.set_allocation_limits(32, 100, 100);
+        let error =
+            runtime.eval("'0123456789012345678901234567890123'").expect_err("string too large");
+        assert!(error.message.contains("string length"), "unexpected error: {}", error.message);
+    }
+
+    #[test]
+    fn memory_budget_boundary_allows_scalars_and_rejects_the_next_string() {
+        let mut runtime = Runtime::new();
+        runtime.set_memory_budget(2000);
+        runtime.set_memory_used(2000);
+        // Scalar operations do not allocate and must still work at the limit.
+        assert_eq!(runtime.eval("1 + 1").expect("scalars").display(), "2");
+        let error = runtime.eval("'x'").expect_err("string allocation must fail");
+        assert!(error.message.contains("memory budget"), "unexpected error: {}", error.message);
+    }
+
+    #[test]
+    fn array_length_is_limited() {
+        let mut runtime = Runtime::new();
+        runtime.set_allocation_limits(1_000_000, 3, 100);
+        let error = runtime
+            .eval("let a = []; a.push(1); a.push(2); a.push(3); a.push(4);")
+            .expect_err("array must not grow past the limit");
+        assert!(error.message.contains("array length"), "unexpected error: {}", error.message);
+
+        let mut runtime = Runtime::new();
+        runtime.set_allocation_limits(1_000_000, 3, 100);
+        let error = runtime.eval("[1, 2, 3, 4]").expect_err("literal array too large");
+        assert!(error.message.contains("array length"), "unexpected error: {}", error.message);
+    }
+
+    #[test]
+    fn array_length_assignment_is_bounded() {
+        let mut runtime = Runtime::new();
+        runtime.set_allocation_limits(1_000_000, 5, 100);
+        let error = runtime.eval("let a = []; a.length = 1000000;").expect_err("length too large");
+        assert!(error.message.contains("array length"), "unexpected error: {}", error.message);
+    }
+
+    #[test]
+    fn join_output_is_bounded() {
+        let mut runtime = Runtime::new();
+        runtime.set_allocation_limits(8, 100, 100);
+        let error =
+            runtime.eval("['abcde', 'fghij'].join('')").expect_err("joined string too large");
+        assert!(error.message.contains("string length"), "unexpected error: {}", error.message);
+    }
+
+    #[test]
+    fn object_property_count_is_limited() {
+        let mut runtime = Runtime::new();
+        runtime.set_allocation_limits(1_000_000, 100, 3);
+        let error =
+            runtime.eval("let o = {a: 1, b: 2, c: 3, d: 4};").expect_err("object too large");
+        assert!(error.message.contains("object property"), "unexpected error: {}", error.message);
+
+        let mut runtime = Runtime::new();
+        runtime.set_allocation_limits(1_000_000, 100, 3);
+        let error = runtime
+            .eval("let o = {}; o.a = 1; o.b = 2; o.c = 3; o.d = 4;")
+            .expect_err("assignment must enforce the limit");
+        assert!(error.message.contains("object property"), "unexpected error: {}", error.message);
+    }
+
+    #[test]
+    fn retained_print_output_is_bounded() {
+        let mut runtime = Runtime::new();
+        runtime.set_memory_budget(2048);
+        let error = runtime
+            .eval("while (true) { print('0123456789'); }")
+            .expect_err("print output must exhaust the memory budget");
+        assert!(error.message.contains("memory budget"), "unexpected error: {}", error.message);
+        let retained: usize = runtime.output().iter().map(String::len).sum();
+        assert!(retained <= 2048, "retained output exceeds the budget: {retained}");
+    }
+
+    struct LargeStringHost;
+
+    impl Host for LargeStringHost {
+        fn get(&self, _object: &str, _property: &str) -> Value {
+            Value::String("x".repeat(128))
+        }
+    }
+
+    #[test]
+    fn host_returned_strings_are_charged() {
+        let mut runtime = Runtime::new();
+        runtime.set_allocation_limits(64, 100, 100);
+        runtime.set_host(Box::new(LargeStringHost));
+        runtime.define_global("host", Value::Host("host".into()));
+        let error = runtime.eval("host.value").expect_err("host string too large");
+        assert!(error.message.contains("string length"), "unexpected error: {}", error.message);
+    }
+
+    #[test]
+    fn repeated_function_creation_is_bounded() {
+        let mut runtime = Runtime::new();
+        runtime.set_memory_budget(2000);
+        let error = runtime
+            .eval("while (true) { let f = function() { return 1; }; }")
+            .expect_err("AST copies must exhaust the memory budget");
+        assert!(error.message.contains("memory budget"), "unexpected error: {}", error.message);
+    }
+
+    #[test]
+    fn page_budget_resets_memory_accounting() {
+        let mut runtime = Runtime::new();
+        runtime.set_memory_budget(512);
+        runtime.eval("let s = '0123456789';").expect("first document");
+        let used = runtime.memory_used();
+        assert!(used > 0);
+
+        // Preparing the next document resets usage but keeps the configured
+        // budget, so one page cannot consume the allowance of the next.
+        runtime.set_page_budget(PAGE_INSTRUCTION_BUDGET);
+        assert_eq!(runtime.memory_used(), 0);
+        assert_eq!(runtime.memory_budget(), 512);
+        runtime.eval("let t = '0123456789';").expect("second document");
     }
 }
