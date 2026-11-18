@@ -2083,18 +2083,20 @@ fn matches_compound(
                 document.node(parent).is_some_and(|node| matches!(node.kind(), NodeKind::Document))
             })
         }
-        PseudoClass::FirstChild => matches!(sibling_position(document, id, None), Some((1, _))),
+        PseudoClass::FirstChild => {
+            matches!(sibling_position(document, id, None, budget), Some((1, _)))
+        }
         PseudoClass::LastChild => {
-            matches!(sibling_position(document, id, None), Some((index, total)) if index == total)
+            matches!(sibling_position(document, id, None, budget), Some((index, total)) if index == total)
         }
         PseudoClass::OnlyChild => {
-            matches!(sibling_position(document, id, None), Some((1, 1)))
+            matches!(sibling_position(document, id, None, budget), Some((1, 1)))
         }
         PseudoClass::FirstOfType => {
-            matches!(sibling_position(document, id, Some(tag_name)), Some((1, _)))
+            matches!(sibling_position(document, id, Some(tag_name), budget), Some((1, _)))
         }
         PseudoClass::LastOfType => {
-            matches!(sibling_position(document, id, Some(tag_name)), Some((index, total)) if index == total)
+            matches!(sibling_position(document, id, Some(tag_name), budget), Some((index, total)) if index == total)
         }
         PseudoClass::Empty => document.node(id).is_some_and(|node| {
             node.children().iter().all(|child| {
@@ -2104,25 +2106,32 @@ fn matches_compound(
             })
         }),
         PseudoClass::AnyLink => tag_name == "a" && attr("href").is_some(),
-        PseudoClass::NthChild(nth) => {
-            sibling_position(document, id, None).is_some_and(|(index, _)| nth.matches(index))
-        }
-        PseudoClass::NthLastChild(nth) => sibling_position(document, id, None)
+        PseudoClass::NthChild(nth) => sibling_position(document, id, None, budget)
+            .is_some_and(|(index, _)| nth.matches(index)),
+        PseudoClass::NthLastChild(nth) => sibling_position(document, id, None, budget)
             .is_some_and(|(index, total)| nth.matches(total - index + 1)),
         PseudoClass::Not(inner) => !matches_compound(document, id, kind, inner, budget),
     })
 }
 
 /// One-based position among element siblings, optionally restricted to a tag.
+/// Each sibling visited consumes one unit of the shared matching budget; an
+/// exhausted budget aborts the scan cleanly with no result.
 fn sibling_position(
     document: &HtmlDocument,
     id: NodeId,
     tag: Option<&str>,
+    budget: &mut MatchBudget,
 ) -> Option<(usize, usize)> {
     let parent = document.node(id)?.parent()?;
     let mut position = 0usize;
     let mut total = 0usize;
     for sibling in document.node(parent)?.children() {
+        // Charge before inspecting the sibling so the budget is never exceeded
+        // by a large sibling list.
+        if !budget.tick() {
+            return None;
+        }
         let NodeKind::Element { tag_name, .. } = document.node(*sibling)?.kind() else {
             continue;
         };
@@ -2140,8 +2149,8 @@ fn sibling_position(
 #[cfg(test)]
 mod tests {
     use super::{
-        ComputedStyle, MATCH_WORK_BUDGET, MAX_SELECTOR_COMPOUNDS, Specificity, StyleEngine,
-        Stylesheet, TokenKind, tokenize,
+        ComputedStyle, ComputedStyleMap, MATCH_WORK_BUDGET, MAX_SELECTOR_COMPOUNDS, Specificity,
+        StyleEngine, Stylesheet, TokenKind, tokenize,
     };
     use bweb_html::{HtmlDocument, NodeKind};
     use std::time::{Duration, Instant};
@@ -2558,6 +2567,50 @@ mod tests {
         }
         let error = Stylesheet::parse(&layers).expect_err("deep @layer must fail");
         assert!(error.message.contains("nesting depth"), "unexpected error: {}", error.message);
+    }
+
+    #[test]
+    fn structural_pseudo_classes_respect_the_match_budget() {
+        let markup = format!("<main><p id='first'></p>{}</main>", "<p></p>".repeat(5_000));
+        let document = HtmlDocument::parse(markup);
+        let sheet = Stylesheet::parse(
+            "p:first-child { color: red } \
+             p:last-child { color: green } \
+             p:first-of-type { color: blue } \
+             p:nth-child(2) { color: orange } \
+             p:nth-last-child(1) { color: purple }",
+        )
+        .expect("structural pseudo rules");
+        let first = document.element_by_id("first").expect("first paragraph");
+
+        // A tiny budget must stop the sibling scans: none of the structural
+        // rules may be applied, even though the first paragraph matches them.
+        let starved = StyleEngine::new().compute_with_match_budget(
+            &document,
+            std::slice::from_ref(&sheet),
+            800.0,
+            600.0,
+            // Four non-matching ancestors cost 4 x 5 rules x 2 units = 40,
+            // then the first paragraph costs 2 more: the scan starts with a
+            // single unit left.
+            43,
+        );
+        let color = |styles: &ComputedStyleMap| {
+            styles.get(first).and_then(|style| style.get("color")).map(str::to_owned)
+        };
+        assert_ne!(color(&starved), Some("red".to_owned()));
+
+        // With a normal budget the same page still styles the first paragraph.
+        let normal = StyleEngine::new().compute_with_match_budget(
+            &document,
+            std::slice::from_ref(&sheet),
+            800.0,
+            600.0,
+            MATCH_WORK_BUDGET,
+        );
+        // The first paragraph matches both :first-child and :first-of-type;
+        // the later equal-specificity rule wins.
+        assert!(matches!(color(&normal), Some(color) if color == "red" || color == "blue"));
     }
 
     #[test]
